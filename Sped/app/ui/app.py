@@ -66,6 +66,15 @@ from app.services.analysis_reports import (
     summarize_sale_analysis,
     write_entry_exit_analysis_excel,
 )
+from app.services.adjusted_sped import (
+    filter_detailed_sales,
+    filter_sales,
+    rebuild_detailed_sales_with_override,
+    write_adjusted_sped,
+    write_cfop_1252_1253_excel,
+    write_cst_061_excel,
+    write_excel,
+)
 from app.services.operation_summary import (
     build_c190_rows_from_details,
     build_filtered_apuracao_rows,
@@ -90,15 +99,8 @@ from app.services.legacy_rules import (
     compose_xml_icms_cst_for_sped,
     display_text,
     export_nfce_items_by_ncm,
-    filter_detailed_sales,
-    filter_sales,
     infer_sped_period_label,
     parse_sped_document_date,
-    rebuild_detailed_sales_with_override,
-    write_adjusted_sped,
-    write_cfop_1252_1253_excel,
-    write_cst_061_excel,
-    write_excel,
 )
 from app.services.path_selection import collapse_xml_selection_paths, format_selected_paths, parse_selected_paths
 from app.services.product_import import (
