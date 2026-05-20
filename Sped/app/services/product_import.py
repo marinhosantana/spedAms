@@ -5,9 +5,20 @@ from pathlib import Path
 from typing import Callable, Iterable
 from xml.etree import ElementTree as ET
 
-from app.parsers.sped_parser import first_non_empty, normalize_document_key, parse_decimal
+from app.parsers.sped_parser import (
+    first_non_empty,
+    get_field,
+    normalize_document_key,
+    normalize_sped_line,
+    parse_decimal,
+    parse_rate,
+)
 from app.services.tax_rules import (
+    VALID_PIS_COFINS_CST_AMBOS,
+    VALID_PIS_COFINS_CST_ENTRADA,
+    VALID_PIS_COFINS_CST_SAIDA,
     build_pis_cofins_side_values,
+    normalize_operation_type,
     normalize_tax_code,
     normalize_text,
 )
@@ -288,4 +299,211 @@ def build_import_products_from_xml_sources(
             bucket["import_warnings"].extend(cofins_warnings)
         if progress_callback:
             progress_callback(index, total_files, f"Lendo XMLs... {index}/{total_files}")
+    return list(aggregated.values())
+
+
+def read_sped_contrib_product_rows(sped_path: Path) -> list[dict[str, object]]:
+    return [
+        {
+            "operation_type": str(item.get("operation_type", "")).strip(),
+            "code": str(item.get("code", "")).strip(),
+            "description": str(item.get("description", "")).strip(),
+            "ncm": str(item.get("ncm", "")).strip(),
+            "cest": str(item.get("cest", "")).strip(),
+            "cst_pis": str(item.get("cst_pis", "")).strip(),
+            "aliquota_pis": Decimal(item.get("aliquota_pis", Decimal("0"))),
+            "cst_cofins": str(item.get("cst_cofins", "")).strip(),
+            "aliquota_cofins": Decimal(item.get("aliquota_cofins", Decimal("0"))),
+        }
+        for item in read_sped_contrib_detailed_rows(sped_path)
+    ]
+
+def read_sped_contrib_detailed_rows(sped_path: Path) -> list[dict[str, object]]:
+    products: dict[str, dict[str, str]] = {}
+    participants: dict[str, dict[str, str]] = {}
+    detailed_rows: list[dict[str, object]] = []
+    current_operation = ""
+    current_document: dict[str, str] = {}
+
+    with sped_path.open("r", encoding="latin-1") as sped_file:
+        for raw_line in sped_file:
+            if not raw_line.startswith("|"):
+                continue
+            fields = normalize_sped_line(raw_line)
+            register = get_field(fields, 1)
+
+            if register == "0200":
+                code = get_field(fields, 2)
+                products[code] = {
+                    "description": get_field(fields, 3),
+                    "ncm": get_field(fields, 8),
+                    "cest": get_field(fields, 13),
+                }
+                continue
+
+            if register == "0150":
+                participant_code = get_field(fields, 2)
+                participants[participant_code] = {
+                    "name": get_field(fields, 3),
+                    "tax_id": first_non_empty(get_field(fields, 5), get_field(fields, 6)),
+                }
+                continue
+
+            if register == "C100":
+                ind_oper = get_field(fields, 2)
+                current_operation = "Entrada" if ind_oper == "0" else "Saida" if ind_oper == "1" else ""
+                participant_code = get_field(fields, 4)
+                participant = participants.get(participant_code, {})
+                current_document = {
+                    "document_number": get_field(fields, 8),
+                    "document_key": get_field(fields, 9),
+                    "document_date": first_non_empty(get_field(fields, 10), get_field(fields, 11)),
+                    "document_series": "",
+                    "document_model": get_field(fields, 5),
+                    "participant_code": participant_code,
+                    "participant_name": participant.get("name", ""),
+                    "participant_tax_id": participant.get("tax_id", ""),
+                }
+                continue
+
+            if register != "C170":
+                continue
+
+            code = get_field(fields, 3)
+            product_meta = products.get(code, {})
+            detailed_rows.append(
+                {
+                    "operation_type": current_operation,
+                    "document_number": current_document.get("document_number", ""),
+                    "document_key": current_document.get("document_key", ""),
+                    "document_date": current_document.get("document_date", ""),
+                    "document_series": current_document.get("document_series", ""),
+                    "document_model": current_document.get("document_model", ""),
+                    "participant_code": current_document.get("participant_code", ""),
+                    "participant_name": current_document.get("participant_name", ""),
+                    "participant_tax_id": current_document.get("participant_tax_id", ""),
+                    "item_number": get_field(fields, 2),
+                    "code": code,
+                    "description": product_meta.get("description", ""),
+                    "ncm": product_meta.get("ncm", ""),
+                    "cest": product_meta.get("cest", ""),
+                    "cfop": get_field(fields, 11),
+                    "quantity": parse_decimal(get_field(fields, 5)),
+                    "sale_value": parse_decimal(get_field(fields, 7)),
+                    "cst_pis": get_field(fields, 25),
+                    "base_pis": parse_decimal(get_field(fields, 26)),
+                    "aliquota_pis": parse_rate(get_field(fields, 27)) or Decimal("0"),
+                    "pis_value": parse_decimal(get_field(fields, 30)),
+                    "cst_cofins": get_field(fields, 31),
+                    "base_cofins": parse_decimal(get_field(fields, 32)),
+                    "aliquota_cofins": parse_rate(get_field(fields, 33)) or Decimal("0"),
+                    "cofins_value": parse_decimal(get_field(fields, 36)),
+                }
+            )
+    return detailed_rows
+
+def summarize_pis_cofins_analysis(items: list[dict[str, object]], operation_type: str) -> dict[str, object]:
+    cfops = sorted({str(item.get("cfop", "")).strip() for item in items if str(item.get("cfop", "")).strip()})
+    csts_pis = sorted({normalize_tax_code(item.get("cst_pis", ""), 2) for item in items if str(item.get("cst_pis", "")).strip()})
+    csts_cofins = sorted({normalize_tax_code(item.get("cst_cofins", ""), 2) for item in items if str(item.get("cst_cofins", "")).strip()})
+    total_pis = sum((Decimal(item.get("pis_value", Decimal("0"))) for item in items), Decimal("0"))
+    total_cofins = sum((Decimal(item.get("cofins_value", Decimal("0"))) for item in items), Decimal("0"))
+
+    missing_status = "Sem entrada" if normalize_operation_type(operation_type) == "Entrada" else "Sem saida"
+    zero_status = "Sem credito" if normalize_operation_type(operation_type) == "Entrada" else "Sem debito"
+    status_parts: list[str] = []
+    if not items:
+        status_parts.append(missing_status)
+    else:
+        if not cfops:
+            status_parts.append("Erro: CFOP vazio")
+        elif len(cfops) > 1:
+            status_parts.append("Erro: multiplos CFOPs")
+        if not csts_pis:
+            status_parts.append("Erro: CST PIS vazio")
+        elif len(csts_pis) > 1:
+            status_parts.append("Erro: multiplos CSTs PIS")
+        if not csts_cofins:
+            status_parts.append("Erro: CST COFINS vazio")
+        elif len(csts_cofins) > 1:
+            status_parts.append("Erro: multiplos CSTs COFINS")
+        if total_pis == Decimal("0") and total_cofins == Decimal("0"):
+            status_parts.append(zero_status)
+        if not status_parts:
+            status_parts.append("Ok")
+
+    return {
+        "cfop": " | ".join(cfops),
+        "cst_pis": " | ".join(csts_pis),
+        "cst_cofins": " | ".join(csts_cofins),
+        "pis_value": total_pis,
+        "cofins_value": total_cofins,
+        "status": " | ".join(status_parts),
+    }
+
+def build_import_products_from_sped_contrib_sources(
+    sped_paths: list[Path],
+    progress_callback: Callable[[int, int, str], None] | None = None,
+) -> list[dict[str, object]]:
+    aggregated: dict[str, dict[str, object]] = {}
+    unique_paths = [path for path in dict.fromkeys(path for path in sped_paths if path.exists())]
+    total_paths = max(len(unique_paths), 1)
+    for index, sped_path in enumerate(unique_paths, start=1):
+        for item in read_sped_contrib_product_rows(sped_path):
+            codigo_origem = str(item.get("code", "")).strip()
+            descricao = str(item.get("description", "")).strip()
+            ncm = str(item.get("ncm", "")).strip()
+            operation_type = normalize_operation_type(str(item.get("operation_type", "")))
+            bucket_key = codigo_origem or f"{normalize_text(descricao)}|{normalize_ncm(ncm)}"
+            bucket = aggregated.setdefault(
+                bucket_key,
+                {
+                    "codigo_origem": codigo_origem,
+                    "descricao": descricao,
+                    "ncm": ncm,
+                    "unidade": "UN",
+                    "cst_icms_entrada": "",
+                    "cst_icms_saida": "",
+                    "icms_entrada": Decimal("0"),
+                    "icms_saida": Decimal("0"),
+                    "cst_pis_entrada": "",
+                    "cst_pis_saida": "",
+                    "pis_entrada": Decimal("0"),
+                    "pis_saida": Decimal("0"),
+                    "cst_cofins_entrada": "",
+                    "cst_cofins_saida": "",
+                    "cofins_entrada": Decimal("0"),
+                    "cofins_saida": Decimal("0"),
+                    "ativo": 1,
+                },
+            )
+            if not bucket["descricao"] and descricao:
+                bucket["descricao"] = descricao
+            if not bucket["ncm"] and ncm:
+                bucket["ncm"] = ncm
+            cst_pis = normalize_tax_code(item.get("cst_pis", ""), 2)
+            cst_cofins = normalize_tax_code(item.get("cst_cofins", ""), 2)
+            aliquota_pis = Decimal(item.get("aliquota_pis", Decimal("0")) or Decimal("0"))
+            aliquota_cofins = Decimal(item.get("aliquota_cofins", Decimal("0")) or Decimal("0"))
+            if operation_type == "Entrada":
+                if not bucket["cst_pis_entrada"] and (cst_pis in VALID_PIS_COFINS_CST_ENTRADA or cst_pis in VALID_PIS_COFINS_CST_AMBOS):
+                    bucket["cst_pis_entrada"] = cst_pis
+                if not bucket["cst_cofins_entrada"] and (cst_cofins in VALID_PIS_COFINS_CST_ENTRADA or cst_cofins in VALID_PIS_COFINS_CST_AMBOS):
+                    bucket["cst_cofins_entrada"] = cst_cofins
+                bucket["pis_entrada"] = max(Decimal(bucket["pis_entrada"]), aliquota_pis)
+                bucket["cofins_entrada"] = max(Decimal(bucket["cofins_entrada"]), aliquota_cofins)
+            elif operation_type == "Saida":
+                if not bucket["cst_pis_saida"] and (cst_pis in VALID_PIS_COFINS_CST_SAIDA or cst_pis in VALID_PIS_COFINS_CST_AMBOS):
+                    bucket["cst_pis_saida"] = cst_pis
+                if not bucket["cst_cofins_saida"] and (cst_cofins in VALID_PIS_COFINS_CST_SAIDA or cst_cofins in VALID_PIS_COFINS_CST_AMBOS):
+                    bucket["cst_cofins_saida"] = cst_cofins
+                bucket["pis_saida"] = max(Decimal(bucket["pis_saida"]), aliquota_pis)
+                bucket["cofins_saida"] = max(Decimal(bucket["cofins_saida"]), aliquota_cofins)
+            warnings = bucket.setdefault("import_warnings", [])
+            if cst_pis and ((operation_type == "Entrada" and cst_pis not in VALID_PIS_COFINS_CST_ENTRADA and cst_pis not in VALID_PIS_COFINS_CST_AMBOS) or (operation_type == "Saida" and cst_pis not in VALID_PIS_COFINS_CST_SAIDA and cst_pis not in VALID_PIS_COFINS_CST_AMBOS)):
+                warnings.append(f"CST PIS {cst_pis} invalido para {operation_type.lower()}.")
+            if cst_cofins and ((operation_type == "Entrada" and cst_cofins not in VALID_PIS_COFINS_CST_ENTRADA and cst_cofins not in VALID_PIS_COFINS_CST_AMBOS) or (operation_type == "Saida" and cst_cofins not in VALID_PIS_COFINS_CST_SAIDA and cst_cofins not in VALID_PIS_COFINS_CST_AMBOS)):
+                warnings.append(f"CST COFINS {cst_cofins} invalido para {operation_type.lower()}.")
+        if progress_callback:
+            progress_callback(index, total_paths, f"Lendo SPED PIS/COFINS... {index}/{total_paths}")
     return list(aggregated.values())
