@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-# Transitional import while business rules are still being extracted from Revisor.py.
-from Revisor import *  # noqa: F403
+# Transitional import while rules are being split into focused service modules.
+from app.services.legacy_rules import *  # noqa: F403
 
 class SpedApp:
     def __init__(self, root: Tk) -> None:
