@@ -6,7 +6,7 @@ from decimal import Decimal
 from pathlib import Path
 
 from app.parsers.sped_parser import get_field, normalize_sped_line
-from app.services.tax_rules import normalize_operation_type
+from app.services.tax_rules import normalize_operation_type, normalize_text
 
 def filter_details_by_operation_scope(
     detailed_sales: list[dict[str, object]],
@@ -90,3 +90,11 @@ def calculate_abc_curve_labels(
     for code in totals_by_code:
         curve_labels.setdefault(str(code).strip(), "C")
     return curve_labels
+
+def period_label_sort_key(value: object) -> tuple[int, int, str]:
+    text = str(value or "").strip()
+    match = re.fullmatch(r"(\d{2})/(\d{4})", text)
+    if match:
+        return (int(match.group(2)), int(match.group(1)), text)
+    return (9999, 99, normalize_text(text))
+
