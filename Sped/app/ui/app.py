@@ -52,8 +52,6 @@ from app.services.analysis_reports import (
     build_credit_diagnostic_period_comparison_dataset,
     build_credit_diagnostic_period_detail_comparison_dataset,
     build_credit_diagnostic_product_sheet_payload,
-    build_entry_exit_analysis_rows,
-    build_entry_exit_footer_rows,
     build_entry_period_comparison_rows,
     build_monthly_aliquota_divergence_rows,
     build_multi_sped_entry_analysis,
@@ -64,6 +62,10 @@ from app.services.analysis_reports import (
     period_label_sort_key,
     summarize_entry_analysis,
     summarize_sale_analysis,
+)
+from app.services.entry_exit_reports import (
+    build_entry_exit_analysis_rows,
+    build_entry_exit_footer_rows,
     write_entry_exit_analysis_excel,
 )
 from app.services.analysis_utils import calculate_abc_curve_labels, infer_sped_period_label, parse_sped_document_date
