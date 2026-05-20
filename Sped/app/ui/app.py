@@ -33,6 +33,7 @@ from app.parsers.sped_parser import (
     read_sped_e110_summary,
     read_sped_summary_register_rows,
 )
+from app.parsers.compare_sped_reader import extract_company_tax_id_from_sped
 from app.repositories.mysql_cadastro import MysqlCadastroRepository
 from app.services.compare_sped_launcher import launch_compare_invoice_in_sped, launch_compare_invoices_in_sped
 from app.services.compare_matching import compare_decimal_value
@@ -74,7 +75,6 @@ from app.services.legacy_rules import (
     display_text,
     enrich_details_with_note_snapshots,
     export_nfce_items_by_ncm,
-    extract_company_tax_id_from_sped,
     filter_c190_rows,
     filter_detailed_sales,
     filter_sales,
