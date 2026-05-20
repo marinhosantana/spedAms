@@ -66,6 +66,7 @@ from app.services.analysis_reports import (
     summarize_sale_analysis,
     write_entry_exit_analysis_excel,
 )
+from app.services.analysis_utils import calculate_abc_curve_labels, infer_sped_period_label, parse_sped_document_date
 from app.services.adjusted_sped import (
     filter_detailed_sales,
     filter_sales,
@@ -92,15 +93,12 @@ from app.services.operation_summary import (
     get_operation_base_difference,
     read_detailed_product_excel,
 )
-from app.services.legacy_rules import (
+from app.services.xml_reconciliation import (
     build_pis_cofins_period_comparison_rows,
     build_xml_fiscal_item_index,
-    calculate_abc_curve_labels,
     compose_xml_icms_cst_for_sped,
     display_text,
     export_nfce_items_by_ncm,
-    infer_sped_period_label,
-    parse_sped_document_date,
 )
 from app.services.path_selection import collapse_xml_selection_paths, format_selected_paths, parse_selected_paths
 from app.services.product_import import (
