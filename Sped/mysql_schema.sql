@@ -1,0 +1,41 @@
+CREATE TABLE IF NOT EXISTS empresas (
+    id INT NOT NULL AUTO_INCREMENT PRIMARY KEY,
+    razao_social VARCHAR(255) NOT NULL,
+    nome_fantasia VARCHAR(255) NOT NULL DEFAULT '',
+    cnpj VARCHAR(18) NOT NULL,
+    inscricao_estadual VARCHAR(30) NOT NULL DEFAULT '',
+    ativo TINYINT(1) NOT NULL DEFAULT 1,
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    UNIQUE KEY uq_empresas_cnpj (cnpj)
+);
+
+CREATE TABLE IF NOT EXISTS produtos_empresa (
+    id INT NOT NULL AUTO_INCREMENT PRIMARY KEY,
+    empresa_id INT NOT NULL,
+    codigo VARCHAR(60) NOT NULL,
+    codigo_origem VARCHAR(80) NOT NULL DEFAULT '',
+    descricao VARCHAR(255) NOT NULL,
+    ncm VARCHAR(20) NOT NULL DEFAULT '',
+    unidade VARCHAR(10) NOT NULL DEFAULT 'UN',
+    cst_icms_entrada VARCHAR(4) NOT NULL DEFAULT '',
+    cst_icms_saida VARCHAR(4) NOT NULL DEFAULT '',
+    cst_pis_entrada VARCHAR(4) NOT NULL DEFAULT '',
+    cst_pis_saida VARCHAR(4) NOT NULL DEFAULT '',
+    cst_cofins_entrada VARCHAR(4) NOT NULL DEFAULT '',
+    cst_cofins_saida VARCHAR(4) NOT NULL DEFAULT '',
+    tipo_produto VARCHAR(30) NOT NULL DEFAULT 'Revenda',
+    icms_entrada DECIMAL(10,4) NOT NULL DEFAULT 0.0000,
+    icms_saida DECIMAL(10,4) NOT NULL DEFAULT 0.0000,
+    pis_entrada DECIMAL(10,4) NOT NULL DEFAULT 0.0000,
+    pis_saida DECIMAL(10,4) NOT NULL DEFAULT 0.0000,
+    cofins_entrada DECIMAL(10,4) NOT NULL DEFAULT 0.0000,
+    cofins_saida DECIMAL(10,4) NOT NULL DEFAULT 0.0000,
+    ativo TINYINT(1) NOT NULL DEFAULT 1,
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    CONSTRAINT fk_produtos_empresa_empresa FOREIGN KEY (empresa_id) REFERENCES empresas (id),
+    UNIQUE KEY uq_produtos_empresa_codigo (empresa_id, codigo),
+    KEY idx_produtos_empresa_descricao (descricao),
+    KEY idx_produtos_empresa_ncm (ncm)
+);

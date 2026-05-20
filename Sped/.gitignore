@@ -1,0 +1,14 @@
+*.log
+*.txt
+*.spec
+*.json
+*.pyc
+__pycache__/
+.idea/
+
+
+/_tmp_*
+/build
+/dist
+/mysql_config.json
+/Guaporé - listagem de NF de saídas - abril 2026.xlt (1).xls
