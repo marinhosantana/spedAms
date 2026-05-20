@@ -64,7 +64,6 @@ from app.services.legacy_rules import (
     build_xml_entry_credit_rows,
     build_xml_fiscal_item_index,
     calculate_abc_curve_labels,
-    collapse_xml_selection_paths,
     combine_imported_data,
     compare_decimal_value,
     compare_sped_with_sheet,
@@ -79,13 +78,11 @@ from app.services.legacy_rules import (
     filter_detailed_sales,
     filter_sales,
     filter_xml_summary_rows_by_scope,
-    format_selected_paths,
     get_launch_total_operation_value,
     get_operation_base_difference,
     infer_sped_period_label,
     merge_credit_diagnostic_detail_rows,
     normalize_compare_operation_scope,
-    parse_selected_paths,
     parse_sped_document_date,
     period_label_sort_key,
     read_detailed_product_excel,
@@ -98,6 +95,7 @@ from app.services.legacy_rules import (
     write_entry_exit_analysis_excel,
     write_excel,
 )
+from app.services.path_selection import collapse_xml_selection_paths, format_selected_paths, parse_selected_paths
 from app.services.product_import import (
     build_import_products_from_consolidated_sources,
     build_import_products_from_sped_0200,
