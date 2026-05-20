@@ -1,7 +1,133 @@
 from __future__ import annotations
 
-# Transitional import while rules are being split into focused service modules.
-from app.services.legacy_rules import *  # noqa: F403
+import datetime as dt
+import json
+import os
+import re
+import sys
+import threading
+import tkinter as tk
+from collections import defaultdict
+from decimal import Decimal
+from pathlib import Path
+from tkinter import BOTH, END, LEFT, RIGHT, BooleanVar, Canvas, Menu, StringVar, Text, Tk, Toplevel
+from tkinter import filedialog, messagebox, ttk
+
+from app.config import APP_DEFAULT_CONFIG, COMPARE_MARK_CHECKED, COMPARE_MARK_UNCHECKED
+from app.exporters.rules_report_exporter import build_rule_report_entries, write_rules_report_docx
+from app.exporters.workbook_exporter import (
+    serialize_value_for_clipboard,
+    write_monthly_colored_excel_workbook_with_sheets,
+    write_simple_csv_file,
+    write_simple_excel_workbook,
+)
+from app.models import CompareInvestigationMatchedRow
+from app.parsers.compare_xml import collect_compare_ignored_xml_rows, compare_format_float, parse_compare_xml_file
+from app.parsers.excel_parser import has_active_item_filters, parse_filter_values, read_filter_descriptions_file
+from app.parsers.sped_fiscal_parser import read_sped_file
+from app.parsers.sped_parser import (
+    normalize_document_key,
+    parse_decimal,
+    parse_rate,
+    read_combined_e110_summary,
+    read_sped_e110_summary,
+    read_sped_summary_register_rows,
+)
+from app.repositories.mysql_cadastro import MysqlCadastroRepository
+from app.services.compare_sped_launcher import launch_compare_invoice_in_sped, launch_compare_invoices_in_sped
+from app.services.legacy_rules import (
+    build_c190_rows_from_details,
+    build_contrib_operation_launch_details_map,
+    build_contrib_operation_summary_rows,
+    build_contrib_product_monthly_linear_dataset,
+    build_credit_diagnostic_datasets,
+    build_credit_diagnostic_period_comparison_dataset,
+    build_credit_diagnostic_period_detail_comparison_dataset,
+    build_credit_diagnostic_product_sheet_payload,
+    build_entry_exit_analysis_rows,
+    build_entry_exit_footer_rows,
+    build_entry_period_comparison_rows,
+    build_filtered_apuracao_rows,
+    build_monthly_aliquota_divergence_rows,
+    build_multi_sped_entry_analysis,
+    build_operation_launch_details_map,
+    build_operation_summary_rows,
+    build_operation_summary_rows_from_c190,
+    build_pis_cofins_period_comparison_rows,
+    build_product_monthly_linear_dataset,
+    build_reduction_launch_rows,
+    build_reduction_rows_from_c190,
+    build_sale_period_comparison_rows,
+    build_summary_operation_totals_by_period,
+    build_synthetic_launch_details_from_c190,
+    build_xml_cfop_summary_rows,
+    build_xml_entry_credit_rows,
+    build_xml_fiscal_item_index,
+    calculate_abc_curve_labels,
+    collapse_xml_selection_paths,
+    combine_imported_data,
+    compare_decimal_value,
+    compare_sped_with_sheet,
+    compare_sped_with_xml_folder,
+    compose_xml_icms_cst_for_sped,
+    describe_operation_base_difference,
+    display_text,
+    enrich_details_with_note_snapshots,
+    export_nfce_items_by_ncm,
+    extract_company_tax_id_from_sped,
+    filter_c190_rows,
+    filter_detailed_sales,
+    filter_sales,
+    filter_xml_summary_rows_by_scope,
+    format_selected_paths,
+    get_launch_total_operation_value,
+    get_operation_base_difference,
+    infer_sped_period_label,
+    merge_credit_diagnostic_detail_rows,
+    normalize_compare_operation_scope,
+    parse_selected_paths,
+    parse_sped_document_date,
+    period_label_sort_key,
+    read_detailed_product_excel,
+    rebuild_detailed_sales_with_override,
+    summarize_entry_analysis,
+    summarize_sale_analysis,
+    write_adjusted_sped,
+    write_cfop_1252_1253_excel,
+    write_cst_061_excel,
+    write_entry_exit_analysis_excel,
+    write_excel,
+)
+from app.services.product_import import (
+    build_import_products_from_consolidated_sources,
+    build_import_products_from_sped_0200,
+    build_import_products_from_xml_sources,
+    build_product_origin_candidates_from_sped_file,
+    build_product_origin_candidates_from_xml_sources,
+    format_cest_values,
+    normalize_ncm,
+)
+from app.services.runtime_rules import (
+    DEFAULT_ICMS_RULE_PROFILES,
+    apply_sped_icms_consistency_rules,
+    extract_tax_id_from_document_key,
+    get_first_matching_icms_rule,
+    has_configured_icms_rule,
+    parse_replacement_value,
+    parse_runtime_rule_lines,
+    runtime_rule_summary,
+)
+from app.services.tax_rules import (
+    compute_display_icms_rate,
+    extract_effective_icms_rate,
+    extract_representative_icms_rate,
+    format_decimal_sped,
+    has_icms_reduction,
+    normalize_cst_icms_for_sped,
+    normalize_operation_type,
+    normalize_tax_code,
+    normalize_text,
+)
 
 class SpedApp:
     def __init__(self, root: Tk) -> None:
