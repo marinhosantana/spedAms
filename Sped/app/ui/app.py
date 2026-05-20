@@ -38,6 +38,12 @@ from app.repositories.mysql_cadastro import MysqlCadastroRepository
 from app.services.compare_sped_launcher import launch_compare_invoice_in_sped, launch_compare_invoices_in_sped
 from app.services.compare_matching import compare_decimal_value
 from app.services.compare_operations import filter_xml_summary_rows_by_scope, normalize_compare_operation_scope
+from app.services.compare_workflows import (
+    build_xml_cfop_summary_rows,
+    build_xml_entry_credit_rows,
+    compare_sped_with_sheet,
+    compare_sped_with_xml_folder,
+)
 from app.services.legacy_rules import (
     build_c190_rows_from_details,
     build_contrib_operation_launch_details_map,
@@ -63,13 +69,9 @@ from app.services.legacy_rules import (
     build_sale_period_comparison_rows,
     build_summary_operation_totals_by_period,
     build_synthetic_launch_details_from_c190,
-    build_xml_cfop_summary_rows,
-    build_xml_entry_credit_rows,
     build_xml_fiscal_item_index,
     calculate_abc_curve_labels,
     combine_imported_data,
-    compare_sped_with_sheet,
-    compare_sped_with_xml_folder,
     compose_xml_icms_cst_for_sped,
     describe_operation_base_difference,
     display_text,
