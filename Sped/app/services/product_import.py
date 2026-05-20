@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import Callable, Iterable
 from xml.etree import ElementTree as ET
 
+from app.parsers.sped_fiscal_parser import read_sped_file
 from app.parsers.sped_parser import (
     first_non_empty,
     get_field,
@@ -508,11 +509,6 @@ def build_import_products_from_sped_contrib_sources(
             progress_callback(index, total_paths, f"Lendo SPED PIS/COFINS... {index}/{total_paths}")
     return list(aggregated.values())
 
-
-def read_sped_file(sped_path: Path):
-    from app.services.legacy_rules import read_sped_file as legacy_read_sped_file
-
-    return legacy_read_sped_file(sped_path)
 
 
 def build_product_origin_candidates_from_sped_file(sped_path: Path) -> list[dict[str, str]]:
