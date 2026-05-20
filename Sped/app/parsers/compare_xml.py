@@ -6,6 +6,7 @@ from xml.etree import ElementTree as ET
 
 from app.config import COMPARE_KEY_PATTERN, COMPARE_NS_NFE, COMPARE_NS_NFSE
 from app.models import CompareXmlInvoice, CompareXmlItem
+from app.services.tax_rules import normalize_text
 
 
 def compare_clean(value: object) -> str:
