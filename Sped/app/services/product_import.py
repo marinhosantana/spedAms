@@ -507,3 +507,284 @@ def build_import_products_from_sped_contrib_sources(
         if progress_callback:
             progress_callback(index, total_paths, f"Lendo SPED PIS/COFINS... {index}/{total_paths}")
     return list(aggregated.values())
+
+
+def read_sped_file(sped_path: Path):
+    from app.services.legacy_rules import read_sped_file as legacy_read_sped_file
+
+    return legacy_read_sped_file(sped_path)
+
+
+def build_product_origin_candidates_from_sped_file(sped_path: Path) -> list[dict[str, str]]:
+    candidates: list[dict[str, str]] = []
+    try:
+        products, _sales_rows, detailed_rows, _c190_rows, _c190_product_rows = read_sped_file(sped_path)
+    except Exception:
+        return candidates
+    seen_codes: set[str] = set()
+    for product in products:
+        code = str(product.code).strip()
+        if not code or code in seen_codes:
+            continue
+        seen_codes.add(code)
+        candidates.append(
+            {
+                "origin_code": code,
+                "code": code,
+                "ean": "",
+                "description": str(product.description).strip(),
+                "ncm": str(product.ncm).strip(),
+            }
+        )
+    for item in detailed_rows:
+        code = str(item.get("code", "")).strip()
+        if not code or code in seen_codes:
+            continue
+        seen_codes.add(code)
+        candidates.append(
+            {
+                "origin_code": code,
+                "code": code,
+                "ean": "",
+                "description": str(item.get("description", "")).strip(),
+                "ncm": str(item.get("ncm", "")).strip(),
+            }
+        )
+    return candidates
+
+
+def build_import_products_from_sped_0200(
+    sped_path: Path,
+    progress_callback: Callable[[int, int, str], None] | None = None,
+) -> list[dict[str, object]]:
+    products, _sales_rows, _detailed_rows, _c190_rows, _c190_product_rows = read_sped_file(sped_path)
+    imported_products: list[dict[str, object]] = []
+    total_products = max(len(products), 1)
+    for index, product in enumerate(products, start=1):
+        imported_products.append(
+            {
+                "codigo_origem": str(product.code).strip(),
+                "descricao": str(product.description).strip(),
+                "ncm": str(product.ncm).strip(),
+                "unidade": "UN",
+                "cst_icms_entrada": "",
+                "cst_icms_saida": "",
+                "icms_entrada": product.icms_rate if isinstance(product.icms_rate, Decimal) else Decimal("0"),
+                "icms_saida": product.icms_rate if isinstance(product.icms_rate, Decimal) else Decimal("0"),
+                "cst_pis_entrada": "",
+                "cst_pis_saida": "",
+                "pis_entrada": Decimal("0"),
+                "pis_saida": Decimal("0"),
+                "cst_cofins_entrada": "",
+                "cst_cofins_saida": "",
+                "cofins_entrada": Decimal("0"),
+                "cofins_saida": Decimal("0"),
+                "ativo": 1,
+            }
+        )
+        if progress_callback:
+            progress_callback(index, total_products, f"Lendo SPED 0200... {index}/{total_products}")
+    return imported_products
+
+def build_import_products_from_sped_fiscal_sources(
+    sped_paths: list[Path],
+    progress_callback: Callable[[int, int, str], None] | None = None,
+) -> list[dict[str, object]]:
+    aggregated: dict[str, dict[str, object]] = {}
+    unique_paths = [path for path in dict.fromkeys(path for path in sped_paths if path.exists())]
+    total_paths = max(len(unique_paths), 1)
+    for index, sped_path in enumerate(unique_paths, start=1):
+        products, _sales_rows, detailed_rows, _c190_rows, _c190_product_rows = read_sped_file(sped_path)
+        for product in products:
+            codigo_origem = str(product.code).strip()
+            descricao = str(product.description).strip()
+            ncm = str(product.ncm).strip()
+            bucket_key = codigo_origem or f"{normalize_text(descricao)}|{normalize_ncm(ncm)}"
+            bucket = aggregated.setdefault(
+                bucket_key,
+                {
+                    "codigo_origem": codigo_origem,
+                    "descricao": descricao,
+                    "ncm": ncm,
+                    "unidade": "UN",
+                    "cst_icms_entrada": normalize_tax_code(product.cst_icms, 3),
+                    "cst_icms_saida": normalize_tax_code(product.cst_icms, 3),
+                    "icms_entrada": Decimal(product.icms_rate or Decimal("0")),
+                    "icms_saida": Decimal(product.icms_rate or Decimal("0")),
+                    "cst_pis_entrada": "",
+                    "cst_pis_saida": "",
+                    "pis_entrada": Decimal("0"),
+                    "pis_saida": Decimal("0"),
+                    "cst_cofins_entrada": "",
+                    "cst_cofins_saida": "",
+                    "cofins_entrada": Decimal("0"),
+                    "cofins_saida": Decimal("0"),
+                    "ativo": 1,
+                },
+            )
+            if not bucket["descricao"] and descricao:
+                bucket["descricao"] = descricao
+            if not bucket["ncm"] and ncm:
+                bucket["ncm"] = ncm
+
+        for item in detailed_rows:
+            codigo_origem = str(item.get("code", "")).strip()
+            descricao = str(item.get("description", "")).strip()
+            ncm = str(item.get("ncm", "")).strip()
+            operation_type = normalize_operation_type(str(item.get("operation_type", "")))
+            bucket_key = codigo_origem or f"{normalize_text(descricao)}|{normalize_ncm(ncm)}"
+            bucket = aggregated.setdefault(
+                bucket_key,
+                {
+                    "codigo_origem": codigo_origem,
+                    "descricao": descricao,
+                    "ncm": ncm,
+                    "unidade": "UN",
+                    "cst_icms_entrada": "",
+                    "cst_icms_saida": "",
+                    "icms_entrada": Decimal("0"),
+                    "icms_saida": Decimal("0"),
+                    "cst_pis_entrada": "",
+                    "cst_pis_saida": "",
+                    "pis_entrada": Decimal("0"),
+                    "pis_saida": Decimal("0"),
+                    "cst_cofins_entrada": "",
+                    "cst_cofins_saida": "",
+                    "cofins_entrada": Decimal("0"),
+                    "cofins_saida": Decimal("0"),
+                    "ativo": 1,
+                },
+            )
+            if not bucket["descricao"] and descricao:
+                bucket["descricao"] = descricao
+            if not bucket["ncm"] and ncm:
+                bucket["ncm"] = ncm
+            cst_icms = normalize_tax_code(item.get("cst_icms", ""), 3)
+            icms_rate = Decimal(item.get("icms_rate", Decimal("0")) or Decimal("0"))
+            if operation_type == "Entrada":
+                if not bucket["cst_icms_entrada"] and cst_icms:
+                    bucket["cst_icms_entrada"] = cst_icms
+                bucket["icms_entrada"] = max(Decimal(bucket["icms_entrada"]), icms_rate)
+            elif operation_type == "Saida":
+                if not bucket["cst_icms_saida"] and cst_icms:
+                    bucket["cst_icms_saida"] = cst_icms
+                bucket["icms_saida"] = max(Decimal(bucket["icms_saida"]), icms_rate)
+        if progress_callback:
+            progress_callback(index, total_paths, f"Lendo SPED Fiscal... {index}/{total_paths}")
+    return list(aggregated.values())
+
+def build_import_products_from_consolidated_sources(
+    xml_sources: list[Path],
+    sped_fiscal_paths: list[Path],
+    sped_contrib_paths: list[Path],
+    progress_callback: Callable[[int, int, str], None] | None = None,
+) -> list[dict[str, object]]:
+    fiscal_rows = build_import_products_from_sped_fiscal_sources(sped_fiscal_paths, progress_callback=progress_callback) if sped_fiscal_paths else []
+    contrib_rows = build_import_products_from_sped_contrib_sources(sped_contrib_paths, progress_callback=progress_callback) if sped_contrib_paths else []
+    xml_rows = build_import_products_from_xml_sources(xml_sources, progress_callback=progress_callback) if xml_sources else []
+
+    if not fiscal_rows and not contrib_rows and not xml_rows:
+        return []
+
+    consolidated: dict[str, dict[str, object]] = {}
+
+    def get_bucket_key(row: dict[str, object]) -> str:
+        codigo_origem = str(row.get("codigo_origem", "")).strip()
+        descricao = str(row.get("descricao", "")).strip()
+        ncm = str(row.get("ncm", "")).strip()
+        return codigo_origem or f"{normalize_text(descricao)}|{normalize_ncm(ncm)}"
+
+    def get_or_create_bucket(row: dict[str, object]) -> dict[str, object]:
+        bucket_key = get_bucket_key(row)
+        return consolidated.setdefault(
+            bucket_key,
+            {
+                "codigo_origem": str(row.get("codigo_origem", "")).strip(),
+                "descricao": str(row.get("descricao", "")).strip(),
+                "ncm": str(row.get("ncm", "")).strip(),
+                "unidade": str(row.get("unidade", "UN")).strip() or "UN",
+                "tipo_produto": str(row.get("tipo_produto", "Revenda")).strip() or "Revenda",
+                "cst_icms_entrada": "",
+                "cst_icms_saida": "",
+                "icms_entrada": Decimal("0"),
+                "icms_saida": Decimal("0"),
+                "cst_pis_entrada": "",
+                "cst_pis_saida": "",
+                "pis_entrada": Decimal("0"),
+                "pis_saida": Decimal("0"),
+                "cst_cofins_entrada": "",
+                "cst_cofins_saida": "",
+                "cofins_entrada": Decimal("0"),
+                "cofins_saida": Decimal("0"),
+                "ativo": 1,
+            },
+        )
+
+    for row in fiscal_rows:
+        bucket = get_or_create_bucket(row)
+        if not bucket["descricao"] and row.get("descricao"):
+            bucket["descricao"] = str(row.get("descricao", "")).strip()
+        if not bucket["ncm"] and row.get("ncm"):
+            bucket["ncm"] = str(row.get("ncm", "")).strip()
+        if not bucket["codigo_origem"] and row.get("codigo_origem"):
+            bucket["codigo_origem"] = str(row.get("codigo_origem", "")).strip()
+        if not bucket["cst_icms_entrada"] and row.get("cst_icms_entrada"):
+            bucket["cst_icms_entrada"] = normalize_tax_code(row.get("cst_icms_entrada", ""), 3)
+        if not bucket["cst_icms_saida"] and row.get("cst_icms_saida"):
+            bucket["cst_icms_saida"] = normalize_tax_code(row.get("cst_icms_saida", ""), 3)
+        bucket["icms_entrada"] = max(Decimal(bucket["icms_entrada"]), Decimal(row.get("icms_entrada", Decimal("0"))))
+        bucket["icms_saida"] = max(Decimal(bucket["icms_saida"]), Decimal(row.get("icms_saida", Decimal("0"))))
+
+    for row in contrib_rows:
+        bucket = get_or_create_bucket(row)
+        if not bucket["descricao"] and row.get("descricao"):
+            bucket["descricao"] = str(row.get("descricao", "")).strip()
+        if not bucket["ncm"] and row.get("ncm"):
+            bucket["ncm"] = str(row.get("ncm", "")).strip()
+        if not bucket["codigo_origem"] and row.get("codigo_origem"):
+            bucket["codigo_origem"] = str(row.get("codigo_origem", "")).strip()
+        if not bucket["cst_pis_entrada"] and row.get("cst_pis_entrada"):
+            bucket["cst_pis_entrada"] = normalize_tax_code(row.get("cst_pis_entrada", ""), 2)
+        if not bucket["cst_pis_saida"] and row.get("cst_pis_saida"):
+            bucket["cst_pis_saida"] = normalize_tax_code(row.get("cst_pis_saida", ""), 2)
+        if not bucket["cst_cofins_entrada"] and row.get("cst_cofins_entrada"):
+            bucket["cst_cofins_entrada"] = normalize_tax_code(row.get("cst_cofins_entrada", ""), 2)
+        if not bucket["cst_cofins_saida"] and row.get("cst_cofins_saida"):
+            bucket["cst_cofins_saida"] = normalize_tax_code(row.get("cst_cofins_saida", ""), 2)
+        bucket["pis_entrada"] = max(Decimal(bucket["pis_entrada"]), Decimal(row.get("pis_entrada", Decimal("0"))))
+        bucket["pis_saida"] = max(Decimal(bucket["pis_saida"]), Decimal(row.get("pis_saida", Decimal("0"))))
+        bucket["cofins_entrada"] = max(Decimal(bucket["cofins_entrada"]), Decimal(row.get("cofins_entrada", Decimal("0"))))
+        bucket["cofins_saida"] = max(Decimal(bucket["cofins_saida"]), Decimal(row.get("cofins_saida", Decimal("0"))))
+
+    for row in xml_rows:
+        bucket = get_or_create_bucket(row)
+        if not bucket["codigo_origem"] and row.get("codigo_origem"):
+            bucket["codigo_origem"] = str(row.get("codigo_origem", "")).strip()
+        if (not bucket["codigo_origem"] or bucket["codigo_origem"] == str(row.get("descricao", "")).strip()) and row.get("codigo_origem"):
+            bucket["codigo_origem"] = str(row.get("codigo_origem", "")).strip()
+        if not bucket["descricao"] and row.get("descricao"):
+            bucket["descricao"] = str(row.get("descricao", "")).strip()
+        if not bucket["ncm"] and row.get("ncm"):
+            bucket["ncm"] = str(row.get("ncm", "")).strip()
+        if bucket["unidade"] == "UN" and str(row.get("unidade", "")).strip():
+            bucket["unidade"] = str(row.get("unidade", "")).strip()
+        if not bucket["cst_icms_entrada"] and row.get("cst_icms_entrada"):
+            bucket["cst_icms_entrada"] = normalize_tax_code(row.get("cst_icms_entrada", ""), 3)
+        if not bucket["cst_icms_saida"] and row.get("cst_icms_saida"):
+            bucket["cst_icms_saida"] = normalize_tax_code(row.get("cst_icms_saida", ""), 3)
+        if not bucket["cst_pis_entrada"] and row.get("cst_pis_entrada"):
+            bucket["cst_pis_entrada"] = normalize_tax_code(row.get("cst_pis_entrada", ""), 2)
+        if not bucket["cst_pis_saida"] and row.get("cst_pis_saida"):
+            bucket["cst_pis_saida"] = normalize_tax_code(row.get("cst_pis_saida", ""), 2)
+        if not bucket["cst_cofins_entrada"] and row.get("cst_cofins_entrada"):
+            bucket["cst_cofins_entrada"] = normalize_tax_code(row.get("cst_cofins_entrada", ""), 2)
+        if not bucket["cst_cofins_saida"] and row.get("cst_cofins_saida"):
+            bucket["cst_cofins_saida"] = normalize_tax_code(row.get("cst_cofins_saida", ""), 2)
+        bucket["icms_entrada"] = max(Decimal(bucket["icms_entrada"]), Decimal(row.get("icms_entrada", Decimal("0"))))
+        bucket["icms_saida"] = max(Decimal(bucket["icms_saida"]), Decimal(row.get("icms_saida", Decimal("0"))))
+        bucket["pis_entrada"] = max(Decimal(bucket["pis_entrada"]), Decimal(row.get("pis_entrada", Decimal("0"))))
+        bucket["pis_saida"] = max(Decimal(bucket["pis_saida"]), Decimal(row.get("pis_saida", Decimal("0"))))
+        bucket["cofins_entrada"] = max(Decimal(bucket["cofins_entrada"]), Decimal(row.get("cofins_entrada", Decimal("0"))))
+        bucket["cofins_saida"] = max(Decimal(bucket["cofins_saida"]), Decimal(row.get("cofins_saida", Decimal("0"))))
+
+    return list(consolidated.values())
