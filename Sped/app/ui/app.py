@@ -35,6 +35,7 @@ from app.parsers.sped_parser import (
 )
 from app.repositories.mysql_cadastro import MysqlCadastroRepository
 from app.services.compare_sped_launcher import launch_compare_invoice_in_sped, launch_compare_invoices_in_sped
+from app.services.compare_operations import filter_xml_summary_rows_by_scope, normalize_compare_operation_scope
 from app.services.legacy_rules import (
     build_c190_rows_from_details,
     build_contrib_operation_launch_details_map,
@@ -77,12 +78,10 @@ from app.services.legacy_rules import (
     filter_c190_rows,
     filter_detailed_sales,
     filter_sales,
-    filter_xml_summary_rows_by_scope,
     get_launch_total_operation_value,
     get_operation_base_difference,
     infer_sped_period_label,
     merge_credit_diagnostic_detail_rows,
-    normalize_compare_operation_scope,
     parse_sped_document_date,
     period_label_sort_key,
     read_detailed_product_excel,
