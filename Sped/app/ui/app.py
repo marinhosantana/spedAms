@@ -4351,7 +4351,6 @@ class SpedApp:
 
         actions = ttk.Frame(parent)
         actions.grid(row=0, column=0, sticky="ew", pady=(0, 8))
-        ttk.Button(actions, text="Importar SPED", style="Primary.TButton", command=self.import_sped_files_to_archive).pack(side=LEFT)
         ttk.Button(actions, text="Atualizar", style="Primary.TButton", command=self.refresh_sped_archive_profiles).pack(side=LEFT)
         ttk.Button(actions, text="Carregar Perfil", style="Primary.TButton", command=self.use_selected_sped_archive_profile).pack(side=LEFT, padx=(8, 0))
         ttk.Button(actions, text="Abrir Pasta do Arquivo", style="Secondary.TButton", command=self.open_selected_sped_archive_folder).pack(side=LEFT, padx=(8, 0))
@@ -4368,16 +4367,16 @@ class SpedApp:
         profile_box.grid(row=0, column=0, sticky="nsew", padx=(0, 8))
         profile_box.columnconfigure(0, weight=1)
         profile_box.rowconfigure(0, weight=1)
-        profile_columns = ("id", "empresa", "cnpj", "periodo", "arquivos")
+        profile_columns = ("id", "nome", "empresa", "periodo", "arquivos")
         self.sped_archive_profile_tree = ttk.Treeview(profile_box, columns=profile_columns, show="headings", height=18, selectmode="browse")
         profile_headings = {
             "id": "ID",
+            "nome": "Perfil",
             "empresa": "Empresa",
-            "cnpj": "CNPJ/CPF",
             "periodo": "Periodo",
             "arquivos": "Arquivos",
         }
-        profile_widths = {"id": 55, "empresa": 300, "cnpj": 135, "periodo": 150, "arquivos": 80}
+        profile_widths = {"id": 55, "nome": 260, "empresa": 220, "periodo": 150, "arquivos": 80}
         for column_id in profile_columns:
             self.sped_archive_profile_tree.heading(column_id, text=profile_headings[column_id])
             self.sped_archive_profile_tree.column(column_id, width=profile_widths[column_id], anchor="center")
@@ -4446,23 +4445,6 @@ class SpedApp:
             return f"{start_text} a {end_text}"
         return start_text or end_text
 
-    def import_sped_files_to_archive(self) -> None:
-        selected_files = list(
-            filedialog.askopenfilenames(
-                title="Importar SPEDs para perfil de auditoria",
-                filetypes=[("Arquivos SPED", "*.txt *.sped *.efd"), ("Todos os arquivos", "*.*")],
-            )
-        )
-        if not selected_files:
-            return
-        imported = 0
-        for selected_file in selected_files:
-            archive_id = self.register_original_sped_file(Path(selected_file))
-            if archive_id:
-                imported += 1
-        self.refresh_sped_archive_profiles()
-        self.sped_archive_status_var.set(f"{imported} de {len(selected_files)} arquivo(s) importado(s) para perfis de auditoria.")
-
     def refresh_sped_archive_profiles(self) -> None:
         if not hasattr(self, "sped_archive_profile_tree"):
             return
@@ -4480,8 +4462,8 @@ class SpedApp:
                     iid=str(profile_id),
                     values=(
                         profile_id,
-                        row.get("empresa_nome_sped", "") or row.get("empresa_nome", "") or row.get("nome", ""),
-                        row.get("empresa_cnpj_sped", "") or row.get("empresa_cnpj", ""),
+                        row.get("nome", ""),
+                        row.get("empresa_nome", "") or row.get("empresa_cnpj", ""),
                         self.format_archive_period(row.get("periodo_inicio"), row.get("periodo_fim")),
                         row.get("total_arquivos", 0),
                     ),
@@ -7404,8 +7386,6 @@ class SpedApp:
                 metadata.default_profile_name,
                 company_id,
                 "Perfil criado automaticamente a partir do primeiro arquivamento do SPED original.",
-                metadata.company_name,
-                metadata.company_tax_id,
             )
             archive_id = self.mysql_repo.save_sped_archive(
                 {
@@ -7415,7 +7395,6 @@ class SpedApp:
                     "tipo_sped": effective_sped_type,
                     "periodo_inicio": metadata.period_start,
                     "periodo_fim": metadata.period_end,
-                    "empresa_nome_sped": metadata.company_name,
                     "empresa_cnpj": metadata.company_tax_id,
                     "arquivo_nome_original": metadata.file_name,
                     "arquivo_hash_sha256": metadata.file_hash_sha256,
