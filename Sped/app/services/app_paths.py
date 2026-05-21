@@ -58,3 +58,9 @@ def get_runtime_rule_history_path(base_dir: Path) -> Path:
         data_dir.mkdir(parents=True, exist_ok=True)
         return data_dir / "runtime_rule_history.json"
     return base_dir / "runtime_rule_history.json"
+
+
+def get_sped_archive_storage_dir(project_root_dir: Path) -> Path:
+    storage_dir = project_root_dir / "storage" / "original_speds"
+    storage_dir.mkdir(parents=True, exist_ok=True)
+    return storage_dir

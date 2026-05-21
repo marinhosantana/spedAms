@@ -9,3 +9,4 @@ Sped/dist/
 build/
 dist/
 *.spec
+Sped/storage/

@@ -43,6 +43,7 @@ from app.services.app_paths import (
     get_environment_config_path,
     get_project_root_dir,
     get_runtime_rule_history_path,
+    get_sped_archive_storage_dir,
 )
 from app.services.audit_utils import format_audit_paths, format_audit_summary, summarize_audit_detail_rows
 from app.services.compare_sped_launcher import launch_compare_invoice_in_sped, launch_compare_invoices_in_sped
@@ -121,6 +122,7 @@ from app.services.path_selection import (
     limit_selected_paths,
     parse_selected_paths,
 )
+from app.services.sped_archive import archive_original_sped_file
 from app.services.product_import import (
     build_import_products_from_consolidated_sources,
     build_import_products_from_sped_0200,
@@ -166,6 +168,7 @@ class SpedApp:
         self.app_base_dir = get_application_base_dir(__file__)
         self.app_environment = get_application_environment()
         self.project_root_dir = get_project_root_dir(self.app_base_dir)
+        self.sped_archive_storage_dir = get_sped_archive_storage_dir(self.project_root_dir)
         self.app_config_path = get_environment_config_path(self.app_base_dir, "app_config", self.app_environment)
         app_config = load_app_config(self.app_config_path, self.get_app_default_config())
         self.app_window_title_var = StringVar(value=app_config["window_title"])
@@ -354,6 +357,8 @@ class SpedApp:
         self.contrib_consult_period_path_map: dict[str, Path] = {}
         self.contrib_sales_consult_period_path_map: dict[str, Path] = {}
         self.product_rows_by_id: dict[int, dict[str, object]] = {}
+        self.sped_archive_profile_rows_by_id: dict[int, dict[str, object]] = {}
+        self.sped_archive_file_rows_by_id: dict[int, dict[str, object]] = {}
         self.compare_last_results: list[tuple[str, str, object]] = []
         self.compare_last_result_origin = ""
         self.compare_last_operation_scope = ""
@@ -362,6 +367,7 @@ class SpedApp:
         self.compare_diagnostic_status_var = StringVar(value="Execute uma comparacao em SPED x XML/Planilha e clique em Atualizar diagnostico.")
         self.compare_diagnostic_conclusion_var = StringVar(value="Nenhum diagnostico carregado.")
         self.compare_diagnostic_footer_var = StringVar(value="")
+        self.sped_archive_status_var = StringVar(value="Atualize a lista para consultar os SPEDs originais arquivados.")
         self.runtime_rule_refresh_after_id: str | None = None
         self.consult_tree_sort_column = "code"
         self.consult_tree_sort_reverse = False
@@ -578,9 +584,11 @@ class SpedApp:
         app_config_tab = ttk.Frame(settings_notebook, padding=6, style="Card.TFrame")
         mysql_connection_tab = ttk.Frame(settings_notebook, padding=6, style="Card.TFrame")
         cadastro_tab = ttk.Frame(settings_notebook, padding=6, style="Card.TFrame")
+        sped_archive_tab = ttk.Frame(settings_notebook, padding=6, style="Card.TFrame")
         settings_notebook.add(app_config_tab, text="Aplicacao")
         settings_notebook.add(mysql_connection_tab, text="Conexao MySQL")
         settings_notebook.add(cadastro_tab, text="Cadastro")
+        settings_notebook.add(sped_archive_tab, text="SPEDs Arquivados")
 
         contrib_process_tab = ttk.Frame(contrib_notebook, padding=6, style="Card.TFrame")
         contrib_consult_view_tab = ttk.Frame(contrib_notebook, padding=6, style="Card.TFrame")
@@ -616,6 +624,8 @@ class SpedApp:
         app_config_tab.columnconfigure(0, weight=1)
         cadastro_tab.columnconfigure(0, weight=1)
         cadastro_tab.rowconfigure(0, weight=1)
+        sped_archive_tab.columnconfigure(0, weight=1)
+        sped_archive_tab.rowconfigure(0, weight=1)
 
         source_box = ttk.LabelFrame(main_tab, text="Arquivos de Entrada", padding=10)
         source_box.grid(row=0, column=0, sticky="nsew", padx=(0, 8), pady=(0, 10))
@@ -1823,6 +1833,7 @@ class SpedApp:
         self.build_app_config_tab(app_config_tab)
         self.build_mysql_connection_tab(mysql_connection_tab)
         self.build_mysql_cadastro_tab(cadastro_tab)
+        self.build_sped_archive_tab(sped_archive_tab)
 
         self.log = ttk.Treeview(frame, columns=("mensagem",), show="headings", height=1)
         self.log.heading("mensagem", text="Andamento")
@@ -2579,6 +2590,7 @@ class SpedApp:
         if not selected:
             return
         self.xml_sped_path_var.set(selected)
+        self.register_original_sped_file(Path(selected), "fiscal")
         tax_id = extract_company_tax_id_from_sped(Path(selected))
         if tax_id:
             self.xml_company_tax_id_var.set(f"CNPJ/CPF empresa: {tax_id}")
@@ -3841,6 +3853,7 @@ class SpedApp:
             append_unique_paths(parse_selected_paths(self.entry_exit_sped_paths_var.get()), list(selected))
         )
         self.entry_exit_sped_paths_var.set(format_selected_paths(current_paths))
+        self.register_original_sped_files(current_paths, "fiscal")
         self.entry_exit_status_var.set(f"{len(current_paths)} SPED(s) selecionado(s).")
 
     def use_consult_speds_for_entry_exit_analysis(self) -> None:
@@ -3849,6 +3862,7 @@ class SpedApp:
         paths.extend(parse_selected_paths(self.sales_consult_sped_paths_var.get()))
         unique_paths = deduplicate_paths(paths)
         self.entry_exit_sped_paths_var.set(format_selected_paths(unique_paths))
+        self.register_original_sped_files(unique_paths, "fiscal")
         self.entry_exit_status_var.set(f"SPEDs das consultas carregados: {len(unique_paths)} arquivo(s).")
 
     def process_entry_exit_analysis(self) -> None:
@@ -4330,6 +4344,283 @@ class SpedApp:
 
         self.product_search_var.trace_add("write", lambda *_args: self.refresh_product_tree())
         self.product_status_filter_var.trace_add("write", lambda *_args: self.refresh_product_tree())
+
+    def build_sped_archive_tab(self, parent: ttk.Frame) -> None:
+        parent.columnconfigure(0, weight=1)
+        parent.rowconfigure(1, weight=1)
+
+        actions = ttk.Frame(parent)
+        actions.grid(row=0, column=0, sticky="ew", pady=(0, 8))
+        ttk.Button(actions, text="Atualizar", style="Primary.TButton", command=self.refresh_sped_archive_profiles).pack(side=LEFT)
+        ttk.Button(actions, text="Carregar Perfil", style="Primary.TButton", command=self.use_selected_sped_archive_profile).pack(side=LEFT, padx=(8, 0))
+        ttk.Button(actions, text="Abrir Pasta do Arquivo", style="Secondary.TButton", command=self.open_selected_sped_archive_folder).pack(side=LEFT, padx=(8, 0))
+        ttk.Button(actions, text="Usar Arquivo Fiscal", style="Secondary.TButton", command=self.use_selected_sped_archive_for_fiscal_consultation).pack(side=LEFT, padx=(8, 0))
+        ttk.Label(actions, textvariable=self.sped_archive_status_var, wraplength=900).pack(side=LEFT, padx=(12, 0))
+
+        body = ttk.Frame(parent)
+        body.grid(row=1, column=0, sticky="nsew")
+        body.columnconfigure(0, weight=1)
+        body.columnconfigure(1, weight=2)
+        body.rowconfigure(0, weight=1)
+
+        profile_box = ttk.LabelFrame(body, text="Perfis", padding=8)
+        profile_box.grid(row=0, column=0, sticky="nsew", padx=(0, 8))
+        profile_box.columnconfigure(0, weight=1)
+        profile_box.rowconfigure(0, weight=1)
+        profile_columns = ("id", "nome", "empresa", "periodo", "arquivos")
+        self.sped_archive_profile_tree = ttk.Treeview(profile_box, columns=profile_columns, show="headings", height=18, selectmode="browse")
+        profile_headings = {
+            "id": "ID",
+            "nome": "Perfil",
+            "empresa": "Empresa",
+            "periodo": "Periodo",
+            "arquivos": "Arquivos",
+        }
+        profile_widths = {"id": 55, "nome": 260, "empresa": 220, "periodo": 150, "arquivos": 80}
+        for column_id in profile_columns:
+            self.sped_archive_profile_tree.heading(column_id, text=profile_headings[column_id])
+            self.sped_archive_profile_tree.column(column_id, width=profile_widths[column_id], anchor="center")
+        self.sped_archive_profile_tree.grid(row=0, column=0, sticky="nsew")
+        self.sped_archive_profile_tree.bind("<<TreeviewSelect>>", self.handle_sped_archive_profile_select)
+        profile_scroll = ttk.Scrollbar(profile_box, orient="vertical", command=self.sped_archive_profile_tree.yview)
+        profile_scroll.grid(row=0, column=1, sticky="ns")
+        self.sped_archive_profile_tree.configure(yscrollcommand=profile_scroll.set)
+
+        file_box = ttk.LabelFrame(body, text="Arquivos SPED originais", padding=8)
+        file_box.grid(row=0, column=1, sticky="nsew")
+        file_box.columnconfigure(0, weight=1)
+        file_box.rowconfigure(0, weight=1)
+        file_columns = (
+            "id",
+            "tipo",
+            "arquivo",
+            "periodo",
+            "cnpj",
+            "produtos",
+            "documentos",
+            "itens",
+            "c190",
+            "hash",
+        )
+        self.sped_archive_file_tree = ttk.Treeview(file_box, columns=file_columns, show="headings", height=18, selectmode="browse")
+        file_headings = {
+            "id": "ID",
+            "tipo": "Tipo",
+            "arquivo": "Arquivo",
+            "periodo": "Periodo",
+            "cnpj": "CNPJ/CPF",
+            "produtos": "0200",
+            "documentos": "Docs",
+            "itens": "C170",
+            "c190": "C190",
+            "hash": "Hash",
+        }
+        file_widths = {
+            "id": 55,
+            "tipo": 105,
+            "arquivo": 240,
+            "periodo": 150,
+            "cnpj": 130,
+            "produtos": 65,
+            "documentos": 65,
+            "itens": 65,
+            "c190": 65,
+            "hash": 110,
+        }
+        for column_id in file_columns:
+            self.sped_archive_file_tree.heading(column_id, text=file_headings[column_id])
+            self.sped_archive_file_tree.column(column_id, width=file_widths[column_id], anchor="center")
+        self.sped_archive_file_tree.grid(row=0, column=0, sticky="nsew")
+        self.sped_archive_file_tree.bind("<Double-1>", lambda _event: self.open_selected_sped_archive_folder())
+        file_scroll_y = ttk.Scrollbar(file_box, orient="vertical", command=self.sped_archive_file_tree.yview)
+        file_scroll_y.grid(row=0, column=1, sticky="ns")
+        file_scroll_x = ttk.Scrollbar(file_box, orient="horizontal", command=self.sped_archive_file_tree.xview)
+        file_scroll_x.grid(row=1, column=0, sticky="ew")
+        self.sped_archive_file_tree.configure(yscrollcommand=file_scroll_y.set, xscrollcommand=file_scroll_x.set)
+
+    def format_archive_period(self, start: object, end: object) -> str:
+        start_text = str(start or "")
+        end_text = str(end or "")
+        if start_text and end_text:
+            return f"{start_text} a {end_text}"
+        return start_text or end_text
+
+    def refresh_sped_archive_profiles(self) -> None:
+        if not hasattr(self, "sped_archive_profile_tree"):
+            return
+        try:
+            self.save_mysql_config(log_success=False)
+            self.mysql_repo.ensure_schema()
+            profiles = self.mysql_repo.list_sped_profiles(self.app_environment)
+            self.sped_archive_profile_rows_by_id = {int(row["id"]): row for row in profiles}
+            self.sped_archive_profile_tree.delete(*self.sped_archive_profile_tree.get_children())
+            for row in profiles:
+                profile_id = int(row["id"])
+                self.sped_archive_profile_tree.insert(
+                    "",
+                    END,
+                    iid=str(profile_id),
+                    values=(
+                        profile_id,
+                        row.get("nome", ""),
+                        row.get("empresa_nome", "") or row.get("empresa_cnpj", ""),
+                        self.format_archive_period(row.get("periodo_inicio"), row.get("periodo_fim")),
+                        row.get("total_arquivos", 0),
+                    ),
+                )
+            if profiles:
+                first_id = str(int(profiles[0]["id"]))
+                self.sped_archive_profile_tree.selection_set(first_id)
+                self.sped_archive_profile_tree.focus(first_id)
+                self.refresh_sped_archive_files(int(first_id))
+            else:
+                self.sped_archive_file_rows_by_id = {}
+                if hasattr(self, "sped_archive_file_tree"):
+                    self.sped_archive_file_tree.delete(*self.sped_archive_file_tree.get_children())
+            self.sped_archive_status_var.set(f"{len(profiles)} perfil(is) arquivado(s) no ambiente {self.app_environment}.")
+        except Exception as exc:
+            self.sped_archive_status_var.set(f"Falha ao listar SPEDs arquivados: {exc}")
+            messagebox.showerror("SPEDs Arquivados", str(exc))
+
+    def handle_sped_archive_profile_select(self, _event: object = None) -> None:
+        selected = self.sped_archive_profile_tree.selection()
+        if not selected:
+            return
+        self.refresh_sped_archive_files(int(selected[0]))
+
+    def refresh_sped_archive_files(self, profile_id: int | None = None) -> None:
+        if not hasattr(self, "sped_archive_file_tree"):
+            return
+        archives = self.mysql_repo.list_sped_archives(self.app_environment, profile_id)
+        self.sped_archive_file_rows_by_id = {int(row["id"]): row for row in archives}
+        self.sped_archive_file_tree.delete(*self.sped_archive_file_tree.get_children())
+        for row in archives:
+            archive_id = int(row["id"])
+            self.sped_archive_file_tree.insert(
+                "",
+                END,
+                iid=str(archive_id),
+                values=(
+                    archive_id,
+                    row.get("tipo_sped", ""),
+                    row.get("arquivo_nome_original", ""),
+                    self.format_archive_period(row.get("periodo_inicio"), row.get("periodo_fim")),
+                    row.get("empresa_cnpj", ""),
+                    row.get("total_produtos", 0),
+                    row.get("total_documentos", 0),
+                    row.get("total_itens", 0),
+                    row.get("total_c190", 0),
+                    str(row.get("arquivo_hash_sha256", ""))[:12],
+                ),
+            )
+        self.sped_archive_status_var.set(f"{len(archives)} arquivo(s) SPED listado(s).")
+
+    def get_selected_sped_archive_row(self) -> dict[str, object] | None:
+        if not hasattr(self, "sped_archive_file_tree"):
+            return None
+        selected = self.sped_archive_file_tree.selection()
+        if not selected:
+            messagebox.showwarning("SPEDs Arquivados", "Selecione um arquivo SPED arquivado.")
+            return None
+        return self.sped_archive_file_rows_by_id.get(int(selected[0]))
+
+    def get_selected_sped_archive_profile_id(self) -> int | None:
+        if not hasattr(self, "sped_archive_profile_tree"):
+            return None
+        selected = self.sped_archive_profile_tree.selection()
+        if not selected:
+            messagebox.showwarning("SPEDs Arquivados", "Selecione um perfil arquivado.")
+            return None
+        return int(selected[0])
+
+    def resolve_archive_path(self, row: dict[str, object]) -> Path | None:
+        archived_path = Path(str(row.get("caminho_arquivo_arquivado", "")))
+        if archived_path.exists():
+            return archived_path
+        original_path = Path(str(row.get("caminho_arquivo_original", "")))
+        if original_path.exists():
+            return original_path
+        return None
+
+    def open_selected_sped_archive_folder(self) -> None:
+        row = self.get_selected_sped_archive_row()
+        if not row:
+            return
+        resolved_path = self.resolve_archive_path(row)
+        target_path = resolved_path.parent if resolved_path else Path(str(row.get("caminho_arquivo_arquivado", ""))).parent
+        if not target_path.exists():
+            messagebox.showwarning("SPEDs Arquivados", "A pasta do arquivo arquivado nao foi encontrada.")
+            return
+        os.startfile(target_path)
+
+    def use_selected_sped_archive_profile(self) -> None:
+        profile_id = self.get_selected_sped_archive_profile_id()
+        if profile_id is None:
+            return
+        archives = self.mysql_repo.list_sped_archives(self.app_environment, profile_id)
+        fiscal_paths: list[Path] = []
+        contrib_paths: list[Path] = []
+        missing_files = 0
+        for row in archives:
+            resolved_path = self.resolve_archive_path(row)
+            if not resolved_path:
+                missing_files += 1
+                continue
+            sped_type = str(row.get("tipo_sped", ""))
+            if sped_type == "fiscal":
+                fiscal_paths.append(resolved_path)
+            elif sped_type == "contribuicoes":
+                contrib_paths.append(resolved_path)
+
+        fiscal_paths = deduplicate_paths(fiscal_paths)
+        contrib_paths = deduplicate_paths(contrib_paths)
+        fiscal_limited, fiscal_limit_exceeded = limit_selected_paths(fiscal_paths, 12)
+        contrib_limited, contrib_limit_exceeded = limit_selected_paths(contrib_paths, 12)
+        if fiscal_limited:
+            formatted_fiscal = format_selected_paths(fiscal_limited)
+            self.consult_sped_paths_var.set(formatted_fiscal)
+            self.sales_consult_sped_paths_var.set(formatted_fiscal)
+            if len(fiscal_limited) == 1:
+                self.compare_sped_icms_path_var.set(str(fiscal_limited[0]))
+        if contrib_limited:
+            formatted_contrib = format_selected_paths(contrib_limited)
+            self.contrib_consult_sped_paths_var.set(formatted_contrib)
+            self.contrib_sales_consult_sped_paths_var.set(formatted_contrib)
+            if len(contrib_limited) == 1:
+                self.compare_sped_contrib_path_var.set(str(contrib_limited[0]))
+
+        warnings: list[str] = []
+        if fiscal_limit_exceeded:
+            warnings.append("fiscais limitados a 12")
+        if contrib_limit_exceeded:
+            warnings.append("contribuicoes limitados a 12")
+        if missing_files:
+            warnings.append(f"{missing_files} arquivo(s) nao encontrado(s)")
+        warning_text = f" ({'; '.join(warnings)})" if warnings else ""
+        message = (
+            f"Perfil carregado: {len(fiscal_limited)} SPED Fiscal(is), "
+            f"{len(contrib_limited)} SPED Contribuicoes{warning_text}."
+        )
+        self.sped_archive_status_var.set(message)
+        self.write_audit_log("SPED_PERFIL_CARREGADO", f"perfil_id={profile_id}; {message}")
+
+    def use_selected_sped_archive_for_fiscal_consultation(self) -> None:
+        row = self.get_selected_sped_archive_row()
+        if not row:
+            return
+        if str(row.get("tipo_sped", "")) != "fiscal":
+            messagebox.showwarning("SPEDs Arquivados", "Somente SPED Fiscal pode ser enviado para a consulta fiscal nesta etapa.")
+            return
+        archived_path = self.resolve_archive_path(row)
+        if not archived_path:
+            messagebox.showwarning("SPEDs Arquivados", "Arquivo arquivado nao encontrado no disco.")
+            return
+        current_paths = append_unique_paths(parse_selected_paths(self.consult_sped_paths_var.get()), [archived_path])
+        current_paths, _limit_exceeded = limit_selected_paths(current_paths, 12)
+        formatted_paths = format_selected_paths(current_paths)
+        self.consult_sped_paths_var.set(formatted_paths)
+        self.sales_consult_sped_paths_var.set(formatted_paths)
+        self.sped_archive_status_var.set(f"SPED arquivado enviado para as consultas fiscais: {archived_path.name}")
 
     def refresh_company_tree(self, companies: list[dict[str, object]] | None = None) -> None:
         if not self.mysql_repo.mysql_available():
@@ -5526,6 +5817,7 @@ class SpedApp:
         )
         if selected:
             self.compare_sped_icms_path_var.set(selected)
+            self.register_original_sped_file(Path(selected), "fiscal")
             self.write_audit_log("ARQUIVO_CARREGADO", f"SPED ICMS comparacao={selected}")
 
     def select_compare_sped_contrib_file(self) -> None:
@@ -5535,6 +5827,7 @@ class SpedApp:
         )
         if selected:
             self.compare_sped_contrib_path_var.set(selected)
+            self.register_original_sped_file(Path(selected), "contribuicoes")
             self.write_audit_log("ARQUIVO_CARREGADO", f"SPED Contribuicoes comparacao={selected}")
 
     def select_compare_xml_folder(self) -> None:
@@ -7064,6 +7357,80 @@ class SpedApp:
         self.status_var.set(message)
         self.write_audit_log("EVENTO", message)
 
+    def register_original_sped_file(self, sped_path: Path, sped_type_hint: str = "") -> int | None:
+        if not sped_path.exists() or not sped_path.is_file():
+            return None
+        try:
+            metadata = archive_original_sped_file(sped_path, self.sped_archive_storage_dir, self.app_environment)
+            effective_sped_type = sped_type_hint or metadata.sped_type
+            if not self.mysql_repo.mysql_available():
+                self.write_audit_log(
+                    "SPED_ORIGINAL_ARQUIVADO_LOCAL",
+                    f"arquivo={metadata.source_path}; hash={metadata.file_hash_sha256}; copia={metadata.archived_path}; mysql=indisponivel",
+                )
+                return None
+            self.mysql_repo.ensure_schema()
+            existing_archive = self.mysql_repo.get_sped_archive_by_hash(self.app_environment, metadata.file_hash_sha256)
+            if existing_archive:
+                archive_id = int(existing_archive["id"])
+                self.persist_sped_extracted_data_if_needed(archive_id, metadata.source_path, effective_sped_type)
+                self.write_audit_log(
+                    "SPED_ORIGINAL_JA_CADASTRADO",
+                    f"id={archive_id}; arquivo={metadata.source_path}; hash={metadata.file_hash_sha256}",
+                )
+                return archive_id
+
+            company_id = self.mysql_repo.find_company_id_by_tax_id(metadata.company_tax_id)
+            profile_id = self.mysql_repo.ensure_sped_profile(
+                self.app_environment,
+                metadata.default_profile_name,
+                company_id,
+                "Perfil criado automaticamente a partir do primeiro arquivamento do SPED original.",
+            )
+            archive_id = self.mysql_repo.save_sped_archive(
+                {
+                    "perfil_id": profile_id,
+                    "empresa_id": company_id,
+                    "ambiente": self.app_environment,
+                    "tipo_sped": effective_sped_type,
+                    "periodo_inicio": metadata.period_start,
+                    "periodo_fim": metadata.period_end,
+                    "empresa_cnpj": metadata.company_tax_id,
+                    "arquivo_nome_original": metadata.file_name,
+                    "arquivo_hash_sha256": metadata.file_hash_sha256,
+                    "arquivo_tamanho": metadata.file_size,
+                    "caminho_arquivo_original": str(metadata.source_path),
+                    "caminho_arquivo_arquivado": str(metadata.archived_path),
+                    "observacao": f"Arquivo original arquivado automaticamente, sem alteracoes. Empresa no SPED: {metadata.company_name}",
+                }
+            )
+            self.write_audit_log(
+                "SPED_ORIGINAL_CADASTRADO",
+                f"id={archive_id}; perfil={profile_id}; arquivo={metadata.source_path}; hash={metadata.file_hash_sha256}",
+            )
+            self.persist_sped_extracted_data_if_needed(archive_id, metadata.source_path, effective_sped_type)
+            return archive_id
+        except Exception as exc:
+            self.write_audit_log("SPED_ORIGINAL_NAO_CADASTRADO", f"arquivo={sped_path}; erro={exc}")
+            return None
+
+    def persist_sped_extracted_data_if_needed(self, archive_id: int, sped_path: Path, sped_type: str) -> None:
+        if sped_type != "fiscal":
+            return
+        try:
+            products, _sales_rows, detailed_items, c190_rows, _c190_product_rows = read_sped_file(sped_path)
+            self.mysql_repo.replace_sped_extracted_data(archive_id, products, detailed_items, c190_rows)
+            self.write_audit_log(
+                "SPED_DADOS_EXTRAIDOS",
+                f"id={archive_id}; produtos={len(products)}; itens_c170={len(detailed_items)}; c190={len(c190_rows)}",
+            )
+        except Exception as exc:
+            self.write_audit_log("SPED_DADOS_NAO_EXTRAIDOS", f"id={archive_id}; arquivo={sped_path}; erro={exc}")
+
+    def register_original_sped_files(self, sped_paths: Iterable[Path], sped_type_hint: str = "") -> None:
+        for sped_path in sped_paths:
+            self.register_original_sped_file(Path(sped_path), sped_type_hint)
+
     def write_audit_log(self, event_type: str, message: str) -> None:
         timestamp = dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         event = str(event_type or "EVENTO").strip().upper()
@@ -7099,6 +7466,9 @@ class SpedApp:
         )
         if selected:
             target_var.set(selected)
+            if "sped" in normalize_text(title):
+                sped_type_hint = "contribuicoes" if "contrib" in normalize_text(title) else "fiscal"
+                self.register_original_sped_file(Path(selected), sped_type_hint)
             self.log_message(f"Arquivo selecionado: {selected}")
 
     def select_files_or_directory(self, target_var: StringVar, title: str, filetypes: list[tuple[str, str]]) -> None:
@@ -7164,6 +7534,7 @@ class SpedApp:
             messagebox.showwarning("Limite excedido", "A analise aceita no maximo 12 arquivos SPED.")
 
         self.multi_sped_paths_var.set(format_selected_paths(current_paths))
+        self.register_original_sped_files(current_paths, "fiscal")
         self.log_message(f"{len(current_paths)} arquivo(s) SPED selecionado(s) para a analise de entradas.")
 
     def select_consult_sped_files(self) -> None:
@@ -7182,6 +7553,7 @@ class SpedApp:
             messagebox.showwarning("Limite excedido", "A consulta aceita no maximo 12 arquivos SPED.")
 
         self.consult_sped_paths_var.set(format_selected_paths(current_paths))
+        self.register_original_sped_files(current_paths, "fiscal")
         self.log_message(f"{len(current_paths)} arquivo(s) SPED preparado(s) para consulta em tela.")
 
     def select_sales_consult_sped_files(self) -> None:
@@ -7200,6 +7572,7 @@ class SpedApp:
             messagebox.showwarning("Limite excedido", "A consulta aceita no maximo 12 arquivos SPED.")
 
         self.sales_consult_sped_paths_var.set(format_selected_paths(current_paths))
+        self.register_original_sped_files(current_paths, "fiscal")
         self.log_message(f"{len(current_paths)} arquivo(s) SPED preparado(s) para consulta de saidas.")
 
     def select_fiscal_consult_xml_sources(self) -> None:
@@ -7234,6 +7607,7 @@ class SpedApp:
         formatted_paths = format_selected_paths(current_paths)
         self.contrib_consult_sped_paths_var.set(formatted_paths)
         self.contrib_sales_consult_sped_paths_var.set(formatted_paths)
+        self.register_original_sped_files(current_paths, "contribuicoes")
         self.log_message(f"{len(current_paths)} arquivo(s) SPED Contribuicoes preparado(s) para consulta de entradas e saidas.")
 
     def select_contrib_sales_consult_sped_files(self) -> None:
@@ -7252,6 +7626,7 @@ class SpedApp:
         formatted_paths = format_selected_paths(current_paths)
         self.contrib_sales_consult_sped_paths_var.set(formatted_paths)
         self.contrib_consult_sped_paths_var.set(formatted_paths)
+        self.register_original_sped_files(current_paths, "contribuicoes")
         self.log_message(f"{len(current_paths)} arquivo(s) SPED Contribuicoes preparado(s) para consulta de entradas e saidas.")
 
     def select_contrib_xml_sources(self) -> None:

@@ -39,3 +39,142 @@ CREATE TABLE IF NOT EXISTS produtos_empresa (
     KEY idx_produtos_empresa_descricao (descricao),
     KEY idx_produtos_empresa_ncm (ncm)
 );
+
+CREATE TABLE IF NOT EXISTS sped_perfis (
+    id INT NOT NULL AUTO_INCREMENT PRIMARY KEY,
+    empresa_id INT NULL,
+    ambiente VARCHAR(10) NOT NULL DEFAULT 'dev',
+    nome VARCHAR(255) NOT NULL,
+    descricao TEXT NULL,
+    ativo TINYINT(1) NOT NULL DEFAULT 1,
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    CONSTRAINT fk_sped_perfis_empresa FOREIGN KEY (empresa_id) REFERENCES empresas (id),
+    UNIQUE KEY uq_sped_perfis_ambiente_nome (ambiente, nome),
+    KEY idx_sped_perfis_empresa (empresa_id)
+);
+
+CREATE TABLE IF NOT EXISTS sped_arquivos (
+    id INT NOT NULL AUTO_INCREMENT PRIMARY KEY,
+    perfil_id INT NULL,
+    empresa_id INT NULL,
+    ambiente VARCHAR(10) NOT NULL DEFAULT 'dev',
+    tipo_sped VARCHAR(30) NOT NULL DEFAULT '',
+    periodo_inicio DATE NULL,
+    periodo_fim DATE NULL,
+    empresa_cnpj VARCHAR(20) NOT NULL DEFAULT '',
+    arquivo_nome_original VARCHAR(255) NOT NULL,
+    arquivo_hash_sha256 CHAR(64) NOT NULL,
+    arquivo_tamanho BIGINT NOT NULL DEFAULT 0,
+    caminho_arquivo_original TEXT NOT NULL,
+    caminho_arquivo_arquivado TEXT NOT NULL,
+    observacao TEXT NULL,
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    CONSTRAINT fk_sped_arquivos_perfil FOREIGN KEY (perfil_id) REFERENCES sped_perfis (id),
+    CONSTRAINT fk_sped_arquivos_empresa FOREIGN KEY (empresa_id) REFERENCES empresas (id),
+    UNIQUE KEY uq_sped_arquivos_ambiente_hash (ambiente, arquivo_hash_sha256),
+    KEY idx_sped_arquivos_perfil (perfil_id),
+    KEY idx_sped_arquivos_empresa (empresa_id),
+    KEY idx_sped_arquivos_periodo (periodo_inicio, periodo_fim),
+    KEY idx_sped_arquivos_cnpj (empresa_cnpj)
+);
+
+CREATE TABLE IF NOT EXISTS sped_produtos_0200 (
+    id BIGINT NOT NULL AUTO_INCREMENT PRIMARY KEY,
+    sped_arquivo_id INT NOT NULL,
+    codigo VARCHAR(80) NOT NULL,
+    descricao VARCHAR(255) NOT NULL DEFAULT '',
+    ncm VARCHAR(20) NOT NULL DEFAULT '',
+    cest VARCHAR(20) NOT NULL DEFAULT '',
+    cst_icms VARCHAR(4) NOT NULL DEFAULT '',
+    aliquota_icms DECIMAL(10,4) NOT NULL DEFAULT 0.0000,
+    CONSTRAINT fk_sped_produtos_0200_arquivo FOREIGN KEY (sped_arquivo_id) REFERENCES sped_arquivos (id),
+    UNIQUE KEY uq_sped_produtos_0200_codigo (sped_arquivo_id, codigo),
+    KEY idx_sped_produtos_0200_ncm (ncm)
+);
+
+CREATE TABLE IF NOT EXISTS sped_documentos (
+    id BIGINT NOT NULL AUTO_INCREMENT PRIMARY KEY,
+    sped_arquivo_id INT NOT NULL,
+    tipo_operacao VARCHAR(20) NOT NULL DEFAULT '',
+    numero_documento VARCHAR(30) NOT NULL DEFAULT '',
+    chave_documento VARCHAR(60) NOT NULL DEFAULT '',
+    data_documento VARCHAR(20) NOT NULL DEFAULT '',
+    serie_documento VARCHAR(20) NOT NULL DEFAULT '',
+    modelo_documento VARCHAR(10) NOT NULL DEFAULT '',
+    participante_codigo VARCHAR(80) NOT NULL DEFAULT '',
+    participante_nome VARCHAR(255) NOT NULL DEFAULT '',
+    participante_cnpj VARCHAR(20) NOT NULL DEFAULT '',
+    CONSTRAINT fk_sped_documentos_arquivo FOREIGN KEY (sped_arquivo_id) REFERENCES sped_arquivos (id),
+    UNIQUE KEY uq_sped_documentos_identidade (
+        sped_arquivo_id,
+        tipo_operacao,
+        numero_documento,
+        chave_documento,
+        serie_documento,
+        modelo_documento
+    ),
+    KEY idx_sped_documentos_chave (chave_documento),
+    KEY idx_sped_documentos_numero (numero_documento)
+);
+
+CREATE TABLE IF NOT EXISTS sped_itens_c170 (
+    id BIGINT NOT NULL AUTO_INCREMENT PRIMARY KEY,
+    sped_arquivo_id INT NOT NULL,
+    tipo_operacao VARCHAR(20) NOT NULL DEFAULT '',
+    numero_documento VARCHAR(30) NOT NULL DEFAULT '',
+    chave_documento VARCHAR(60) NOT NULL DEFAULT '',
+    data_documento VARCHAR(20) NOT NULL DEFAULT '',
+    serie_documento VARCHAR(20) NOT NULL DEFAULT '',
+    modelo_documento VARCHAR(10) NOT NULL DEFAULT '',
+    participante_codigo VARCHAR(80) NOT NULL DEFAULT '',
+    participante_nome VARCHAR(255) NOT NULL DEFAULT '',
+    participante_cnpj VARCHAR(20) NOT NULL DEFAULT '',
+    numero_item VARCHAR(20) NOT NULL DEFAULT '',
+    codigo_produto VARCHAR(80) NOT NULL DEFAULT '',
+    descricao_produto VARCHAR(255) NOT NULL DEFAULT '',
+    ncm VARCHAR(20) NOT NULL DEFAULT '',
+    cest VARCHAR(20) NOT NULL DEFAULT '',
+    cst_icms VARCHAR(4) NOT NULL DEFAULT '',
+    cfop VARCHAR(10) NOT NULL DEFAULT '',
+    quantidade DECIMAL(18,6) NOT NULL DEFAULT 0.000000,
+    valor_operacao DECIMAL(18,2) NOT NULL DEFAULT 0.00,
+    valor_desconto DECIMAL(18,2) NOT NULL DEFAULT 0.00,
+    base_icms DECIMAL(18,2) NOT NULL DEFAULT 0.00,
+    aliquota_icms DECIMAL(10,4) NOT NULL DEFAULT 0.0000,
+    valor_icms DECIMAL(18,2) NOT NULL DEFAULT 0.00,
+    base_icms_st DECIMAL(18,2) NOT NULL DEFAULT 0.00,
+    aliquota_icms_st DECIMAL(10,4) NOT NULL DEFAULT 0.0000,
+    valor_icms_st DECIMAL(18,2) NOT NULL DEFAULT 0.00,
+    base_ipi DECIMAL(18,2) NOT NULL DEFAULT 0.00,
+    aliquota_ipi DECIMAL(10,4) NOT NULL DEFAULT 0.0000,
+    valor_ipi DECIMAL(18,2) NOT NULL DEFAULT 0.00,
+    CONSTRAINT fk_sped_itens_c170_arquivo FOREIGN KEY (sped_arquivo_id) REFERENCES sped_arquivos (id),
+    KEY idx_sped_itens_c170_doc (sped_arquivo_id, chave_documento, numero_documento),
+    KEY idx_sped_itens_c170_produto (sped_arquivo_id, codigo_produto),
+    KEY idx_sped_itens_c170_cfop (cfop),
+    KEY idx_sped_itens_c170_cst (cst_icms)
+);
+
+CREATE TABLE IF NOT EXISTS sped_resumos_c190 (
+    id BIGINT NOT NULL AUTO_INCREMENT PRIMARY KEY,
+    sped_arquivo_id INT NOT NULL,
+    tipo_operacao VARCHAR(20) NOT NULL DEFAULT '',
+    numero_documento VARCHAR(30) NOT NULL DEFAULT '',
+    chave_documento VARCHAR(60) NOT NULL DEFAULT '',
+    data_documento VARCHAR(20) NOT NULL DEFAULT '',
+    cst_icms VARCHAR(4) NOT NULL DEFAULT '',
+    cfop VARCHAR(10) NOT NULL DEFAULT '',
+    aliquota_icms DECIMAL(10,4) NOT NULL DEFAULT 0.0000,
+    valor_operacao DECIMAL(18,2) NOT NULL DEFAULT 0.00,
+    base_icms DECIMAL(18,2) NOT NULL DEFAULT 0.00,
+    valor_icms DECIMAL(18,2) NOT NULL DEFAULT 0.00,
+    base_icms_st DECIMAL(18,2) NOT NULL DEFAULT 0.00,
+    valor_icms_st DECIMAL(18,2) NOT NULL DEFAULT 0.00,
+    valor_reducao DECIMAL(18,2) NOT NULL DEFAULT 0.00,
+    valor_ipi DECIMAL(18,2) NOT NULL DEFAULT 0.00,
+    CONSTRAINT fk_sped_resumos_c190_arquivo FOREIGN KEY (sped_arquivo_id) REFERENCES sped_arquivos (id),
+    KEY idx_sped_resumos_c190_doc (sped_arquivo_id, chave_documento, numero_documento),
+    KEY idx_sped_resumos_c190_cfop (cfop),
+    KEY idx_sped_resumos_c190_cst (cst_icms)
+);
