@@ -28,6 +28,16 @@ class ProgressDialogHandle:
         self.dialog.update_idletasks()
         self.root.update_idletasks()
 
+    def show_now(self) -> None:
+        self.dialog.deiconify()
+        self.dialog.lift()
+        try:
+            self.dialog.focus_force()
+        except Exception:
+            pass
+        self.dialog.update_idletasks()
+        self.dialog.update()
+
     def reset(self, message: str = "") -> None:
         if message:
             self.message_var.set(message)

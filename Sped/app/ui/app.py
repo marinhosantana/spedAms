@@ -333,6 +333,8 @@ class SpedApp:
         self.xml_ignored_log_rows: list[dict[str, object]] = []
         self.xml_document_log_rows: list[dict[str, object]] = []
         self.xml_cancelled_display_rows: list[dict[str, object]] = []
+        self.xml_summary_busy = False
+        self.xml_summary_controls: list[ttk.Widget] = []
         self.xml_credit_invoice_rows: list[dict[str, object]] = []
         self.xml_credit_cfop_rows: list[dict[str, object]] = []
         self.xml_credit_stats: dict[str, object] = {}
@@ -1849,37 +1851,56 @@ class SpedApp:
         operation_box = ttk.Frame(setup_box)
         operation_box.grid(row=3, column=0, columnspan=4, sticky="w", pady=(8, 0))
         ttk.Label(operation_box, text="Operacao:").pack(side=LEFT)
-        ttk.Radiobutton(
+        xml_scope_all_radio = ttk.Radiobutton(
             operation_box,
             text="Todos",
             value="Todos",
             variable=self.xml_operation_scope_var,
             command=self.refresh_xml_summary_tree,
-        ).pack(side=LEFT, padx=(8, 12))
-        ttk.Radiobutton(
+        )
+        xml_scope_all_radio.pack(side=LEFT, padx=(8, 12))
+        xml_scope_entry_radio = ttk.Radiobutton(
             operation_box,
             text="Entradas",
             value="Entrada",
             variable=self.xml_operation_scope_var,
             command=self.refresh_xml_summary_tree,
-        ).pack(side=LEFT, padx=(0, 12))
-        ttk.Radiobutton(
+        )
+        xml_scope_entry_radio.pack(side=LEFT, padx=(0, 12))
+        xml_scope_sale_radio = ttk.Radiobutton(
             operation_box,
             text="Saidas",
             value="Saida",
             variable=self.xml_operation_scope_var,
             command=self.refresh_xml_summary_tree,
-        ).pack(side=LEFT)
+        )
+        xml_scope_sale_radio.pack(side=LEFT)
 
         actions_box = ttk.Frame(setup_box)
         actions_box.grid(row=4, column=0, columnspan=4, sticky="w", pady=(14, 0))
         self.xml_process_btn = ttk.Button(actions_box, text="Processar XMLs", style="Primary.TButton", command=self.run_xml_summary)
         self.xml_process_btn.pack(side=LEFT)
-        ttk.Button(actions_box, text="Exportar Excel", style="Secondary.TButton", command=lambda: self.export_xml_summary("xlsx")).pack(side=LEFT, padx=(8, 0))
-        ttk.Button(actions_box, text="Exportar CSV", style="Secondary.TButton", command=lambda: self.export_xml_summary("csv")).pack(side=LEFT, padx=(8, 0))
-        ttk.Button(actions_box, text="Exportar Chaves Lidas", style="Secondary.TButton", command=self.export_xml_document_keys).pack(side=LEFT, padx=(8, 0))
-        ttk.Button(actions_box, text="Exportar Log Ignorados", style="Secondary.TButton", command=self.export_xml_ignored_log).pack(side=LEFT, padx=(8, 0))
-        ttk.Button(actions_box, text="Limpar Tela", style="Secondary.TButton", command=self.clear_xml_screen).pack(side=LEFT, padx=(8, 0))
+        self.xml_export_excel_btn = ttk.Button(actions_box, text="Exportar Excel", style="Secondary.TButton", command=lambda: self.export_xml_summary("xlsx"))
+        self.xml_export_excel_btn.pack(side=LEFT, padx=(8, 0))
+        self.xml_export_csv_btn = ttk.Button(actions_box, text="Exportar CSV", style="Secondary.TButton", command=lambda: self.export_xml_summary("csv"))
+        self.xml_export_csv_btn.pack(side=LEFT, padx=(8, 0))
+        self.xml_export_keys_btn = ttk.Button(actions_box, text="Exportar Chaves Lidas", style="Secondary.TButton", command=self.export_xml_document_keys)
+        self.xml_export_keys_btn.pack(side=LEFT, padx=(8, 0))
+        self.xml_export_ignored_btn = ttk.Button(actions_box, text="Exportar Log Ignorados", style="Secondary.TButton", command=self.export_xml_ignored_log)
+        self.xml_export_ignored_btn.pack(side=LEFT, padx=(8, 0))
+        self.xml_clear_btn = ttk.Button(actions_box, text="Limpar Tela", style="Secondary.TButton", command=self.clear_xml_screen)
+        self.xml_clear_btn.pack(side=LEFT, padx=(8, 0))
+        self.xml_summary_controls = [
+            self.xml_process_btn,
+            self.xml_export_excel_btn,
+            self.xml_export_csv_btn,
+            self.xml_export_keys_btn,
+            self.xml_export_ignored_btn,
+            self.xml_clear_btn,
+            xml_scope_all_radio,
+            xml_scope_entry_radio,
+            xml_scope_sale_radio,
+        ]
 
         ttk.Label(setup_box, textvariable=self.xml_status_var, wraplength=1280).grid(row=5, column=0, columnspan=4, sticky="w", pady=(10, 0))
         self.xml_progress_bar = ttk.Progressbar(
@@ -2574,11 +2595,25 @@ class SpedApp:
         if hasattr(self, "xml_progress_bar"):
             self.xml_progress_bar.update_idletasks()
 
+    def set_xml_summary_busy(self, busy: bool, message: str = "") -> None:
+        self.xml_summary_busy = busy
+        state = "disabled" if busy else "normal"
+        for control in getattr(self, "xml_summary_controls", []):
+            try:
+                control.configure(state=state)
+            except Exception:
+                pass
+        if message:
+            self.xml_status_var.set(message)
+        self.root.update_idletasks()
+
     def schedule_xml_summary_progress_update(self, current: int, total: int, message: str) -> None:
         percent = int(100 * current / max(total, 1))
         self.root.after(0, lambda percent=percent, message=message: self.update_xml_summary_progress(percent, message))
 
     def run_xml_summary(self) -> None:
+        if self.xml_summary_busy:
+            return
         source_text = self.xml_source_path_var.get().strip()
         if not source_text:
             messagebox.showerror("XML", "Selecione uma pasta ou arquivo XML.")
@@ -2602,7 +2637,7 @@ class SpedApp:
                 messagebox.showerror("XML", "Nao foi possivel localizar CNPJ/CPF da empresa no registro 0000 do SPED.")
                 return
             self.xml_company_tax_id_var.set(f"CNPJ/CPF empresa: {company_tax_id}")
-        self.xml_process_btn.configure(state="disabled")
+        self.set_xml_summary_busy(True)
         self.update_xml_summary_progress(0, "Iniciando leitura dos XMLs.")
         threading.Thread(
             target=self.process_xml_summary_background,
@@ -2625,17 +2660,65 @@ class SpedApp:
             )
             self.root.after(
                 0,
-                lambda rows=rows, stats=stats, credit_invoice_rows=credit_invoice_rows, credit_cfop_rows=credit_cfop_rows, credit_stats=credit_stats: (
-                    self.render_xml_summary_rows(rows, stats),
-                    self.render_xml_entry_credit_rows(credit_invoice_rows, credit_cfop_rows, credit_stats),
+                lambda rows=rows, stats=stats, credit_invoice_rows=credit_invoice_rows, credit_cfop_rows=credit_cfop_rows, credit_stats=credit_stats: self.render_xml_summary_result(
+                    rows,
+                    stats,
+                    credit_invoice_rows,
+                    credit_cfop_rows,
+                    credit_stats,
                 ),
             )
         except Exception as exc:
             error_message = str(exc)
             self.root.after(0, lambda message=error_message: self.handle_xml_summary_error(message))
 
+    def render_xml_summary_result(
+        self,
+        rows: list[dict[str, object]],
+        stats: dict[str, object],
+        credit_invoice_rows: list[dict[str, object]],
+        credit_cfop_rows: list[dict[str, object]],
+        credit_stats: dict[str, object],
+    ) -> None:
+        self.update_xml_summary_progress(100, "Leitura concluida. Montando grade, aguarde...")
+        progress = self.open_progress_dialog("Montando resultado", "Montando grade de XMLs, aguarde...")
+        progress.update(0, 2, "Preparando montagem da grade...")
+        progress.show_now()
+        self.root.after(
+            350,
+            lambda progress=progress, rows=rows, stats=stats, credit_invoice_rows=credit_invoice_rows, credit_cfop_rows=credit_cfop_rows, credit_stats=credit_stats: self.finish_render_xml_summary_result(
+                progress,
+                rows,
+                stats,
+                credit_invoice_rows,
+                credit_cfop_rows,
+                credit_stats,
+            ),
+        )
+
+    def finish_render_xml_summary_result(
+        self,
+        progress: ProgressDialogHandle,
+        rows: list[dict[str, object]],
+        stats: dict[str, object],
+        credit_invoice_rows: list[dict[str, object]],
+        credit_cfop_rows: list[dict[str, object]],
+        credit_stats: dict[str, object],
+    ) -> None:
+        try:
+            progress.update(1, 2, "Montando resumo por CFOP...")
+            self.render_xml_summary_rows(rows, stats)
+            progress.update(2, 2, "Montando creditos de entrada...")
+            self.render_xml_entry_credit_rows(credit_invoice_rows, credit_cfop_rows, credit_stats)
+        except Exception as exc:
+            progress.close()
+            self.handle_xml_summary_error(str(exc))
+            return
+        finally:
+            progress.close()
+            self.set_xml_summary_busy(False)
+
     def render_xml_summary_rows(self, rows: list[dict[str, object]], stats: dict[str, object]) -> None:
-        self.xml_process_btn.configure(state="normal")
         self.xml_summary_all_rows = rows
         self.xml_summary_stats = stats
         self.xml_ignored_log_rows = list(stats.get("ignored_log_rows", []))
@@ -2732,11 +2815,13 @@ class SpedApp:
         self.xml_total_icms_var.set(f"Valor ICMS: {format_decimal_sped(total_icms)}")
 
     def handle_xml_summary_error(self, message: str) -> None:
-        self.xml_process_btn.configure(state="normal")
+        self.set_xml_summary_busy(False)
         self.update_xml_summary_progress(0, "Erro durante a leitura dos XMLs.")
         messagebox.showerror("XML", message)
 
     def handle_xml_summary_double_click(self, event: object) -> None:
+        if self.xml_summary_busy:
+            return
         row_id = self.xml_summary_tree.identify_row(getattr(event, "y", 0))
         if not row_id:
             return
@@ -3045,12 +3130,10 @@ class SpedApp:
 
     def export_xml_summary(self, output_type: str) -> None:
         visible_rows = list(getattr(getattr(self, "xml_summary_tree", None), "_xml_visible_rows", []))
-        rows_to_export = [
-            row for row in visible_rows
-            if str(row.get("operation_type", "")).strip().lower() != "cancelado"
-        ]
+        rows_to_export = visible_rows
         if not rows_to_export:
             rows_to_export = filter_xml_summary_rows_by_scope(self.xml_summary_all_rows, self.xml_operation_scope_var.get())
+            rows_to_export = rows_to_export + list(self.xml_cancelled_display_rows)
         if not rows_to_export:
             messagebox.showinfo("XML", "Nao ha dados de XML para exportar.")
             return
@@ -3080,6 +3163,33 @@ class SpedApp:
             "Base COFINS",
             "Valor COFINS",
         ]
+        non_cancelled_rows = [
+            row
+            for row in rows_to_export
+            if str(row.get("operation_type", "")).strip().lower() != "cancelado"
+        ]
+        total_row = [
+            "Total sem cancelados",
+            "",
+            sum(int(row.get("document_count", 0) or 0) for row in non_cancelled_rows),
+            sum(int(row.get("items", 0) or 0) for row in non_cancelled_rows),
+            sum((Decimal(row.get("operation_value", Decimal("0"))) for row in non_cancelled_rows), Decimal("0")),
+            sum((Decimal(row.get("discount_value", Decimal("0"))) for row in non_cancelled_rows), Decimal("0")),
+            sum((Decimal(row.get("base_icms", Decimal("0"))) for row in non_cancelled_rows), Decimal("0")),
+            sum((Decimal(row.get("icms_value", Decimal("0"))) for row in non_cancelled_rows), Decimal("0")),
+            sum((Decimal(row.get("base_icms_st", Decimal("0"))) for row in non_cancelled_rows), Decimal("0")),
+            sum((Decimal(row.get("icms_st_value", Decimal("0"))) for row in non_cancelled_rows), Decimal("0")),
+            sum((Decimal(row.get("ipi_value", Decimal("0"))) for row in non_cancelled_rows), Decimal("0")),
+            sum((Decimal(row.get("base_pis", Decimal("0"))) for row in non_cancelled_rows), Decimal("0")),
+            sum((Decimal(row.get("pis_value", Decimal("0"))) for row in non_cancelled_rows), Decimal("0")),
+            sum((Decimal(row.get("base_cofins", Decimal("0"))) for row in non_cancelled_rows), Decimal("0")),
+            sum((Decimal(row.get("cofins_value", Decimal("0"))) for row in non_cancelled_rows), Decimal("0")),
+        ]
+        legend_text = (
+            f"XMLs invalidos: {self.xml_summary_stats.get('xml_ignored', 0)} | "
+            f"cancelados: {self.xml_summary_stats.get('xml_cancelled', 0)} | "
+            f"valor cancelado: {format_decimal_sped(Decimal(self.xml_summary_stats.get('xml_cancelled_value_total', Decimal('0'))))}"
+        )
         rows = [
             [
                 row.get("operation_type", ""),
@@ -3100,12 +3210,20 @@ class SpedApp:
             ]
             for row in rows_to_export
         ]
+        footer_rows = [
+            {"row_type": "blank", "values": []},
+            {"row_type": "section", "values": [legend_text]},
+            {"row_type": "section", "values": total_row},
+        ]
         try:
             output_path = Path(selected)
             if output_path.suffix.lower() == ".csv":
-                write_simple_csv_file(output_path, headers, rows)
+                write_simple_csv_file(output_path, headers, rows + [[], [legend_text], total_row])
             else:
-                write_simple_excel_workbook(output_path, [("Resumo XML CFOP", headers, rows)])
+                write_simple_excel_workbook(
+                    output_path,
+                    [("Resumo XML CFOP", headers, rows, {"include_total": False, "footer_rows": footer_rows})],
+                )
             messagebox.showinfo("XML", f"Arquivo gerado com sucesso:\n{output_path}")
         except Exception as exc:
             messagebox.showerror("XML", str(exc))
@@ -15592,8 +15710,7 @@ class SpedApp:
         self.xml_credit_total_ipi_var.set("Credito IPI: 0,00")
         self.clear_tree_items("xml_credit_notes_tree")
         self.clear_tree_items("xml_credit_cfop_tree")
-        if hasattr(self, "xml_process_btn"):
-            self.xml_process_btn.configure(state="normal")
+        self.set_xml_summary_busy(False)
         self.write_audit_log("LIMPAR_TELA", "Tela XML limpa.")
         if show_message:
             self.xml_status_var.set("Tela limpa. Selecione o SPED/XML para iniciar novamente.")
