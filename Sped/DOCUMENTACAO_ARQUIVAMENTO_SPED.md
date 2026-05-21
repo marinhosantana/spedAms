@@ -4,7 +4,7 @@ Este documento descreve o primeiro passo implementado para preservar o SPED orig
 
 ## Objetivo
 
-Quando um arquivo SPED e selecionado no sistema, o app tenta registrar uma copia imutavel para auditoria futura.
+Quando um arquivo SPED e importado/selecionado no sistema, o app registra uma copia imutavel para auditoria futura.
 
 Esse registro guarda:
 
@@ -18,6 +18,14 @@ Esse registro guarda:
 - CNPJ/CPF identificado no registro `0000`, quando possivel;
 - periodo inicial e final identificado no registro `0000`, quando possivel;
 - perfil automatico de auditoria.
+
+O fluxo recomendado agora e:
+
+```text
+Configuracoes > SPEDs Arquivados > Importar SPED
+```
+
+Essa deve ser a primeira acao para cadastrar um SPED original no sistema.
 
 ## Pasta de armazenamento
 
@@ -42,14 +50,21 @@ sped_itens_c170
 sped_resumos_c190
 ```
 
-`sped_perfis` guarda o agrupamento/perfil de auditoria.
-O nome automatico do perfil usa a empresa identificada no SPED, por exemplo:
+`sped_perfis` guarda o agrupamento/perfil de auditoria por empresa.
+O perfil automatico usa o nome e o CNPJ identificados no SPED, por exemplo:
 
 ```text
-EMPRESA TESTE LTDA - fiscal - 2026-01-01 a 2026-01-31
+EMPRESA TESTE LTDA - 12345678000199
 ```
 
-`sped_arquivos` guarda cada SPED original arquivado.
+Dentro do mesmo perfil podem existir varios arquivos importados, por data e por tipo:
+
+- SPED Fiscal de janeiro;
+- SPED Fiscal de fevereiro;
+- SPED Contribuicoes de janeiro;
+- SPED Contribuicoes de fevereiro.
+
+`sped_arquivos` guarda cada SPED original arquivado dentro do perfil.
 
 As tabelas analiticas guardam os dados extraidos do SPED Fiscal:
 
@@ -106,6 +121,7 @@ Configuracoes > SPEDs Arquivados
 
 Nessa tela e possivel:
 
+- importar SPEDs para criar/atualizar perfis de auditoria;
 - atualizar a lista de perfis;
 - ver os SPEDs originais vinculados ao perfil;
 - conferir contagens de produtos 0200, documentos, itens C170 e resumos C190;
