@@ -139,3 +139,122 @@ python .\Sped\main.py
 ```
 
 Se `SPED_ENV` nao for informado, ao rodar pelo codigo-fonte o sistema usa `dev` por padrao.
+
+## Como gerar EXE de desenvolvimento
+
+Use este comando na pasta `c:\spedAms`:
+
+```powershell
+.\build-dev.ps1
+```
+
+O executavel sera gerado em:
+
+```text
+dist\RevisorSPED_DEV\RevisorSPED_DEV.exe
+```
+
+Esse EXE abre sempre em ambiente `dev`.
+
+## Como gerar EXE de producao
+
+Use este comando na pasta `c:\spedAms`:
+
+```powershell
+.\build-prod.ps1
+```
+
+O executavel sera gerado em:
+
+```text
+dist\RevisorSPED_PROD\RevisorSPED_PROD.exe
+```
+
+Esse EXE abre sempre em ambiente `prod`.
+
+## Diferenca pratica entre os dois EXEs
+
+- `RevisorSPED_DEV.exe`: usa configuracoes `dev`, titulo com `[DEV]` e banco padrao `sped_icms_dev`.
+- `RevisorSPED_PROD.exe`: usa configuracoes `prod` e banco padrao `sped_icms`.
+
+Os scripts de build tambem copiam `mysql_schema.sql` para a pasta do executavel, porque o sistema usa esse arquivo para criar/atualizar o schema do MySQL.
+
+## Onde configurar o MySQL do EXE
+
+Ao abrir cada EXE pela primeira vez, ele cria o arquivo de configuracao JSON na mesma pasta do executavel, se ainda nao existir.
+
+Exemplos:
+
+```text
+dist\RevisorSPED_DEV\mysql_config.dev.json
+dist\RevisorSPED_PROD\mysql_config.prod.json
+```
+
+Voce tambem pode configurar pela tela `Configuracoes > Conexao MySQL`.
+
+## Como deixar outro computador igual
+
+No computador principal, primeiro envie as alteracoes para o Git:
+
+```powershell
+cd c:\spedAms
+git status
+git add .
+git commit -m "Configura ambientes dev e prod"
+git push origin develop
+```
+
+No outro computador, entre na pasta do projeto e baixe as alteracoes:
+
+```powershell
+cd c:\spedAms
+git fetch origin
+git checkout develop
+git pull origin develop
+```
+
+Depois prepare os ambientes Python:
+
+```powershell
+.\setup-ambientes.ps1
+```
+
+Esse script cria, se ainda nao existirem:
+
+```text
+.venv-dev
+.venv-prod
+```
+
+e instala as dependencias de uso e de build.
+
+Depois teste:
+
+```powershell
+.\run-dev.ps1
+```
+
+e:
+
+```powershell
+.\run-prod.ps1
+```
+
+Se o outro computador ainda nao permitir executar scripts PowerShell, rode uma vez:
+
+```powershell
+Set-ExecutionPolicy -Scope CurrentUser RemoteSigned
+```
+
+## Arquivos que nao vao pelo Git
+
+Alguns arquivos sao locais de cada computador e nao devem ser versionados:
+
+- `.venv-dev`
+- `.venv-prod`
+- `build`
+- `dist`
+- arquivos `.spec`
+- arquivos JSON de configuracao ignorados pelo `.gitignore` de `Sped`
+
+Por isso, em cada computador voce deve configurar o MySQL pela tela `Configuracoes > Conexao MySQL`, ou deixar o sistema criar os JSON padrao na primeira abertura.

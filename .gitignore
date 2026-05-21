@@ -6,3 +6,6 @@ Sped/app/ui/logs/
 Sped/logs/
 Sped/build/
 Sped/dist/
+build/
+dist/
+*.spec
