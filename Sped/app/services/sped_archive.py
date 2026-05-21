@@ -114,12 +114,8 @@ def infer_sped_metadata(file_path: Path) -> dict[str, str]:
 
 def build_default_profile_name(metadata: dict[str, str], file_path: Path) -> str:
     company = metadata.get("company_name", "") or metadata.get("company_tax_id", "") or "empresa_nao_identificada"
-    start = metadata.get("period_start", "")
-    end = metadata.get("period_end", "")
-    sped_type = metadata.get("sped_type", "sped")
-    if start and end:
-        return f"{company} - {sped_type} - {start} a {end}"
-    return f"{company} - {sped_type} - {file_path.stem}"
+    tax_id = metadata.get("company_tax_id", "")
+    return f"{company} - {tax_id}" if tax_id and tax_id not in company else company
 
 
 def archive_original_sped_file(source_path: Path, storage_root: Path, environment: str) -> SpedArchiveMetadata:

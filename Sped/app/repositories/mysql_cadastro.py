@@ -178,6 +178,15 @@ class MysqlCadastroRepository:
         if not column_exists("produtos_empresa", "tipo_produto"):
             cursor.execute("ALTER TABLE produtos_empresa ADD COLUMN tipo_produto VARCHAR(30) NOT NULL DEFAULT 'Revenda'")
 
+        if column_exists("sped_perfis", "id"):
+            if not column_exists("sped_perfis", "empresa_nome_sped"):
+                cursor.execute("ALTER TABLE sped_perfis ADD COLUMN empresa_nome_sped VARCHAR(255) NOT NULL DEFAULT '' AFTER nome")
+            if not column_exists("sped_perfis", "empresa_cnpj_sped"):
+                cursor.execute("ALTER TABLE sped_perfis ADD COLUMN empresa_cnpj_sped VARCHAR(20) NOT NULL DEFAULT '' AFTER empresa_nome_sped")
+
+        if column_exists("sped_arquivos", "id") and not column_exists("sped_arquivos", "empresa_nome_sped"):
+            cursor.execute("ALTER TABLE sped_arquivos ADD COLUMN empresa_nome_sped VARCHAR(255) NOT NULL DEFAULT '' AFTER periodo_fim")
+
         normalize_existing_icms_cst_values()
 
     def find_company_id_by_tax_id(self, tax_id: str) -> int | None:
@@ -220,35 +229,59 @@ class MysqlCadastroRepository:
         finally:
             connection.close()
 
-    def ensure_sped_profile(self, environment: str, profile_name: str, company_id: int | None = None, description: str = "") -> int:
+    def ensure_sped_profile(
+        self,
+        environment: str,
+        profile_name: str,
+        company_id: int | None = None,
+        description: str = "",
+        company_name: str = "",
+        company_tax_id: str = "",
+    ) -> int:
         normalized_name = str(profile_name or "").strip() or "SPED sem perfil"
+        normalized_company_name = str(company_name or "").strip()
+        normalized_company_tax_id = "".join(char for char in str(company_tax_id or "") if char.isdigit())
         connection = self.get_connection()
         try:
             cursor = connection.cursor()
-            cursor.execute(
-                """
-                SELECT id
-                FROM sped_perfis
-                WHERE ambiente = %s
-                  AND nome = %s
-                LIMIT 1
-                """,
-                (environment, normalized_name),
-            )
+            if normalized_company_tax_id:
+                cursor.execute(
+                    """
+                    SELECT id
+                    FROM sped_perfis
+                    WHERE ambiente = %s
+                      AND empresa_cnpj_sped = %s
+                    LIMIT 1
+                    """,
+                    (environment, normalized_company_tax_id),
+                )
+            else:
+                cursor.execute(
+                    """
+                    SELECT id
+                    FROM sped_perfis
+                    WHERE ambiente = %s
+                      AND nome = %s
+                    LIMIT 1
+                    """,
+                    (environment, normalized_name),
+                )
             row = cursor.fetchone()
             if row:
                 profile_id = int(row[0])
-                if company_id:
-                    cursor.execute(
-                        """
-                        UPDATE sped_perfis
-                        SET empresa_id = COALESCE(empresa_id, %s),
-                            ativo = 1
-                        WHERE id = %s
-                        """,
-                        (company_id, profile_id),
-                    )
-                    connection.commit()
+                cursor.execute(
+                    """
+                    UPDATE sped_perfis
+                    SET empresa_id = COALESCE(empresa_id, %s),
+                        nome = CASE WHEN nome = '' THEN %s ELSE nome END,
+                        empresa_nome_sped = CASE WHEN empresa_nome_sped = '' THEN %s ELSE empresa_nome_sped END,
+                        empresa_cnpj_sped = CASE WHEN empresa_cnpj_sped = '' THEN %s ELSE empresa_cnpj_sped END,
+                        ativo = 1
+                    WHERE id = %s
+                    """,
+                    (company_id, normalized_name, normalized_company_name, normalized_company_tax_id, profile_id),
+                )
+                connection.commit()
                 return profile_id
 
             cursor.execute(
@@ -257,11 +290,13 @@ class MysqlCadastroRepository:
                     empresa_id,
                     ambiente,
                     nome,
+                    empresa_nome_sped,
+                    empresa_cnpj_sped,
                     descricao,
                     ativo
-                ) VALUES (%s, %s, %s, %s, 1)
+                ) VALUES (%s, %s, %s, %s, %s, %s, 1)
                 """,
-                (company_id, environment, normalized_name, description),
+                (company_id, environment, normalized_name, normalized_company_name, normalized_company_tax_id, description),
             )
             connection.commit()
             return int(cursor.lastrowid)
@@ -295,6 +330,7 @@ class MysqlCadastroRepository:
                     tipo_sped,
                     periodo_inicio,
                     periodo_fim,
+                    empresa_nome_sped,
                     empresa_cnpj,
                     arquivo_nome_original,
                     arquivo_hash_sha256,
@@ -302,7 +338,7 @@ class MysqlCadastroRepository:
                     caminho_arquivo_original,
                     caminho_arquivo_arquivado,
                     observacao
-                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 """,
                 (
                     data.get("perfil_id"),
@@ -311,6 +347,7 @@ class MysqlCadastroRepository:
                     data.get("tipo_sped", ""),
                     data.get("periodo_inicio") or None,
                     data.get("periodo_fim") or None,
+                    data.get("empresa_nome_sped", ""),
                     data.get("empresa_cnpj", ""),
                     data["arquivo_nome_original"],
                     data["arquivo_hash_sha256"],
@@ -527,10 +564,12 @@ class MysqlCadastroRepository:
                 SELECT
                     p.id,
                     p.nome,
+                    p.empresa_nome_sped,
+                    p.empresa_cnpj_sped,
                     p.ambiente,
                     p.empresa_id,
                     COALESCE(e.razao_social, '') AS empresa_nome,
-                    COALESCE(e.cnpj, '') AS empresa_cnpj,
+                    COALESCE(e.cnpj, p.empresa_cnpj_sped, '') AS empresa_cnpj,
                     COUNT(a.id) AS total_arquivos,
                     COALESCE(SUM(a.arquivo_tamanho), 0) AS total_bytes,
                     MIN(a.periodo_inicio) AS periodo_inicio,
@@ -541,7 +580,7 @@ class MysqlCadastroRepository:
                 LEFT JOIN sped_arquivos a ON a.perfil_id = p.id
                 WHERE p.ambiente = %s
                   AND p.ativo = 1
-                GROUP BY p.id, p.nome, p.ambiente, p.empresa_id, e.razao_social, e.cnpj
+                GROUP BY p.id, p.nome, p.empresa_nome_sped, p.empresa_cnpj_sped, p.ambiente, p.empresa_id, e.razao_social, e.cnpj
                 ORDER BY ultimo_arquivo_em DESC, p.nome
                 """,
                 (environment,),
@@ -571,6 +610,7 @@ class MysqlCadastroRepository:
                     a.tipo_sped,
                     a.periodo_inicio,
                     a.periodo_fim,
+                    a.empresa_nome_sped,
                     a.empresa_cnpj,
                     a.arquivo_nome_original,
                     a.arquivo_hash_sha256,

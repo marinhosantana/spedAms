@@ -45,13 +45,16 @@ CREATE TABLE IF NOT EXISTS sped_perfis (
     empresa_id INT NULL,
     ambiente VARCHAR(10) NOT NULL DEFAULT 'dev',
     nome VARCHAR(255) NOT NULL,
+    empresa_nome_sped VARCHAR(255) NOT NULL DEFAULT '',
+    empresa_cnpj_sped VARCHAR(20) NOT NULL DEFAULT '',
     descricao TEXT NULL,
     ativo TINYINT(1) NOT NULL DEFAULT 1,
     created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
     CONSTRAINT fk_sped_perfis_empresa FOREIGN KEY (empresa_id) REFERENCES empresas (id),
     UNIQUE KEY uq_sped_perfis_ambiente_nome (ambiente, nome),
-    KEY idx_sped_perfis_empresa (empresa_id)
+    KEY idx_sped_perfis_empresa (empresa_id),
+    KEY idx_sped_perfis_cnpj_sped (empresa_cnpj_sped)
 );
 
 CREATE TABLE IF NOT EXISTS sped_arquivos (
@@ -62,6 +65,7 @@ CREATE TABLE IF NOT EXISTS sped_arquivos (
     tipo_sped VARCHAR(30) NOT NULL DEFAULT '',
     periodo_inicio DATE NULL,
     periodo_fim DATE NULL,
+    empresa_nome_sped VARCHAR(255) NOT NULL DEFAULT '',
     empresa_cnpj VARCHAR(20) NOT NULL DEFAULT '',
     arquivo_nome_original VARCHAR(255) NOT NULL,
     arquivo_hash_sha256 CHAR(64) NOT NULL,
