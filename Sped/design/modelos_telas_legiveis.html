@@ -1,0 +1,437 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Modelos de Telas Legiveis - SPED Next</title>
+  <style>
+    :root {
+      --bg: #f3f6f9;
+      --sidebar: #17212b;
+      --sidebar-active: #25384a;
+      --text: #1d2730;
+      --muted: #5d6e7d;
+      --panel: #ffffff;
+      --line: #d6e0e8;
+      --head: #edf3f7;
+      --accent: #1f6fd1;
+      --ok: #1f8f5f;
+      --warn: #b56b12;
+      --bad: #b42318;
+    }
+
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      background: var(--bg);
+      color: var(--text);
+      font-family: "Segoe UI", Arial, sans-serif;
+      font-size: 14px;
+      line-height: 1.4;
+    }
+    .page {
+      display: grid;
+      grid-template-columns: 230px 1fr;
+      min-height: 100vh;
+    }
+    aside {
+      background: var(--sidebar);
+      color: #eaf1f7;
+      padding: 18px 10px;
+    }
+    .brand {
+      font-size: 20px;
+      font-weight: 700;
+      padding: 0 8px 18px;
+    }
+    .nav {
+      display: grid;
+      gap: 4px;
+    }
+    .nav div {
+      padding: 11px 12px;
+      border-radius: 6px;
+      color: #d9e5ef;
+    }
+    .nav .active { background: var(--sidebar-active); color: #fff; }
+    main {
+      padding: 18px;
+      display: grid;
+      gap: 24px;
+    }
+    .model {
+      border: 1px solid var(--line);
+      background: var(--panel);
+      border-radius: 8px;
+      overflow: hidden;
+      box-shadow: 0 1px 2px rgba(15, 23, 42, .06);
+    }
+    .model-head {
+      padding: 16px 18px;
+      border-bottom: 1px solid var(--line);
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 16px;
+    }
+    .model-title {
+      font-size: 18px;
+      font-weight: 700;
+    }
+    .model-note {
+      color: var(--muted);
+      font-size: 13px;
+      margin-top: 3px;
+    }
+    .badge {
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      padding: 5px 10px;
+      color: var(--muted);
+      white-space: nowrap;
+      background: #f8fbfd;
+    }
+    .screen {
+      background: #eef3f7;
+      padding: 16px;
+      min-height: 520px;
+    }
+    .topbar {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      margin-bottom: 12px;
+    }
+    h1 {
+      margin: 0;
+      font-size: 22px;
+      line-height: 1.2;
+    }
+    .actions {
+      display: flex;
+      gap: 8px;
+      flex-wrap: wrap;
+    }
+    button {
+      border: 1px solid #bdcbd7;
+      background: #fff;
+      color: var(--text);
+      border-radius: 6px;
+      padding: 8px 12px;
+      font: inherit;
+      font-weight: 600;
+    }
+    button.primary {
+      background: var(--accent);
+      color: #fff;
+      border-color: var(--accent);
+    }
+    .panel {
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 8px;
+    }
+    .panel-pad { padding: 12px; }
+    .filters {
+      display: grid;
+      gap: 10px;
+    }
+    .filter-grid-4 { grid-template-columns: 1.1fr 1.1fr 1fr 1.4fr; }
+    .filter-grid-2 { grid-template-columns: 290px 1fr; }
+    label {
+      display: block;
+      color: var(--muted);
+      font-size: 12px;
+      font-weight: 700;
+      margin-bottom: 5px;
+    }
+    .field {
+      border: 1px solid #c8d4df;
+      background: #fff;
+      min-height: 36px;
+      border-radius: 6px;
+      padding: 8px 10px;
+      color: #24313d;
+    }
+    .summary {
+      display: grid;
+      grid-template-columns: repeat(5, 1fr);
+      gap: 8px;
+      margin: 12px 0;
+    }
+    .metric {
+      background: #fff;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 10px 12px;
+      min-width: 0;
+    }
+    .metric .k { color: var(--muted); font-size: 12px; font-weight: 700; }
+    .metric .v { font-size: 17px; font-weight: 750; margin-top: 3px; }
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      background: #fff;
+      table-layout: fixed;
+    }
+    th {
+      background: var(--head);
+      color: #273542;
+      font-size: 12px;
+      text-align: left;
+      padding: 9px 10px;
+      border-bottom: 1px solid var(--line);
+      white-space: nowrap;
+    }
+    td {
+      padding: 9px 10px;
+      border-bottom: 1px solid #e7edf2;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    tr:nth-child(even) td { background: #fbfdff; }
+    .status {
+      display: inline-block;
+      border-radius: 999px;
+      padding: 3px 8px;
+      font-size: 12px;
+      font-weight: 700;
+    }
+    .status.ok { color: var(--ok); background: #e9f7f0; }
+    .status.warn { color: var(--warn); background: #fff4df; }
+    .status.bad { color: var(--bad); background: #feeceb; }
+    .split {
+      display: grid;
+      grid-template-columns: 300px 1fr;
+      gap: 12px;
+    }
+    .side-filter {
+      display: grid;
+      gap: 10px;
+      align-content: start;
+    }
+    .tabs {
+      display: flex;
+      gap: 4px;
+      border-bottom: 1px solid var(--line);
+      padding: 0 10px;
+      background: #f7fafc;
+    }
+    .tab {
+      padding: 11px 12px;
+      font-weight: 700;
+      color: var(--muted);
+      border-bottom: 3px solid transparent;
+    }
+    .tab.active {
+      color: var(--accent);
+      border-color: var(--accent);
+    }
+    .table-toolbar {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      padding: 10px 12px;
+      border-bottom: 1px solid var(--line);
+      gap: 10px;
+    }
+    .hint { color: var(--muted); font-size: 13px; }
+    .dense-table td { padding: 7px 9px; }
+    .footer {
+      padding: 10px 12px;
+      color: var(--muted);
+      background: #f8fbfd;
+      border-top: 1px solid var(--line);
+      font-weight: 600;
+    }
+    @media (max-width: 1100px) {
+      .page { grid-template-columns: 1fr; }
+      aside { display: none; }
+      .filter-grid-4, .filter-grid-2, .split, .summary { grid-template-columns: 1fr; }
+    }
+  </style>
+</head>
+<body>
+  <div class="page">
+    <aside>
+      <div class="brand">SPED Next</div>
+      <nav class="nav">
+        <div>Dashboard</div>
+        <div>SPEDs Arquivados</div>
+        <div class="active">Consultas Fiscais</div>
+        <div>Comparacoes</div>
+        <div>Configuracoes</div>
+      </nav>
+    </aside>
+    <main>
+      <section class="model">
+        <div class="model-head">
+          <div>
+            <div class="model-title">Modelo 1 - Barra de filtros em cima</div>
+            <div class="model-note">Bom para manter a tabela grande e facilitar leitura linha a linha.</div>
+          </div>
+          <div class="badge">Mais parecido com a tela atual</div>
+        </div>
+        <div class="screen">
+          <div class="topbar">
+            <h1>Consulta Entradas ICMS</h1>
+            <div class="actions">
+              <button>Limpar</button>
+              <button>Exportar</button>
+              <button class="primary">Processar</button>
+            </div>
+          </div>
+          <div class="panel panel-pad filters filter-grid-4">
+            <div><label>Periodos</label><div class="field">01/2026, 02/2026, 03/2026</div></div>
+            <div><label>CST</label><div class="field">000, 020, 060</div></div>
+            <div><label>CFOP</label><div class="field">1101, 1401</div></div>
+            <div><label>Busca</label><div class="field">Codigo, descricao ou fornecedor</div></div>
+          </div>
+          <div class="summary">
+            <div class="metric"><div class="k">Linhas</div><div class="v">2.418</div></div>
+            <div class="metric"><div class="k">Produtos</div><div class="v">386</div></div>
+            <div class="metric"><div class="k">Operacao</div><div class="v">R$ 842.900</div></div>
+            <div class="metric"><div class="k">Base ICMS</div><div class="v">R$ 612.440</div></div>
+            <div class="metric"><div class="k">ICMS</div><div class="v">R$ 73.493</div></div>
+          </div>
+          <div class="panel">
+            <div class="table-toolbar">
+              <strong>Resultado filtrado</strong>
+              <span class="hint">Linhas alternadas, fonte maior e cabecalho fixo visual</span>
+            </div>
+            <table>
+              <thead>
+                <tr>
+                  <th style="width: 88px">Periodo</th>
+                  <th style="width: 110px">Codigo</th>
+                  <th>Descricao</th>
+                  <th style="width: 85px">CST</th>
+                  <th style="width: 85px">CFOP</th>
+                  <th style="width: 120px">Valor</th>
+                  <th style="width: 120px">ICMS</th>
+                  <th style="width: 120px">Status</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr><td>01/2026</td><td>10042</td><td>Produto alimenticio entrada tributada</td><td>000</td><td>1101</td><td>12.430,00</td><td>1.491,60</td><td><span class="status ok">OK</span></td></tr>
+                <tr><td>01/2026</td><td>10087</td><td>Mercadoria com reducao de base</td><td>020</td><td>1401</td><td>8.210,45</td><td>689,68</td><td><span class="status warn">Revisar</span></td></tr>
+                <tr><td>02/2026</td><td>10113</td><td>Produto sem correspondencia no XML</td><td>060</td><td>1556</td><td>2.340,10</td><td>0,00</td><td><span class="status bad">Divergente</span></td></tr>
+                <tr><td>03/2026</td><td>10144</td><td>Item com credito aproveitavel</td><td>000</td><td>1102</td><td>18.900,00</td><td>2.268,00</td><td><span class="status ok">OK</span></td></tr>
+              </tbody>
+            </table>
+            <div class="footer">Duplo clique abre detalhes. Clique direito copia a selecao.</div>
+          </div>
+        </div>
+      </section>
+
+      <section class="model">
+        <div class="model-head">
+          <div>
+            <div class="model-title">Modelo 2 - Filtros laterais fixos</div>
+            <div class="model-note">Bom quando existem muitos filtros e a tabela precisa ficar mais limpa.</div>
+          </div>
+          <div class="badge">Mais organizado para telas densas</div>
+        </div>
+        <div class="screen">
+          <div class="topbar">
+            <h1>Consulta Entradas ICMS</h1>
+            <div class="actions">
+              <button>Exportar</button>
+              <button class="primary">Processar</button>
+            </div>
+          </div>
+          <div class="split">
+            <div class="panel panel-pad side-filter">
+              <strong>Filtros</strong>
+              <div><label>Periodos</label><div class="field">3 selecionados</div></div>
+              <div><label>Status</label><div class="field">Todos</div></div>
+              <div><label>CST</label><div class="field">000, 020, 060</div></div>
+              <div><label>CFOP</label><div class="field">1101, 1401</div></div>
+              <div><label>Busca</label><div class="field">produto ou codigo</div></div>
+              <button class="primary">Aplicar filtros</button>
+              <button>Limpar filtros</button>
+            </div>
+            <div>
+              <div class="summary" style="grid-template-columns: repeat(4, 1fr); margin-top: 0">
+                <div class="metric"><div class="k">Linhas</div><div class="v">2.418</div></div>
+                <div class="metric"><div class="k">Produtos</div><div class="v">386</div></div>
+                <div class="metric"><div class="k">Base/Oper.</div><div class="v">72,65%</div></div>
+                <div class="metric"><div class="k">ICMS</div><div class="v">R$ 73.493</div></div>
+              </div>
+              <div class="panel">
+                <div class="tabs">
+                  <div class="tab active">Produtos</div>
+                  <div class="tab">Resumo CST</div>
+                  <div class="tab">Resumo CFOP</div>
+                  <div class="tab">Divergencias</div>
+                </div>
+                <table>
+                  <thead>
+                    <tr><th style="width: 110px">Codigo</th><th>Produto</th><th style="width: 95px">CST</th><th style="width: 95px">CFOP</th><th style="width: 130px">Base ICMS</th><th style="width: 130px">Status</th></tr>
+                  </thead>
+                  <tbody>
+                    <tr><td>10042</td><td>Produto alimenticio entrada tributada</td><td>000</td><td>1101</td><td>12.430,00</td><td><span class="status ok">OK</span></td></tr>
+                    <tr><td>10087</td><td>Mercadoria com reducao de base</td><td>020</td><td>1401</td><td>4.926,27</td><td><span class="status warn">Revisar</span></td></tr>
+                    <tr><td>10113</td><td>Produto sem correspondencia no XML</td><td>060</td><td>1556</td><td>0,00</td><td><span class="status bad">Divergente</span></td></tr>
+                    <tr><td>10144</td><td>Item com credito aproveitavel</td><td>000</td><td>1102</td><td>18.900,00</td><td><span class="status ok">OK</span></td></tr>
+                  </tbody>
+                </table>
+                <div class="footer">Filtros ficam sempre visiveis enquanto o resultado ocupa o restante da tela.</div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section class="model">
+        <div class="model-head">
+          <div>
+            <div class="model-title">Modelo 3 - Analise por prioridades</div>
+            <div class="model-note">Bom para auditoria: primeiro mostra problemas, depois detalhes e exportacao.</div>
+          </div>
+          <div class="badge">Mais focado em decisao</div>
+        </div>
+        <div class="screen">
+          <div class="topbar">
+            <h1>Diagnostico de Entradas</h1>
+            <div class="actions">
+              <button>Atualizar</button>
+              <button>Gerar relatorio</button>
+              <button class="primary">Exportar Excel</button>
+            </div>
+          </div>
+          <div class="summary">
+            <div class="metric"><div class="k">Criticos</div><div class="v" style="color: var(--bad)">18</div></div>
+            <div class="metric"><div class="k">Revisar</div><div class="v" style="color: var(--warn)">74</div></div>
+            <div class="metric"><div class="k">OK</div><div class="v" style="color: var(--ok)">2.326</div></div>
+            <div class="metric"><div class="k">Impacto estimado</div><div class="v">R$ 19.840</div></div>
+            <div class="metric"><div class="k">Periodo</div><div class="v">Jan-Mar/26</div></div>
+          </div>
+          <div class="panel">
+            <div class="tabs">
+              <div class="tab active">Pendencias</div>
+              <div class="tab">Todos os itens</div>
+              <div class="tab">Por produto</div>
+              <div class="tab">Por fornecedor</div>
+            </div>
+            <table class="dense-table">
+              <thead>
+                <tr><th style="width: 110px">Prioridade</th><th>Motivo</th><th style="width: 120px">Produto</th><th style="width: 120px">Valor</th><th style="width: 120px">Diferenca</th><th style="width: 140px">Acao</th></tr>
+              </thead>
+              <tbody>
+                <tr><td><span class="status bad">Critico</span></td><td>Produto sem correspondencia no XML</td><td>10113</td><td>2.340,10</td><td>421,22</td><td>Conferir XML</td></tr>
+                <tr><td><span class="status bad">Critico</span></td><td>Base de ICMS maior que valor da operacao</td><td>10091</td><td>7.150,00</td><td>980,00</td><td>Ajustar regra</td></tr>
+                <tr><td><span class="status warn">Revisar</span></td><td>Reducao de base sem regra cadastrada</td><td>10087</td><td>8.210,45</td><td>689,68</td><td>Criar regra</td></tr>
+                <tr><td><span class="status warn">Revisar</span></td><td>CFOP diferente entre periodos</td><td>10144</td><td>18.900,00</td><td>0,00</td><td>Validar cadastro</td></tr>
+              </tbody>
+            </table>
+            <div class="footer">A tela abre mostrando o que exige atencao, sem esconder a tabela completa.</div>
+          </div>
+        </div>
+      </section>
+    </main>
+  </div>
+</body>
+</html>
