@@ -413,9 +413,6 @@ class SpedApp:
         self.db_status_var.set("Carregando empresas...")
         threading.Thread(target=self._load_company_tree_data_background, daemon=True).start()
 
-    def show_dev_test_message(self) -> None:
-        messagebox.showinfo("Teste DEV", "Botao de teste ativo somente no ambiente de desenvolvimento.")
-
     def _load_company_tree_data_background(self) -> None:
         try:
             companies = self.mysql_repo.list_companies() if self.mysql_repo.mysql_available() else []
@@ -533,14 +530,6 @@ class SpedApp:
             foreground="#08324d",
             justify="center",
         ).pack(pady=(0, 6))
-
-        if self.app_environment == "dev":
-            ttk.Button(
-                frame,
-                text="Teste",
-                style="Secondary.TButton",
-                command=self.show_dev_test_message,
-            ).pack(pady=(0, 8))
 
         notebook = ttk.Notebook(frame)
         notebook.pack(fill=BOTH, expand=True)
