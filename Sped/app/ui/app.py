@@ -6,11 +6,12 @@ import re
 import threading
 import tkinter as tk
 from collections import defaultdict
+from contextlib import contextmanager
 from decimal import Decimal
 from pathlib import Path
 from tkinter import BOTH, END, LEFT, RIGHT, BooleanVar, Canvas, Menu, StringVar, Text, Tk, Toplevel
 from tkinter import filedialog, messagebox, ttk
-from typing import Iterable
+from typing import Iterable, Iterator
 
 from app.config import APP_DEFAULT_CONFIG, COMPARE_MARK_CHECKED, COMPARE_MARK_UNCHECKED
 from app.exporters.rules_report_exporter import build_rule_report_entries, write_rules_report_docx
@@ -148,6 +149,7 @@ from app.services.tax_rules import (
     normalize_tax_code,
     normalize_text,
 )
+from app.ui.progress_dialog import ProgressDialogHandle
 
 
 class SpedApp:
@@ -4906,31 +4908,19 @@ class SpedApp:
             if source_type_var.get() != "Consolidado" and not source_text:
                 messagebox.showwarning("Importacao", "Selecione a fonte da importacao.")
                 return
-            progress_dialog, progress_message_var, progress_percent_var = self.open_progress_dialog(
-                "Preparando importacao",
-                "Montando previa da importacao...",
-            )
             try:
-                preview = self.build_product_import_preview(
-                    source_type_var.get(),
-                    source_text,
-                    import_mode_var.get(),
-                    progress_callback=lambda current, total, message: self.update_progress_dialog(
-                        progress_dialog,
-                        progress_message_var,
-                        progress_percent_var,
-                        current,
-                        total,
-                        message,
-                    ),
-                )
+                with self.progress_dialog("Preparando importacao", "Montando previa da importacao...") as progress:
+                    preview = self.build_product_import_preview(
+                        source_type_var.get(),
+                        source_text,
+                        import_mode_var.get(),
+                        progress_callback=progress.update,
+                    )
             except Exception as exc:
-                self.close_progress_dialog(progress_dialog)
                 self.db_status_var.set(f"Falha na importacao de produtos: {exc}")
                 self.log_message(f"Falha na importacao de produtos: {exc}")
                 messagebox.showerror("Importacao", str(exc))
                 return
-            self.close_progress_dialog(progress_dialog)
             self.open_product_import_preview_dialog(dialog, preview, source_type_var.get(), import_mode_var.get(), source_text)
 
         ttk.Button(actions, text="Importar", style="Primary.TButton", command=run_import).pack(side=RIGHT)
@@ -5042,29 +5032,17 @@ class SpedApp:
         footer.grid(row=3, column=0, sticky="e", pady=(10, 0))
 
         def confirm_import() -> None:
-            progress_dialog, progress_message_var, progress_percent_var = self.open_progress_dialog(
-                "Importando produtos",
-                "Gravando produtos no banco...",
-            )
             try:
-                result = self.apply_product_import_plan(
-                    plan_rows,
-                    progress_callback=lambda current, total, message: self.update_progress_dialog(
-                        progress_dialog,
-                        progress_message_var,
-                        progress_percent_var,
-                        current,
-                        total,
-                        message,
-                    ),
-                )
+                with self.progress_dialog("Importando produtos", "Gravando produtos no banco...") as progress:
+                    result = self.apply_product_import_plan(
+                        plan_rows,
+                        progress_callback=progress.update,
+                    )
             except Exception as exc:
-                self.close_progress_dialog(progress_dialog)
                 self.db_status_var.set(f"Falha na importacao de produtos: {exc}")
                 self.log_message(f"Falha na importacao de produtos: {exc}")
                 messagebox.showerror("Importacao", str(exc))
                 return
-            self.close_progress_dialog(progress_dialog)
             dialog.destroy()
             parent_dialog.destroy()
             self.refresh_product_tree()
@@ -10762,62 +10740,47 @@ class SpedApp:
             return
         sped_paths, xml_sources = path_inputs
 
-        progress_dialog, progress_message_var, progress_percent_var = self.open_progress_dialog(
-            "Processar Consultas",
-            "Preparando processamento de entradas...",
-        )
         try:
-            self.log_message("Processando SPEDs para consulta comparativa...")
-            self.write_audit_log(
-                "CONSULTA_ENTRADAS_INICIO",
-                f"speds={format_audit_paths(sped_paths)}; xmls={format_audit_paths(xml_sources)}",
-            )
-            period_labels, comparison_rows = build_entry_period_comparison_rows(
-                sped_paths,
-                xml_sources,
-                progress_callback=lambda current, total, message: self.update_progress_dialog(
-                    progress_dialog,
-                    progress_message_var,
-                    progress_percent_var,
-                    current,
-                    total,
-                    message,
-                ),
-            )
-            self.consult_period_labels = period_labels
-            self.consult_period_path_map = {label: path for label, path in zip(period_labels, sped_paths)}
-            self.consult_comparison_rows = comparison_rows
-            self.rebuild_consultation_periods()
-            self.refresh_consultation_tree()
-            self.sales_consult_sped_paths_var.set(format_selected_paths(sped_paths))
-            self.log_message(
-                f"Consulta carregada com sucesso: {len(period_labels)} periodo(s) e {len(comparison_rows)} linha(s) comparativas."
-            )
-            self.write_audit_log(
-                "CONSULTA_ENTRADAS_FIM",
-                f"periodos={len(period_labels)}; linhas={len(comparison_rows)}; speds={format_audit_paths(sped_paths)}",
-            )
-            if sync_sales:
-                self.log_message("Sincronizando a mesma lista de SPEDs na Consulta Saidas...")
-                if xml_sources:
-                    self.sales_consult_xml_paths_var.set(format_selected_paths(xml_sources))
-                progress_message_var.set("Entradas concluídas. Iniciando processamento de saídas...")
-                progress_percent_var.set("0%")
-                progress_dialog._progressbar["value"] = 0
-                progress_dialog.update_idletasks()
-                self.process_sales_consultation_speds(show_success=False, external_progress=(progress_dialog, progress_message_var, progress_percent_var))
-            if show_success:
-                messagebox.showinfo("Processar Consultas", "Processado com sucesso.")
+            with self.progress_dialog("Processar Consultas", "Preparando processamento de entradas...") as progress:
+                self.log_message("Processando SPEDs para consulta comparativa...")
+                self.write_audit_log(
+                    "CONSULTA_ENTRADAS_INICIO",
+                    f"speds={format_audit_paths(sped_paths)}; xmls={format_audit_paths(xml_sources)}",
+                )
+                period_labels, comparison_rows = build_entry_period_comparison_rows(
+                    sped_paths,
+                    xml_sources,
+                    progress_callback=progress.update,
+                )
+                self.consult_period_labels = period_labels
+                self.consult_period_path_map = {label: path for label, path in zip(period_labels, sped_paths)}
+                self.consult_comparison_rows = comparison_rows
+                self.rebuild_consultation_periods()
+                self.refresh_consultation_tree()
+                self.sales_consult_sped_paths_var.set(format_selected_paths(sped_paths))
+                self.log_message(
+                    f"Consulta carregada com sucesso: {len(period_labels)} periodo(s) e {len(comparison_rows)} linha(s) comparativas."
+                )
+                self.write_audit_log(
+                    "CONSULTA_ENTRADAS_FIM",
+                    f"periodos={len(period_labels)}; linhas={len(comparison_rows)}; speds={format_audit_paths(sped_paths)}",
+                )
+                if sync_sales:
+                    self.log_message("Sincronizando a mesma lista de SPEDs na Consulta Saidas...")
+                    if xml_sources:
+                        self.sales_consult_xml_paths_var.set(format_selected_paths(xml_sources))
+                    progress.reset("Entradas concluidas. Iniciando processamento de saidas...")
+                    self.process_sales_consultation_speds(show_success=False, external_progress=progress)
+                if show_success:
+                    messagebox.showinfo("Processar Consultas", "Processado com sucesso.")
         except Exception as exc:
             self.log_message(f"Falha ao processar SPEDs da consulta: {exc}")
             messagebox.showerror("Erro no processamento", str(exc))
-        finally:
-            self.close_progress_dialog(progress_dialog)
 
     def process_sales_consultation_speds(
         self,
         show_success: bool = True,
-        external_progress: tuple[Toplevel, StringVar, StringVar] | None = None,
+        external_progress: ProgressDialogHandle | None = None,
     ) -> None:
         path_inputs = self.get_consultation_path_inputs(
             self.sales_consult_sped_paths_var.get(),
@@ -10829,52 +10792,35 @@ class SpedApp:
             return
         sped_paths, xml_sources = path_inputs
 
-        owns_progress = external_progress is None
-        if external_progress is None:
-            progress_dialog, progress_message_var, progress_percent_var = self.open_progress_dialog(
-                "Processar Consultas",
-                "Preparando processamento de saídas...",
-            )
-        else:
-            progress_dialog, progress_message_var, progress_percent_var = external_progress
         try:
-            self.log_message("Processando SPEDs para consulta comparativa de saidas...")
-            self.write_audit_log(
-                "CONSULTA_SAIDAS_INICIO",
-                f"speds={format_audit_paths(sped_paths)}; xmls={format_audit_paths(xml_sources)}",
-            )
-            period_labels, comparison_rows = build_sale_period_comparison_rows(
-                sped_paths,
-                xml_sources,
-                progress_callback=lambda current, total, message: self.update_progress_dialog(
-                    progress_dialog,
-                    progress_message_var,
-                    progress_percent_var,
-                    current,
-                    total,
-                    message,
-                ),
-            )
-            self.sales_consult_period_labels = period_labels
-            self.sales_consult_period_path_map = {label: path for label, path in zip(period_labels, sped_paths)}
-            self.sales_consult_comparison_rows = comparison_rows
-            self.rebuild_sales_consultation_periods()
-            self.refresh_sales_consultation_tree()
-            self.log_message(
-                f"Consulta de saidas carregada com sucesso: {len(period_labels)} periodo(s) e {len(comparison_rows)} linha(s) comparativas."
-            )
-            self.write_audit_log(
-                "CONSULTA_SAIDAS_FIM",
-                f"periodos={len(period_labels)}; linhas={len(comparison_rows)}; speds={format_audit_paths(sped_paths)}",
-            )
-            if show_success:
-                messagebox.showinfo("Processar Consultas", "Processado com sucesso.")
+            with self.progress_dialog("Processar Consultas", "Preparando processamento de saidas...", external_progress) as progress:
+                self.log_message("Processando SPEDs para consulta comparativa de saidas...")
+                self.write_audit_log(
+                    "CONSULTA_SAIDAS_INICIO",
+                    f"speds={format_audit_paths(sped_paths)}; xmls={format_audit_paths(xml_sources)}",
+                )
+                period_labels, comparison_rows = build_sale_period_comparison_rows(
+                    sped_paths,
+                    xml_sources,
+                    progress_callback=progress.update,
+                )
+                self.sales_consult_period_labels = period_labels
+                self.sales_consult_period_path_map = {label: path for label, path in zip(period_labels, sped_paths)}
+                self.sales_consult_comparison_rows = comparison_rows
+                self.rebuild_sales_consultation_periods()
+                self.refresh_sales_consultation_tree()
+                self.log_message(
+                    f"Consulta de saidas carregada com sucesso: {len(period_labels)} periodo(s) e {len(comparison_rows)} linha(s) comparativas."
+                )
+                self.write_audit_log(
+                    "CONSULTA_SAIDAS_FIM",
+                    f"periodos={len(period_labels)}; linhas={len(comparison_rows)}; speds={format_audit_paths(sped_paths)}",
+                )
+                if show_success:
+                    messagebox.showinfo("Processar Consultas", "Processado com sucesso.")
         except Exception as exc:
             self.log_message(f"Falha ao processar SPEDs da consulta de saidas: {exc}")
             messagebox.showerror("Erro no processamento", str(exc))
-        finally:
-            if owns_progress:
-                self.close_progress_dialog(progress_dialog)
 
     def process_all_consultations(self) -> None:
         self.process_consultation_speds(sync_sales=True, show_success=True)
@@ -10883,7 +10829,7 @@ class SpedApp:
         self,
         show_success: bool = True,
         sync_sales: bool = False,
-        external_progress: tuple[Toplevel, StringVar, StringVar] | None = None,
+        external_progress: ProgressDialogHandle | None = None,
     ) -> None:
         path_inputs = self.get_consultation_path_inputs(
             self.contrib_consult_sped_paths_var.get(),
@@ -10899,57 +10845,46 @@ class SpedApp:
             if xml_sources:
                 self.contrib_sales_consult_xml_paths_var.set(format_selected_paths(xml_sources))
 
-        owns_progress = external_progress is None
-        if external_progress is None:
-            progress_dialog, progress_message_var, progress_percent_var = self.open_progress_dialog(
+        try:
+            with self.progress_dialog(
                 "Processar Consultas PIS/COFINS",
                 "Preparando processamento de entradas PIS/COFINS...",
-            )
-        else:
-            progress_dialog, progress_message_var, progress_percent_var = external_progress
-        try:
-            self.write_audit_log(
-                "CONSULTA_CONTRIB_ENTRADAS_INICIO",
-                f"speds={format_audit_paths(sped_paths)}; xmls={format_audit_paths(xml_sources)}",
-            )
-            period_labels, comparison_rows = build_pis_cofins_period_comparison_rows(
-                sped_paths,
-                "Entrada",
-                xml_sources=xml_sources,
-                progress_callback=lambda current, total, message: self.update_progress_dialog(
-                    progress_dialog, progress_message_var, progress_percent_var, current, total, message
-                ),
-            )
-            self.contrib_consult_period_labels = period_labels
-            self.contrib_consult_period_path_map = {label: path for label, path in zip(period_labels, sped_paths)}
-            self.contrib_consult_comparison_rows = comparison_rows
-            self.rebuild_contrib_consultation_periods()
-            self.refresh_contrib_consultation_tree()
-            self.log_message(f"Consulta de entradas PIS/COFINS carregada: {len(period_labels)} periodo(s), {len(comparison_rows)} linha(s).")
-            self.write_audit_log(
-                "CONSULTA_CONTRIB_ENTRADAS_FIM",
-                f"periodos={len(period_labels)}; linhas={len(comparison_rows)}; speds={format_audit_paths(sped_paths)}",
-            )
-            if sync_sales:
-                self.log_message("Sincronizando o mesmo conjunto de SPEDs/XMLs para saidas de PIS/COFINS...")
-                progress_message_var.set("Entradas PIS/COFINS concluidas. Iniciando processamento de saidas...")
-                progress_percent_var.set("0%")
-                progress_dialog._progressbar["value"] = 0
-                progress_dialog.update_idletasks()
-                self.process_contrib_sales_consultation_speds(show_success=False, external_progress=(progress_dialog, progress_message_var, progress_percent_var))
-            if show_success:
-                messagebox.showinfo("Processar Consultas", "Consultas de entradas e saidas PIS/COFINS processadas com sucesso." if sync_sales else "Consulta de entradas PIS/COFINS processada com sucesso.")
+                external_progress,
+            ) as progress:
+                self.write_audit_log(
+                    "CONSULTA_CONTRIB_ENTRADAS_INICIO",
+                    f"speds={format_audit_paths(sped_paths)}; xmls={format_audit_paths(xml_sources)}",
+                )
+                period_labels, comparison_rows = build_pis_cofins_period_comparison_rows(
+                    sped_paths,
+                    "Entrada",
+                    xml_sources=xml_sources,
+                    progress_callback=progress.update,
+                )
+                self.contrib_consult_period_labels = period_labels
+                self.contrib_consult_period_path_map = {label: path for label, path in zip(period_labels, sped_paths)}
+                self.contrib_consult_comparison_rows = comparison_rows
+                self.rebuild_contrib_consultation_periods()
+                self.refresh_contrib_consultation_tree()
+                self.log_message(f"Consulta de entradas PIS/COFINS carregada: {len(period_labels)} periodo(s), {len(comparison_rows)} linha(s).")
+                self.write_audit_log(
+                    "CONSULTA_CONTRIB_ENTRADAS_FIM",
+                    f"periodos={len(period_labels)}; linhas={len(comparison_rows)}; speds={format_audit_paths(sped_paths)}",
+                )
+                if sync_sales:
+                    self.log_message("Sincronizando o mesmo conjunto de SPEDs/XMLs para saidas de PIS/COFINS...")
+                    progress.reset("Entradas PIS/COFINS concluidas. Iniciando processamento de saidas...")
+                    self.process_contrib_sales_consultation_speds(show_success=False, external_progress=progress)
+                if show_success:
+                    messagebox.showinfo("Processar Consultas", "Consultas de entradas e saidas PIS/COFINS processadas com sucesso." if sync_sales else "Consulta de entradas PIS/COFINS processada com sucesso.")
         except Exception as exc:
             self.log_message(f"Falha ao processar SPED Contribuicoes de entradas: {exc}")
             messagebox.showerror("Erro no processamento", str(exc))
-        finally:
-            if owns_progress:
-                self.close_progress_dialog(progress_dialog)
 
     def process_contrib_sales_consultation_speds(
         self,
         show_success: bool = True,
-        external_progress: tuple[Toplevel, StringVar, StringVar] | None = None,
+        external_progress: ProgressDialogHandle | None = None,
     ) -> None:
         path_inputs = self.get_consultation_path_inputs(
             self.contrib_sales_consult_sped_paths_var.get(),
@@ -10960,45 +10895,37 @@ class SpedApp:
         if path_inputs is None:
             return
         sped_paths, xml_sources = path_inputs
-        owns_progress = external_progress is None
-        if external_progress is None:
-            progress_dialog, progress_message_var, progress_percent_var = self.open_progress_dialog(
+        try:
+            with self.progress_dialog(
                 "Processar Consultas PIS/COFINS",
                 "Preparando processamento de saidas PIS/COFINS...",
-            )
-        else:
-            progress_dialog, progress_message_var, progress_percent_var = external_progress
-        try:
-            self.write_audit_log(
-                "CONSULTA_CONTRIB_SAIDAS_INICIO",
-                f"speds={format_audit_paths(sped_paths)}; xmls={format_audit_paths(xml_sources)}",
-            )
-            period_labels, comparison_rows = build_pis_cofins_period_comparison_rows(
-                sped_paths,
-                "Saida",
-                xml_sources=xml_sources,
-                progress_callback=lambda current, total, message: self.update_progress_dialog(
-                    progress_dialog, progress_message_var, progress_percent_var, current, total, message
-                ),
-            )
-            self.contrib_sales_consult_period_labels = period_labels
-            self.contrib_sales_consult_period_path_map = {label: path for label, path in zip(period_labels, sped_paths)}
-            self.contrib_sales_consult_comparison_rows = comparison_rows
-            self.rebuild_contrib_sales_consultation_periods()
-            self.refresh_contrib_sales_consultation_tree()
-            self.log_message(f"Consulta de saidas PIS/COFINS carregada: {len(period_labels)} periodo(s), {len(comparison_rows)} linha(s).")
-            self.write_audit_log(
-                "CONSULTA_CONTRIB_SAIDAS_FIM",
-                f"periodos={len(period_labels)}; linhas={len(comparison_rows)}; speds={format_audit_paths(sped_paths)}",
-            )
-            if show_success:
-                messagebox.showinfo("Processar Consultas", "Consulta de saidas PIS/COFINS processada com sucesso.")
+                external_progress,
+            ) as progress:
+                self.write_audit_log(
+                    "CONSULTA_CONTRIB_SAIDAS_INICIO",
+                    f"speds={format_audit_paths(sped_paths)}; xmls={format_audit_paths(xml_sources)}",
+                )
+                period_labels, comparison_rows = build_pis_cofins_period_comparison_rows(
+                    sped_paths,
+                    "Saida",
+                    xml_sources=xml_sources,
+                    progress_callback=progress.update,
+                )
+                self.contrib_sales_consult_period_labels = period_labels
+                self.contrib_sales_consult_period_path_map = {label: path for label, path in zip(period_labels, sped_paths)}
+                self.contrib_sales_consult_comparison_rows = comparison_rows
+                self.rebuild_contrib_sales_consultation_periods()
+                self.refresh_contrib_sales_consultation_tree()
+                self.log_message(f"Consulta de saidas PIS/COFINS carregada: {len(period_labels)} periodo(s), {len(comparison_rows)} linha(s).")
+                self.write_audit_log(
+                    "CONSULTA_CONTRIB_SAIDAS_FIM",
+                    f"periodos={len(period_labels)}; linhas={len(comparison_rows)}; speds={format_audit_paths(sped_paths)}",
+                )
+                if show_success:
+                    messagebox.showinfo("Processar Consultas", "Consulta de saidas PIS/COFINS processada com sucesso.")
         except Exception as exc:
             self.log_message(f"Falha ao processar SPED Contribuicoes de saidas: {exc}")
             messagebox.showerror("Erro no processamento", str(exc))
-        finally:
-            if owns_progress:
-                self.close_progress_dialog(progress_dialog)
 
     def process_all_contrib_consultations(self) -> None:
         self.process_contrib_consultation_speds(sync_sales=True, show_success=True)
@@ -11632,7 +11559,11 @@ class SpedApp:
         dialog.minsize(min_width, min_height)
         dialog.geometry(f"{width}x{height}+{pos_x}+{pos_y}")
 
-    def open_progress_dialog(self, title: str, initial_message: str = "Aguarde...") -> tuple[Toplevel, StringVar, StringVar]:
+    def open_progress_dialog(
+        self,
+        title: str,
+        initial_message: str = "Aguarde...",
+    ) -> ProgressDialogHandle:
         dialog = Toplevel(self.root)
         dialog.title(title)
         dialog.transient(self.root)
@@ -11673,38 +11604,24 @@ class SpedApp:
             justify="center",
             font=("Segoe UI", 12, "bold"),
         ).grid(row=3, column=0, sticky="ew", pady=(12, 0))
-        dialog._progressbar = progress
         dialog.update_idletasks()
-        return dialog, message_var, percent_var
+        return ProgressDialogHandle(self.root, dialog, message_var, percent_var, progress)
 
-    def update_progress_dialog(
+    @contextmanager
+    def progress_dialog(
         self,
-        dialog: Toplevel,
-        message_var: StringVar,
-        percent_var: StringVar,
-        current: int,
-        total: int,
-        message: str,
-    ) -> None:
-        total_safe = max(total, 1)
-        percentage = int((max(0, min(current, total_safe)) * 100) / total_safe)
-        message_var.set(message)
-        percent_var.set(f"{percentage}%")
-        progress = getattr(dialog, "_progressbar", None)
-        if progress is not None:
-            progress["value"] = percentage
-        dialog.update_idletasks()
-        self.root.update_idletasks()
-
-    def close_progress_dialog(self, dialog: Toplevel | None) -> None:
-        if dialog is None:
+        title: str,
+        initial_message: str = "Aguarde...",
+        external_progress: ProgressDialogHandle | None = None,
+    ) -> Iterator[ProgressDialogHandle]:
+        if external_progress is not None:
+            yield external_progress
             return
+        progress = self.open_progress_dialog(title, initial_message)
         try:
-            dialog.grab_release()
-        except Exception:
-            pass
-        if dialog.winfo_exists():
-            dialog.destroy()
+            yield progress
+        finally:
+            progress.close()
 
     def setup_consultation_filter_traces(self) -> None:
         for variable in (
@@ -16047,29 +15964,24 @@ class SpedApp:
         def run_refresh() -> None:
             self.runtime_rule_refresh_after_id = None
             total_steps = len(targets) + 1
-            progress_dialog, progress_message_var, progress_percent_var = self.open_progress_dialog(
-                "Atualizando Regra Dinamica",
-                message,
-            )
             try:
-                self.update_progress_dialog(progress_dialog, progress_message_var, progress_percent_var, 0, total_steps, "Preparando atualizacao das telas...")
-                current_step = 0
-                if "Entrada" in targets:
-                    current_step += 1
-                    rows = len(self.consult_comparison_rows)
-                    self.update_progress_dialog(progress_dialog, progress_message_var, progress_percent_var, current_step, total_steps, f"Atualizando consulta de entradas ({rows} linha(s))...")
-                    self.refresh_consultation_tree()
-                if "Saida" in targets:
-                    current_step += 1
-                    rows = len(self.sales_consult_comparison_rows)
-                    self.update_progress_dialog(progress_dialog, progress_message_var, progress_percent_var, current_step, total_steps, f"Atualizando consulta de saidas ({rows} linha(s))...")
-                    self.refresh_sales_consultation_tree()
-                self.update_progress_dialog(progress_dialog, progress_message_var, progress_percent_var, total_steps, total_steps, "Regra aplicada nas telas.")
+                with self.progress_dialog("Atualizando Regra Dinamica", message) as progress:
+                    progress.update(0, total_steps, "Preparando atualizacao das telas...")
+                    current_step = 0
+                    if "Entrada" in targets:
+                        current_step += 1
+                        rows = len(self.consult_comparison_rows)
+                        progress.update(current_step, total_steps, f"Atualizando consulta de entradas ({rows} linha(s))...")
+                        self.refresh_consultation_tree()
+                    if "Saida" in targets:
+                        current_step += 1
+                        rows = len(self.sales_consult_comparison_rows)
+                        progress.update(current_step, total_steps, f"Atualizando consulta de saidas ({rows} linha(s))...")
+                        self.refresh_sales_consultation_tree()
+                    progress.update(total_steps, total_steps, "Regra aplicada nas telas.")
                 self.log_message("Telas atualizadas apos regra dinamica.")
-                self.close_progress_dialog(progress_dialog)
                 messagebox.showinfo("Regra Dinamica", success_message, parent=self.root)
             except Exception as exc:
-                self.close_progress_dialog(progress_dialog)
                 error_message = f"Falha ao atualizar as telas apos a regra: {exc}"
                 self.log_message(error_message)
                 messagebox.showerror("Regra Dinamica", error_message, parent=self.root)
