@@ -1,10 +1,8 @@
 from __future__ import annotations
 
 import datetime as dt
-import json
 import os
 import re
-import sys
 import threading
 import tkinter as tk
 from collections import defaultdict
@@ -12,6 +10,7 @@ from decimal import Decimal
 from pathlib import Path
 from tkinter import BOTH, END, LEFT, RIGHT, BooleanVar, Canvas, Menu, StringVar, Text, Tk, Toplevel
 from tkinter import filedialog, messagebox, ttk
+from typing import Iterable
 
 from app.config import APP_DEFAULT_CONFIG, COMPARE_MARK_CHECKED, COMPARE_MARK_UNCHECKED
 from app.exporters.rules_report_exporter import build_rule_report_entries, write_rules_report_docx
@@ -35,6 +34,9 @@ from app.parsers.sped_parser import (
 )
 from app.parsers.compare_sped_reader import extract_company_tax_id_from_sped
 from app.repositories.mysql_cadastro import MysqlCadastroRepository
+from app.services.app_config_service import load_app_config, save_app_config as save_app_config_payload
+from app.services.app_paths import get_application_base_dir, get_audit_log_path, get_runtime_rule_history_path
+from app.services.audit_utils import format_audit_paths, format_audit_summary, summarize_audit_detail_rows
 from app.services.compare_sped_launcher import launch_compare_invoice_in_sped, launch_compare_invoices_in_sped
 from app.services.compare_matching import compare_decimal_value
 from app.services.compare_operations import filter_xml_summary_rows_by_scope, normalize_compare_operation_scope
@@ -102,7 +104,15 @@ from app.services.xml_reconciliation import (
     display_text,
     export_nfce_items_by_ncm,
 )
-from app.services.path_selection import collapse_xml_selection_paths, format_selected_paths, parse_selected_paths
+from app.services.path_selection import (
+    append_unique_paths,
+    collapse_xml_selection_paths,
+    deduplicate_paths,
+    find_missing_paths,
+    format_selected_paths,
+    limit_selected_paths,
+    parse_selected_paths,
+)
 from app.services.product_import import (
     build_import_products_from_consolidated_sources,
     build_import_products_from_sped_0200,
@@ -120,7 +130,12 @@ from app.services.runtime_rules import (
     has_configured_icms_rule,
     parse_replacement_value,
     parse_runtime_rule_lines,
-    runtime_rule_summary,
+)
+from app.services.runtime_rule_history import (
+    load_runtime_rule_history as load_runtime_rule_history_file,
+    remember_runtime_rules as remember_runtime_rules_in_history,
+    remove_runtime_rule,
+    save_runtime_rule_history as save_runtime_rule_history_file,
 )
 from app.services.tax_rules import (
     compute_display_icms_rate,
@@ -134,12 +149,14 @@ from app.services.tax_rules import (
     normalize_text,
 )
 
+
 class SpedApp:
     def __init__(self, root: Tk) -> None:
         # Interface principal para selecionar arquivos, filtros e gerar as saidas.
         self.root = root
-        self.app_config_path = self.get_application_base_dir() / "app_config.json"
-        app_config = self.load_app_config()
+        self.app_base_dir = get_application_base_dir(__file__)
+        self.app_config_path = self.app_base_dir / "app_config.json"
+        app_config = load_app_config(self.app_config_path)
         self.app_window_title_var = StringVar(value=app_config["window_title"])
         self.app_home_title_var = StringVar(value=app_config["home_title"])
         self.app_config_status_var = StringVar(value="Informe os nomes que devem aparecer na tela inicial.")
@@ -147,7 +164,7 @@ class SpedApp:
         self.root.minsize(860, 680)
         self.set_dialog_screen_geometry(self.root, 1440, 900, 860, 680, margin_y=150)
         self.root.state("zoomed")
-        self.audit_log_path = self.get_audit_log_path()
+        self.audit_log_path = get_audit_log_path(self.app_base_dir)
         self.audit_session_id = dt.datetime.now().strftime("%Y%m%d_%H%M%S")
         self.audit_session_closed = False
         self.sped_path_var = StringVar()
@@ -292,7 +309,7 @@ class SpedApp:
         self.entry_exit_excel_rows: list[list[object]] = []
         self.entry_exit_totals: dict[str, Decimal] = {}
         self.status_var = StringVar(value="Selecione o SPED, a planilha, ou ambos para gerar o Excel.")
-        self.runtime_rule_history_path = self.get_runtime_rule_history_path()
+        self.runtime_rule_history_path = get_runtime_rule_history_path(self.app_base_dir)
         self.runtime_rule_history: list[dict[str, object]] = []
         self.consult_period_labels: list[str] = []
         self.consult_comparison_rows: list[dict[str, object]] = []
@@ -354,8 +371,8 @@ class SpedApp:
         self._contrib_consultation_filters_ready = False
         self._contrib_sales_consultation_filters_ready = False
         self.mysql_repo = MysqlCadastroRepository(
-            self.get_application_base_dir() / "mysql_config.json",
-            self.get_application_base_dir() / "mysql_schema.sql",
+            self.app_base_dir / "mysql_config.json",
+            self.app_base_dir / "mysql_schema.sql",
         )
         self._configure_styles()
         self._build_layout()
@@ -374,24 +391,6 @@ class SpedApp:
         self.schedule_company_tree_refresh()
         self.root.protocol("WM_DELETE_WINDOW", self.close_application)
         self.write_audit_log("INICIO_SESSAO", f"Sistema iniciado. Sessao={self.audit_session_id}")
-
-    def get_application_base_dir(self) -> Path:
-        if getattr(sys, "frozen", False):
-            return Path(sys.executable).resolve().parent
-        return Path(__file__).resolve().parent
-
-    def get_audit_log_path(self) -> Path:
-        log_dir = self.get_application_base_dir() / "logs"
-        log_dir.mkdir(parents=True, exist_ok=True)
-        return log_dir / "auditoria_sped.log"
-
-    def get_runtime_rule_history_path(self) -> Path:
-        if getattr(sys, "frozen", False):
-            local_appdata = Path(os.environ.get("LOCALAPPDATA", self.get_application_base_dir()))
-            data_dir = local_appdata / "Revisor de SPED - DZ Consultoria"
-            data_dir.mkdir(parents=True, exist_ok=True)
-            return data_dir / "runtime_rule_history.json"
-        return self.get_application_base_dir() / "runtime_rule_history.json"
 
     def schedule_company_tree_refresh(self) -> None:
         self.db_status_var.set("Carregando empresas...")
@@ -3705,14 +3704,9 @@ class SpedApp:
         )
         if not selected:
             return
-        current_paths = parse_selected_paths(self.entry_exit_sped_paths_var.get())
-        seen = {str(path.resolve()).lower() for path in current_paths if path.exists()}
-        for raw_path in selected:
-            path = Path(raw_path)
-            key = str(path.resolve()).lower()
-            if key not in seen:
-                current_paths.append(path)
-                seen.add(key)
+        current_paths = deduplicate_paths(
+            append_unique_paths(parse_selected_paths(self.entry_exit_sped_paths_var.get()), list(selected))
+        )
         self.entry_exit_sped_paths_var.set(format_selected_paths(current_paths))
         self.entry_exit_status_var.set(f"{len(current_paths)} SPED(s) selecionado(s).")
 
@@ -3720,14 +3714,7 @@ class SpedApp:
         paths: list[Path] = []
         paths.extend(parse_selected_paths(self.consult_sped_paths_var.get()))
         paths.extend(parse_selected_paths(self.sales_consult_sped_paths_var.get()))
-        unique_paths: list[Path] = []
-        seen: set[str] = set()
-        for path in paths:
-            key = str(path.resolve()).lower() if path.exists() else str(path).lower()
-            if key in seen:
-                continue
-            seen.add(key)
-            unique_paths.append(path)
+        unique_paths = deduplicate_paths(paths)
         self.entry_exit_sped_paths_var.set(format_selected_paths(unique_paths))
         self.entry_exit_status_var.set(f"SPEDs das consultas carregados: {len(unique_paths)} arquivo(s).")
 
@@ -3736,7 +3723,7 @@ class SpedApp:
         if not sped_paths:
             messagebox.showwarning("Arquivo obrigatorio", "Selecione ao menos um SPED fiscal.")
             return
-        missing = [str(path) for path in sped_paths if not path.exists()]
+        missing = find_missing_paths(sped_paths)
         if missing:
             messagebox.showerror("Arquivo nao encontrado", "Os seguintes SPEDs nao existem:\n" + "\n".join(missing))
             return
@@ -3758,7 +3745,7 @@ class SpedApp:
                 f"A recolher: {format_decimal_sped(Decimal(totals.get('recolher', Decimal('0'))))}"
             )
             self.entry_exit_status_var.set(f"Analise montada com {len(rows)} agrupamento(s) de CST/CFOP/aliquota.")
-            self.write_audit_log("ANALISE_ENTRADA_SAIDA", f"speds={self.format_audit_paths(sped_paths)}; linhas={len(rows)}")
+            self.write_audit_log("ANALISE_ENTRADA_SAIDA", f"speds={format_audit_paths(sped_paths)}; linhas={len(rows)}")
         except Exception as exc:
             self.entry_exit_status_var.set("Falha ao processar analise de entrada e saida.")
             messagebox.showerror("Analise Entrada e Saida", str(exc))
@@ -3839,30 +3826,6 @@ class SpedApp:
         except Exception as exc:
             messagebox.showerror("Analise Entrada e Saida", str(exc))
 
-    def load_app_config(self) -> dict[str, str]:
-        if not hasattr(self, "app_config_path"):
-            return dict(APP_DEFAULT_CONFIG)
-        if not self.app_config_path.exists():
-            self.save_app_config_payload(APP_DEFAULT_CONFIG)
-            return dict(APP_DEFAULT_CONFIG)
-        try:
-            loaded = json.loads(self.app_config_path.read_text(encoding="utf-8"))
-        except Exception:
-            loaded = {}
-        config = dict(APP_DEFAULT_CONFIG)
-        if isinstance(loaded, dict):
-            for key, default_value in APP_DEFAULT_CONFIG.items():
-                config[key] = str(loaded.get(key, default_value) or default_value)
-        return config
-
-    def save_app_config_payload(self, config: dict[str, str]) -> None:
-        payload = {
-            key: str(config.get(key, APP_DEFAULT_CONFIG[key]) or APP_DEFAULT_CONFIG[key])
-            for key in APP_DEFAULT_CONFIG
-        }
-        self.app_config_path.parent.mkdir(parents=True, exist_ok=True)
-        self.app_config_path.write_text(json.dumps(payload, ensure_ascii=True, indent=2), encoding="utf-8")
-
     def get_app_form_config(self) -> dict[str, str]:
         return {
             "window_title": self.app_window_title_var.get().strip() or APP_DEFAULT_CONFIG["window_title"],
@@ -3873,7 +3836,7 @@ class SpedApp:
         self.root.title(self.app_window_title_var.get().strip() or APP_DEFAULT_CONFIG["window_title"])
 
     def save_app_config(self) -> None:
-        self.save_app_config_payload(self.get_app_form_config())
+        save_app_config_payload(self.app_config_path, self.get_app_form_config())
         self.apply_app_config()
         self.app_config_status_var.set("Configuracao da aplicacao salva.")
         self.log_message(f"Configuracao da aplicacao salva em: {self.app_config_path}")
@@ -6985,38 +6948,6 @@ class SpedApp:
         except Exception:
             pass
 
-    def format_audit_paths(self, paths: Iterable[Path] | Iterable[str]) -> str:
-        formatted = [str(path) for path in paths if str(path).strip()]
-        return "; ".join(formatted) if formatted else "Nao informado"
-
-    def audit_decimal_from_row(self, row: dict[str, object], *keys: str) -> Decimal:
-        for key in keys:
-            value = row.get(key)
-            if isinstance(value, Decimal):
-                return value
-            if value not in (None, ""):
-                try:
-                    return parse_decimal(str(value))
-                except Exception:
-                    continue
-        return Decimal("0.00")
-
-    def summarize_audit_detail_rows(self, rows: list[dict[str, object]]) -> dict[str, Decimal | int]:
-        return {
-            "linhas": len(rows),
-            "valor_operacao": sum((self.audit_decimal_from_row(row, "sale_value", "total_operation_value", "operation_value") for row in rows), Decimal("0.00")).quantize(Decimal("0.01")),
-            "base_icms": sum((self.audit_decimal_from_row(row, "base_icms") for row in rows), Decimal("0.00")).quantize(Decimal("0.01")),
-            "valor_icms": sum((self.audit_decimal_from_row(row, "icms_value") for row in rows), Decimal("0.00")).quantize(Decimal("0.01")),
-        }
-
-    def format_audit_summary(self, summary: dict[str, Decimal | int]) -> str:
-        return (
-            f"linhas={summary.get('linhas', 0)}; "
-            f"valor_operacao={format_decimal_sped(Decimal(summary.get('valor_operacao', Decimal('0.00'))))}; "
-            f"base_icms={format_decimal_sped(Decimal(summary.get('base_icms', Decimal('0.00'))))}; "
-            f"valor_icms={format_decimal_sped(Decimal(summary.get('valor_icms', Decimal('0.00'))))}"
-        )
-
     def close_application(self) -> None:
         if not self.audit_session_closed:
             self.write_audit_log("FIM_SESSAO", "Sistema fechado pelo usuario.")
@@ -7055,8 +6986,7 @@ class SpedApp:
             if selected_directory:
                 selected_path = Path(selected_directory)
                 current_paths = [path for path in current_paths if not path.is_file()]
-                if selected_path not in current_paths:
-                    current_paths.append(selected_path)
+                current_paths = append_unique_paths(current_paths, [selected_path])
                 target_var.set(format_selected_paths(current_paths))
                 self.log_message(f"Pasta de XML adicionada: {selected_directory}")
                 return
@@ -7072,9 +7002,7 @@ class SpedApp:
             collapsed_paths, collapsed_to_folder = collapse_xml_selection_paths(selected_files)
             if collapsed_to_folder:
                 current_paths = [path for path in current_paths if not path.is_file()]
-            for selected_path in collapsed_paths:
-                if selected_path not in current_paths:
-                    current_paths.append(selected_path)
+            current_paths = append_unique_paths(current_paths, collapsed_paths)
             target_var.set(format_selected_paths(current_paths))
             if collapsed_to_folder:
                 self.log_message(
@@ -7089,8 +7017,7 @@ class SpedApp:
         )
         if selected_directory:
             selected_path = Path(selected_directory)
-            if selected_path not in current_paths:
-                current_paths.append(selected_path)
+            current_paths = append_unique_paths(current_paths, [selected_path])
             target_var.set(format_selected_paths(current_paths))
             self.log_message(f"Caminho adicionado: {selected_directory}")
 
@@ -7104,15 +7031,10 @@ class SpedApp:
         if not selected_files:
             return
 
-        current_paths = parse_selected_paths(self.multi_sped_paths_var.get())
-        for selected in selected_files:
-            selected_path = Path(selected)
-            if selected_path not in current_paths:
-                current_paths.append(selected_path)
-
-        if len(current_paths) > 12:
+        current_paths = append_unique_paths(parse_selected_paths(self.multi_sped_paths_var.get()), selected_files)
+        current_paths, limit_exceeded = limit_selected_paths(current_paths, 12)
+        if limit_exceeded:
             messagebox.showwarning("Limite excedido", "A analise aceita no maximo 12 arquivos SPED.")
-            current_paths = current_paths[:12]
 
         self.multi_sped_paths_var.set(format_selected_paths(current_paths))
         self.log_message(f"{len(current_paths)} arquivo(s) SPED selecionado(s) para a analise de entradas.")
@@ -7127,15 +7049,10 @@ class SpedApp:
         if not selected_files:
             return
 
-        current_paths = parse_selected_paths(self.consult_sped_paths_var.get())
-        for selected in selected_files:
-            selected_path = Path(selected)
-            if selected_path not in current_paths:
-                current_paths.append(selected_path)
-
-        if len(current_paths) > 12:
+        current_paths = append_unique_paths(parse_selected_paths(self.consult_sped_paths_var.get()), selected_files)
+        current_paths, limit_exceeded = limit_selected_paths(current_paths, 12)
+        if limit_exceeded:
             messagebox.showwarning("Limite excedido", "A consulta aceita no maximo 12 arquivos SPED.")
-            current_paths = current_paths[:12]
 
         self.consult_sped_paths_var.set(format_selected_paths(current_paths))
         self.log_message(f"{len(current_paths)} arquivo(s) SPED preparado(s) para consulta em tela.")
@@ -7150,15 +7067,10 @@ class SpedApp:
         if not selected_files:
             return
 
-        current_paths = parse_selected_paths(self.sales_consult_sped_paths_var.get())
-        for selected in selected_files:
-            selected_path = Path(selected)
-            if selected_path not in current_paths:
-                current_paths.append(selected_path)
-
-        if len(current_paths) > 12:
+        current_paths = append_unique_paths(parse_selected_paths(self.sales_consult_sped_paths_var.get()), selected_files)
+        current_paths, limit_exceeded = limit_selected_paths(current_paths, 12)
+        if limit_exceeded:
             messagebox.showwarning("Limite excedido", "A consulta aceita no maximo 12 arquivos SPED.")
-            current_paths = current_paths[:12]
 
         self.sales_consult_sped_paths_var.set(format_selected_paths(current_paths))
         self.log_message(f"{len(current_paths)} arquivo(s) SPED preparado(s) para consulta de saidas.")
@@ -7188,14 +7100,10 @@ class SpedApp:
         )
         if not selected_files:
             return
-        current_paths = parse_selected_paths(self.contrib_consult_sped_paths_var.get())
-        for selected in selected_files:
-            selected_path = Path(selected)
-            if selected_path not in current_paths:
-                current_paths.append(selected_path)
-        if len(current_paths) > 12:
+        current_paths = append_unique_paths(parse_selected_paths(self.contrib_consult_sped_paths_var.get()), selected_files)
+        current_paths, limit_exceeded = limit_selected_paths(current_paths, 12)
+        if limit_exceeded:
             messagebox.showwarning("Limite excedido", "A consulta aceita no maximo 12 arquivos SPED.")
-            current_paths = current_paths[:12]
         formatted_paths = format_selected_paths(current_paths)
         self.contrib_consult_sped_paths_var.set(formatted_paths)
         self.contrib_sales_consult_sped_paths_var.set(formatted_paths)
@@ -7210,14 +7118,10 @@ class SpedApp:
         )
         if not selected_files:
             return
-        current_paths = parse_selected_paths(self.contrib_sales_consult_sped_paths_var.get())
-        for selected in selected_files:
-            selected_path = Path(selected)
-            if selected_path not in current_paths:
-                current_paths.append(selected_path)
-        if len(current_paths) > 12:
+        current_paths = append_unique_paths(parse_selected_paths(self.contrib_sales_consult_sped_paths_var.get()), selected_files)
+        current_paths, limit_exceeded = limit_selected_paths(current_paths, 12)
+        if limit_exceeded:
             messagebox.showwarning("Limite excedido", "A consulta aceita no maximo 12 arquivos SPED.")
-            current_paths = current_paths[:12]
         formatted_paths = format_selected_paths(current_paths)
         self.contrib_sales_consult_sped_paths_var.set(formatted_paths)
         self.contrib_consult_sped_paths_var.set(formatted_paths)
@@ -10830,15 +10734,33 @@ class SpedApp:
             on_rule_added=mark_source_row,
         )
 
-    def process_consultation_speds(self, sync_sales: bool = True, show_success: bool = True) -> None:
-        sped_paths = parse_selected_paths(self.consult_sped_paths_var.get())
-        xml_sources = parse_selected_paths(self.consult_xml_paths_var.get())
+    def get_consultation_path_inputs(
+        self,
+        sped_paths_text: str,
+        xml_sources_text: str,
+        required_message: str,
+        limit_message: str,
+    ) -> tuple[list[Path], list[Path]] | None:
+        sped_paths = parse_selected_paths(sped_paths_text)
+        xml_sources = parse_selected_paths(xml_sources_text)
         if not sped_paths:
-            messagebox.showwarning("Arquivo obrigatorio", "Selecione de 1 a 12 arquivos SPED para processar.")
-            return
+            messagebox.showwarning("Arquivo obrigatorio", required_message)
+            return None
         if len(sped_paths) > 12:
-            messagebox.showwarning("Limite excedido", "A consulta aceita no maximo 12 arquivos SPED.")
+            messagebox.showwarning("Limite excedido", limit_message)
+            return None
+        return sped_paths, xml_sources
+
+    def process_consultation_speds(self, sync_sales: bool = True, show_success: bool = True) -> None:
+        path_inputs = self.get_consultation_path_inputs(
+            self.consult_sped_paths_var.get(),
+            self.consult_xml_paths_var.get(),
+            "Selecione de 1 a 12 arquivos SPED para processar.",
+            "A consulta aceita no maximo 12 arquivos SPED.",
+        )
+        if path_inputs is None:
             return
+        sped_paths, xml_sources = path_inputs
 
         progress_dialog, progress_message_var, progress_percent_var = self.open_progress_dialog(
             "Processar Consultas",
@@ -10848,7 +10770,7 @@ class SpedApp:
             self.log_message("Processando SPEDs para consulta comparativa...")
             self.write_audit_log(
                 "CONSULTA_ENTRADAS_INICIO",
-                f"speds={self.format_audit_paths(sped_paths)}; xmls={self.format_audit_paths(xml_sources)}",
+                f"speds={format_audit_paths(sped_paths)}; xmls={format_audit_paths(xml_sources)}",
             )
             period_labels, comparison_rows = build_entry_period_comparison_rows(
                 sped_paths,
@@ -10873,7 +10795,7 @@ class SpedApp:
             )
             self.write_audit_log(
                 "CONSULTA_ENTRADAS_FIM",
-                f"periodos={len(period_labels)}; linhas={len(comparison_rows)}; speds={self.format_audit_paths(sped_paths)}",
+                f"periodos={len(period_labels)}; linhas={len(comparison_rows)}; speds={format_audit_paths(sped_paths)}",
             )
             if sync_sales:
                 self.log_message("Sincronizando a mesma lista de SPEDs na Consulta Saidas...")
@@ -10890,22 +10812,22 @@ class SpedApp:
             self.log_message(f"Falha ao processar SPEDs da consulta: {exc}")
             messagebox.showerror("Erro no processamento", str(exc))
         finally:
-            if progress_dialog.winfo_exists():
-                progress_dialog.destroy()
+            self.close_progress_dialog(progress_dialog)
 
     def process_sales_consultation_speds(
         self,
         show_success: bool = True,
         external_progress: tuple[Toplevel, StringVar, StringVar] | None = None,
     ) -> None:
-        sped_paths = parse_selected_paths(self.sales_consult_sped_paths_var.get())
-        xml_sources = parse_selected_paths(self.sales_consult_xml_paths_var.get())
-        if not sped_paths:
-            messagebox.showwarning("Arquivo obrigatorio", "Selecione de 1 a 12 arquivos SPED para processar.")
+        path_inputs = self.get_consultation_path_inputs(
+            self.sales_consult_sped_paths_var.get(),
+            self.sales_consult_xml_paths_var.get(),
+            "Selecione de 1 a 12 arquivos SPED para processar.",
+            "A consulta aceita no maximo 12 arquivos SPED.",
+        )
+        if path_inputs is None:
             return
-        if len(sped_paths) > 12:
-            messagebox.showwarning("Limite excedido", "A consulta aceita no maximo 12 arquivos SPED.")
-            return
+        sped_paths, xml_sources = path_inputs
 
         owns_progress = external_progress is None
         if external_progress is None:
@@ -10919,7 +10841,7 @@ class SpedApp:
             self.log_message("Processando SPEDs para consulta comparativa de saidas...")
             self.write_audit_log(
                 "CONSULTA_SAIDAS_INICIO",
-                f"speds={self.format_audit_paths(sped_paths)}; xmls={self.format_audit_paths(xml_sources)}",
+                f"speds={format_audit_paths(sped_paths)}; xmls={format_audit_paths(xml_sources)}",
             )
             period_labels, comparison_rows = build_sale_period_comparison_rows(
                 sped_paths,
@@ -10943,7 +10865,7 @@ class SpedApp:
             )
             self.write_audit_log(
                 "CONSULTA_SAIDAS_FIM",
-                f"periodos={len(period_labels)}; linhas={len(comparison_rows)}; speds={self.format_audit_paths(sped_paths)}",
+                f"periodos={len(period_labels)}; linhas={len(comparison_rows)}; speds={format_audit_paths(sped_paths)}",
             )
             if show_success:
                 messagebox.showinfo("Processar Consultas", "Processado com sucesso.")
@@ -10951,8 +10873,8 @@ class SpedApp:
             self.log_message(f"Falha ao processar SPEDs da consulta de saidas: {exc}")
             messagebox.showerror("Erro no processamento", str(exc))
         finally:
-            if owns_progress and progress_dialog.winfo_exists():
-                progress_dialog.destroy()
+            if owns_progress:
+                self.close_progress_dialog(progress_dialog)
 
     def process_all_consultations(self) -> None:
         self.process_consultation_speds(sync_sales=True, show_success=True)
@@ -10963,14 +10885,15 @@ class SpedApp:
         sync_sales: bool = False,
         external_progress: tuple[Toplevel, StringVar, StringVar] | None = None,
     ) -> None:
-        sped_paths = parse_selected_paths(self.contrib_consult_sped_paths_var.get())
-        xml_sources = parse_selected_paths(self.contrib_consult_xml_paths_var.get())
-        if not sped_paths:
-            messagebox.showwarning("Arquivo obrigatorio", "Selecione de 1 a 12 arquivos do SPED Contribuicoes para processar.")
+        path_inputs = self.get_consultation_path_inputs(
+            self.contrib_consult_sped_paths_var.get(),
+            self.contrib_consult_xml_paths_var.get(),
+            "Selecione de 1 a 12 arquivos do SPED Contribuicoes para processar.",
+            "A consulta aceita no maximo 12 arquivos do SPED Contribuicoes.",
+        )
+        if path_inputs is None:
             return
-        if len(sped_paths) > 12:
-            messagebox.showwarning("Limite excedido", "A consulta aceita no maximo 12 arquivos do SPED Contribuicoes.")
-            return
+        sped_paths, xml_sources = path_inputs
         if sync_sales:
             self.contrib_sales_consult_sped_paths_var.set(format_selected_paths(sped_paths))
             if xml_sources:
@@ -10987,7 +10910,7 @@ class SpedApp:
         try:
             self.write_audit_log(
                 "CONSULTA_CONTRIB_ENTRADAS_INICIO",
-                f"speds={self.format_audit_paths(sped_paths)}; xmls={self.format_audit_paths(xml_sources)}",
+                f"speds={format_audit_paths(sped_paths)}; xmls={format_audit_paths(xml_sources)}",
             )
             period_labels, comparison_rows = build_pis_cofins_period_comparison_rows(
                 sped_paths,
@@ -11005,7 +10928,7 @@ class SpedApp:
             self.log_message(f"Consulta de entradas PIS/COFINS carregada: {len(period_labels)} periodo(s), {len(comparison_rows)} linha(s).")
             self.write_audit_log(
                 "CONSULTA_CONTRIB_ENTRADAS_FIM",
-                f"periodos={len(period_labels)}; linhas={len(comparison_rows)}; speds={self.format_audit_paths(sped_paths)}",
+                f"periodos={len(period_labels)}; linhas={len(comparison_rows)}; speds={format_audit_paths(sped_paths)}",
             )
             if sync_sales:
                 self.log_message("Sincronizando o mesmo conjunto de SPEDs/XMLs para saidas de PIS/COFINS...")
@@ -11028,14 +10951,15 @@ class SpedApp:
         show_success: bool = True,
         external_progress: tuple[Toplevel, StringVar, StringVar] | None = None,
     ) -> None:
-        sped_paths = parse_selected_paths(self.contrib_sales_consult_sped_paths_var.get())
-        xml_sources = parse_selected_paths(self.contrib_sales_consult_xml_paths_var.get())
-        if not sped_paths:
-            messagebox.showwarning("Arquivo obrigatorio", "Selecione de 1 a 12 arquivos do SPED Contribuicoes para processar.")
+        path_inputs = self.get_consultation_path_inputs(
+            self.contrib_sales_consult_sped_paths_var.get(),
+            self.contrib_sales_consult_xml_paths_var.get(),
+            "Selecione de 1 a 12 arquivos do SPED Contribuicoes para processar.",
+            "A consulta aceita no maximo 12 arquivos do SPED Contribuicoes.",
+        )
+        if path_inputs is None:
             return
-        if len(sped_paths) > 12:
-            messagebox.showwarning("Limite excedido", "A consulta aceita no maximo 12 arquivos do SPED Contribuicoes.")
-            return
+        sped_paths, xml_sources = path_inputs
         owns_progress = external_progress is None
         if external_progress is None:
             progress_dialog, progress_message_var, progress_percent_var = self.open_progress_dialog(
@@ -11047,7 +10971,7 @@ class SpedApp:
         try:
             self.write_audit_log(
                 "CONSULTA_CONTRIB_SAIDAS_INICIO",
-                f"speds={self.format_audit_paths(sped_paths)}; xmls={self.format_audit_paths(xml_sources)}",
+                f"speds={format_audit_paths(sped_paths)}; xmls={format_audit_paths(xml_sources)}",
             )
             period_labels, comparison_rows = build_pis_cofins_period_comparison_rows(
                 sped_paths,
@@ -11065,7 +10989,7 @@ class SpedApp:
             self.log_message(f"Consulta de saidas PIS/COFINS carregada: {len(period_labels)} periodo(s), {len(comparison_rows)} linha(s).")
             self.write_audit_log(
                 "CONSULTA_CONTRIB_SAIDAS_FIM",
-                f"periodos={len(period_labels)}; linhas={len(comparison_rows)}; speds={self.format_audit_paths(sped_paths)}",
+                f"periodos={len(period_labels)}; linhas={len(comparison_rows)}; speds={format_audit_paths(sped_paths)}",
             )
             if show_success:
                 messagebox.showinfo("Processar Consultas", "Consulta de saidas PIS/COFINS processada com sucesso.")
@@ -15951,7 +15875,7 @@ class SpedApp:
             return
 
         xml_paths = parse_selected_paths(xml_source)
-        missing_xml_paths = [str(path) for path in xml_paths if not path.exists()]
+        missing_xml_paths = find_missing_paths(xml_paths)
         if missing_xml_paths:
             messagebox.showerror("Arquivo nao encontrado", "Os seguintes XMLs/pastas nao existem mais:\n" + "\n".join(missing_xml_paths))
             return
@@ -15996,21 +15920,10 @@ class SpedApp:
             messagebox.showerror("Erro ao carregar filtros", str(exc))
 
     def load_runtime_rule_history(self) -> None:
-        if not self.runtime_rule_history_path.exists():
-            self.runtime_rule_history = []
-            return
-        try:
-            loaded = json.loads(self.runtime_rule_history_path.read_text(encoding="utf-8"))
-            self.runtime_rule_history = loaded if isinstance(loaded, list) else []
-        except Exception:
-            self.runtime_rule_history = []
+        self.runtime_rule_history = load_runtime_rule_history_file(self.runtime_rule_history_path)
 
     def save_runtime_rule_history(self) -> None:
-        self.runtime_rule_history_path.parent.mkdir(parents=True, exist_ok=True)
-        self.runtime_rule_history_path.write_text(
-            json.dumps(self.runtime_rule_history, ensure_ascii=True, indent=2),
-            encoding="utf-8",
-        )
+        save_runtime_rule_history_file(self.runtime_rule_history_path, self.runtime_rule_history)
 
     def clear_runtime_rule_filter(self) -> None:
         self.runtime_rule_filter_var.set("")
@@ -16055,34 +15968,11 @@ class SpedApp:
         self.update_runtime_rule_history_preview()
 
     def remember_runtime_rules(self, rule_lines: list[str], source: str) -> None:
-        if not rule_lines:
-            return
-        now = dt.datetime.now().replace(microsecond=0).isoformat()
-        history_index = {
-            str(item.get("rule_line", "")).strip(): item
-            for item in self.runtime_rule_history
-            if str(item.get("rule_line", "")).strip()
-        }
-        for rule_line in rule_lines:
-            normalized_line = str(rule_line or "").strip()
-            if not normalized_line:
-                continue
-            item = history_index.get(normalized_line)
-            if item is None:
-                item = {
-                    "rule_line": normalized_line,
-                    "summary": runtime_rule_summary(normalized_line),
-                    "use_count": 0,
-                    "created_at": now,
-                    "last_used_at": now,
-                    "last_source": source,
-                }
-                self.runtime_rule_history.append(item)
-                history_index[normalized_line] = item
-            item["summary"] = runtime_rule_summary(normalized_line)
-            item["use_count"] = int(item.get("use_count", 0)) + 1
-            item["last_used_at"] = now
-            item["last_source"] = source
+        self.runtime_rule_history = remember_runtime_rules_in_history(
+            self.runtime_rule_history,
+            rule_lines,
+            source,
+        )
         self.save_runtime_rule_history()
         self.refresh_runtime_rule_history_list()
 
@@ -16107,11 +15997,7 @@ class SpedApp:
             return
         if not messagebox.askyesno("Historico", "Deseja excluir a regra selecionada do historico?"):
             return
-        self.runtime_rule_history = [
-            item
-            for item in self.runtime_rule_history
-            if str(item.get("rule_line", "")).strip() != rule_line
-        ]
+        self.runtime_rule_history = remove_runtime_rule(self.runtime_rule_history, rule_line)
         self.save_runtime_rule_history()
         self.refresh_runtime_rule_history_list()
         self.log_message("Regra removida do historico.")
@@ -16762,7 +16648,7 @@ class SpedApp:
             "REPROCESSAMENTO_INICIO",
             (
                 f"sped_origem={sped_path}; sped_saida={output_path}; escopo={adjusted_sped_scope}; "
-                f"planilha={excel_path or 'Nao informado'}; xmls={self.format_audit_paths(xml_paths)}; "
+                f"planilha={excel_path or 'Nao informado'}; xmls={format_audit_paths(xml_paths)}; "
                 f"perfil_regra={selected_rule_profile or 'Filtros'}; regras_dinamicas={len(runtime_rule_lines)}"
             ),
         )
@@ -16778,7 +16664,7 @@ class SpedApp:
                 self.log_message("Aplicando ST a partir dos XMLs de NF-e...")
 
         _, _, detailed_sales, _, _ = combine_imported_data(sped_data, excel_data)
-        original_summary = self.summarize_audit_detail_rows(detailed_sales)
+        original_summary = summarize_audit_detail_rows(detailed_sales)
         icms_rate_override = parse_rate(icms_rate_override_text) if icms_rate_override_text else None
 
         self.log_message("Recalculando C190 por documento...")
@@ -16799,12 +16685,12 @@ class SpedApp:
             xml_ncm_filters,
             runtime_rules,
         )
-        adjusted_summary = self.summarize_audit_detail_rows(rebuilt_detailed_sales)
+        adjusted_summary = summarize_audit_detail_rows(rebuilt_detailed_sales)
         self.write_audit_log(
             "REPROCESSAMENTO_VALORES",
             (
-                f"sped_origem={sped_path}; antes=({self.format_audit_summary(original_summary)}); "
-                f"depois=({self.format_audit_summary(adjusted_summary)})"
+                f"sped_origem={sped_path}; antes=({format_audit_summary(original_summary)}); "
+                f"depois=({format_audit_summary(adjusted_summary)})"
             ),
         )
         self.remember_runtime_rules(runtime_rule_lines, "sped_ajustado")
@@ -16822,7 +16708,7 @@ class SpedApp:
             self.log_message(f"Planilha CFOP 1252/1253 gerada em: {cfop_1252_1253_output}")
             extra_outputs.append(str(cfop_1252_1253_output))
         self.log_message(f"SPED ajustado gerado com sucesso em: {output_path}")
-        self.write_audit_log("REPROCESSAMENTO_FIM", f"sped_origem={sped_path}; arquivo_reprocessado={output_path}; extras={self.format_audit_paths(extra_outputs)}")
+        self.write_audit_log("REPROCESSAMENTO_FIM", f"sped_origem={sped_path}; arquivo_reprocessado={output_path}; extras={format_audit_paths(extra_outputs)}")
         return [str(output_path), *extra_outputs]
 
     def generate_adjusted_sped(self) -> None:
@@ -16837,14 +16723,14 @@ class SpedApp:
         sped_paths = selected_sped_paths if selected_sped_paths else [Path(sped_source)]
         excel_path = Path(excel_source) if excel_source else None
         xml_paths = parse_selected_paths(xml_source)
-        missing_sped_paths = [str(path) for path in sped_paths if not path.exists()]
+        missing_sped_paths = find_missing_paths(sped_paths)
         if missing_sped_paths:
             messagebox.showerror("Arquivo nao encontrado", "Os seguintes SPEDs nao existem mais:\n" + "\n".join(missing_sped_paths))
             return
         if excel_path and not excel_path.exists():
             messagebox.showerror("Arquivo nao encontrado", "A planilha selecionada nao existe mais.")
             return
-        missing_xml_paths = [str(path) for path in xml_paths if not path.exists()]
+        missing_xml_paths = find_missing_paths(xml_paths)
         if missing_xml_paths:
             messagebox.showerror("Arquivo nao encontrado", "Os seguintes XMLs/pastas nao existem mais:\n" + "\n".join(missing_xml_paths))
             return
