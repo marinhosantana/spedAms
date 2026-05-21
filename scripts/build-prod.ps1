@@ -1,14 +1,15 @@
 $ErrorActionPreference = "Stop"
 
-Set-Location -Path $PSScriptRoot
+$projectRoot = Resolve-Path (Join-Path $PSScriptRoot "..")
+Set-Location -Path $projectRoot
 
-$pythonExe = Join-Path $PSScriptRoot ".venv-prod\Scripts\python.exe"
+$pythonExe = Join-Path $projectRoot ".venv-prod\Scripts\python.exe"
 if (-not (Test-Path $pythonExe)) {
     $pythonExe = "python"
 }
 
-& $pythonExe -m pip install -r requirements.txt
-& $pythonExe -m pip install -r requirements-build.txt
+& $pythonExe -m pip install -r .\requirements\base.txt
+& $pythonExe -m pip install -r .\requirements\build.txt
 & $pythonExe -m PyInstaller `
     --noconfirm `
     --clean `
@@ -16,7 +17,7 @@ if (-not (Test-Path $pythonExe)) {
     --windowed `
     --name "RevisorSPED_PROD" `
     --paths ".\Sped" `
-    ".\Sped\build_entry_prod.py"
+    ".\Sped\build_entries\prod.py"
 
 Copy-Item -Path ".\Sped\mysql_schema.sql" -Destination ".\dist\RevisorSPED_PROD\mysql_schema.sql" -Force
 

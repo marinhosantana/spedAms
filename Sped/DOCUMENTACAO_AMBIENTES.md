@@ -7,6 +7,15 @@ Este projeto agora suporta dois ambientes:
 
 O ambiente e escolhido pela variavel `SPED_ENV`.
 
+## Organizacao dos arquivos de ambiente
+
+Os arquivos de apoio ficam separados para nao misturar com o codigo principal:
+
+- `scripts/`: comandos PowerShell para rodar, preparar ambientes e gerar EXE.
+- `requirements/`: dependencias Python separadas por finalidade.
+- `Sped/build_entries/`: pontos de entrada usados apenas pelo PyInstaller.
+- `dist/`: saida gerada dos executaveis.
+
 ## Arquivos de configuracao
 
 Os arquivos ficam em `Sped/app/ui/`:
@@ -35,7 +44,7 @@ Assim voce pode testar alteracoes sem mexer no banco real.
 No PowerShell, na pasta `c:\spedAms`, execute:
 
 ```powershell
-.\run-dev.ps1
+.\scripts\run-dev.ps1
 ```
 
 Esse script define:
@@ -51,7 +60,7 @@ e abre o sistema usando os arquivos `*.dev.json`.
 No PowerShell, na pasta `c:\spedAms`, execute:
 
 ```powershell
-.\run-prod.ps1
+.\scripts\run-prod.ps1
 ```
 
 Esse script define:
@@ -86,7 +95,7 @@ Crie um ambiente virtual para desenvolvimento:
 cd c:\spedAms
 python -m venv .venv-dev
 .\.venv-dev\Scripts\activate
-pip install -r requirements.txt
+pip install -r requirements\base.txt
 ```
 
 Crie outro para producao:
@@ -95,7 +104,7 @@ Crie outro para producao:
 cd c:\spedAms
 python -m venv .venv-prod
 .\.venv-prod\Scripts\activate
-pip install -r requirements.txt
+pip install -r requirements\base.txt
 ```
 
 Quando estiver trabalhando no codigo, use a `.venv-dev`.
@@ -145,7 +154,7 @@ Se `SPED_ENV` nao for informado, ao rodar pelo codigo-fonte o sistema usa `dev` 
 Use este comando na pasta `c:\spedAms`:
 
 ```powershell
-.\build-dev.ps1
+.\scripts\build-dev.ps1
 ```
 
 O executavel sera gerado em:
@@ -161,7 +170,7 @@ Esse EXE abre sempre em ambiente `dev`.
 Use este comando na pasta `c:\spedAms`:
 
 ```powershell
-.\build-prod.ps1
+.\scripts\build-prod.ps1
 ```
 
 O executavel sera gerado em:
@@ -216,7 +225,7 @@ git pull origin develop
 Depois prepare os ambientes Python:
 
 ```powershell
-.\setup-ambientes.ps1
+.\scripts\setup-ambientes.ps1
 ```
 
 Esse script cria, se ainda nao existirem:
@@ -231,13 +240,13 @@ e instala as dependencias de uso e de build.
 Depois teste:
 
 ```powershell
-.\run-dev.ps1
+.\scripts\run-dev.ps1
 ```
 
 e:
 
 ```powershell
-.\run-prod.ps1
+.\scripts\run-prod.ps1
 ```
 
 Se o outro computador ainda nao permitir executar scripts PowerShell, rode uma vez:

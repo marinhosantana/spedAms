@@ -1,6 +1,7 @@
 $ErrorActionPreference = "Stop"
 
-Set-Location -Path $PSScriptRoot
+$projectRoot = Resolve-Path (Join-Path $PSScriptRoot "..")
+Set-Location -Path $projectRoot
 
 if (Get-Command py -ErrorAction SilentlyContinue) {
     $pythonLauncher = "py"
@@ -17,13 +18,13 @@ if (-not (Test-Path ".\.venv-prod\Scripts\python.exe")) {
 }
 
 & ".\.venv-dev\Scripts\python.exe" -m pip install --upgrade pip
-& ".\.venv-dev\Scripts\python.exe" -m pip install -r requirements.txt
-& ".\.venv-dev\Scripts\python.exe" -m pip install -r requirements-build.txt
+& ".\.venv-dev\Scripts\python.exe" -m pip install -r .\requirements\base.txt
+& ".\.venv-dev\Scripts\python.exe" -m pip install -r .\requirements\build.txt
 
 & ".\.venv-prod\Scripts\python.exe" -m pip install --upgrade pip
-& ".\.venv-prod\Scripts\python.exe" -m pip install -r requirements.txt
-& ".\.venv-prod\Scripts\python.exe" -m pip install -r requirements-build.txt
+& ".\.venv-prod\Scripts\python.exe" -m pip install -r .\requirements\base.txt
+& ".\.venv-prod\Scripts\python.exe" -m pip install -r .\requirements\build.txt
 
 Write-Host "Ambientes preparados com sucesso."
-Write-Host "Use .\run-dev.ps1 para desenvolvimento."
-Write-Host "Use .\run-prod.ps1 para producao."
+Write-Host "Use .\scripts\run-dev.ps1 para desenvolvimento."
+Write-Host "Use .\scripts\run-prod.ps1 para producao."
