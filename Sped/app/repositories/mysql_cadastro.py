@@ -20,9 +20,10 @@ except Exception:
 
 
 class MysqlCadastroRepository:
-    def __init__(self, config_path: Path, schema_path: Path) -> None:
+    def __init__(self, config_path: Path, schema_path: Path, default_config: dict[str, str] | None = None) -> None:
         self.config_path = config_path
         self.schema_path = schema_path
+        self.default_config = dict(default_config or MYSQL_DEFAULT_CONFIG)
 
     def mysql_available(self) -> bool:
         return "mysql" in globals() and getattr(mysql, "connector", None) is not None
@@ -41,21 +42,21 @@ class MysqlCadastroRepository:
 
     def load_config(self) -> dict[str, str]:
         if not self.config_path.exists():
-            self.save_config(MYSQL_DEFAULT_CONFIG)
-            return dict(MYSQL_DEFAULT_CONFIG)
+            self.save_config(self.default_config)
+            return dict(self.default_config)
         try:
             loaded = json.loads(self.config_path.read_text(encoding="utf-8"))
         except Exception:
             loaded = {}
-        config = dict(MYSQL_DEFAULT_CONFIG)
+        config = dict(self.default_config)
         if isinstance(loaded, dict):
-            for key in MYSQL_DEFAULT_CONFIG:
-                value = loaded.get(key, MYSQL_DEFAULT_CONFIG[key])
-                config[key] = str(value or MYSQL_DEFAULT_CONFIG[key])
+            for key in self.default_config:
+                value = loaded.get(key, self.default_config[key])
+                config[key] = str(value or self.default_config[key])
         return config
 
     def save_config(self, config: dict[str, str]) -> None:
-        payload = {key: str(config.get(key, MYSQL_DEFAULT_CONFIG[key])) for key in MYSQL_DEFAULT_CONFIG}
+        payload = {key: str(config.get(key, self.default_config[key])) for key in self.default_config}
         self.config_path.parent.mkdir(parents=True, exist_ok=True)
         self.config_path.write_text(json.dumps(payload, ensure_ascii=True, indent=2), encoding="utf-8")
 

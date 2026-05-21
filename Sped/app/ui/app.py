@@ -13,7 +13,7 @@ from tkinter import BOTH, END, LEFT, RIGHT, BooleanVar, Canvas, Menu, StringVar,
 from tkinter import filedialog, messagebox, ttk
 from typing import Iterable, Iterator
 
-from app.config import APP_DEFAULT_CONFIG, COMPARE_MARK_CHECKED, COMPARE_MARK_UNCHECKED
+from app.config import APP_DEFAULT_CONFIG, COMPARE_MARK_CHECKED, COMPARE_MARK_UNCHECKED, MYSQL_DEFAULT_CONFIG
 from app.exporters.rules_report_exporter import build_rule_report_entries, write_rules_report_docx
 from app.exporters.workbook_exporter import (
     serialize_value_for_clipboard,
@@ -36,7 +36,14 @@ from app.parsers.sped_parser import (
 from app.parsers.compare_sped_reader import extract_company_tax_id_from_sped
 from app.repositories.mysql_cadastro import MysqlCadastroRepository
 from app.services.app_config_service import load_app_config, save_app_config as save_app_config_payload
-from app.services.app_paths import get_application_base_dir, get_audit_log_path, get_runtime_rule_history_path
+from app.services.app_paths import (
+    get_application_base_dir,
+    get_application_environment,
+    get_audit_log_path,
+    get_environment_config_path,
+    get_project_root_dir,
+    get_runtime_rule_history_path,
+)
 from app.services.audit_utils import format_audit_paths, format_audit_summary, summarize_audit_detail_rows
 from app.services.compare_sped_launcher import launch_compare_invoice_in_sped, launch_compare_invoices_in_sped
 from app.services.compare_matching import compare_decimal_value
@@ -157,12 +164,16 @@ class SpedApp:
         # Interface principal para selecionar arquivos, filtros e gerar as saidas.
         self.root = root
         self.app_base_dir = get_application_base_dir(__file__)
-        self.app_config_path = self.app_base_dir / "app_config.json"
-        app_config = load_app_config(self.app_config_path)
+        self.app_environment = get_application_environment()
+        self.project_root_dir = get_project_root_dir(self.app_base_dir)
+        self.app_config_path = get_environment_config_path(self.app_base_dir, "app_config", self.app_environment)
+        app_config = load_app_config(self.app_config_path, self.get_app_default_config())
         self.app_window_title_var = StringVar(value=app_config["window_title"])
         self.app_home_title_var = StringVar(value=app_config["home_title"])
-        self.app_config_status_var = StringVar(value="Informe os nomes que devem aparecer na tela inicial.")
-        self.root.title(self.app_window_title_var.get().strip() or APP_DEFAULT_CONFIG["window_title"])
+        self.app_config_status_var = StringVar(
+            value=f"Ambiente atual: {self.app_environment}. Informe os nomes que devem aparecer na tela inicial."
+        )
+        self.root.title(self.app_window_title_var.get().strip() or self.get_app_default_config()["window_title"])
         self.root.minsize(860, 680)
         self.set_dialog_screen_geometry(self.root, 1440, 900, 860, 680, margin_y=150)
         self.root.state("zoomed")
@@ -370,13 +381,15 @@ class SpedApp:
         self.contrib_sales_consult_selected_product_code = ""
         self.selected_company_id: int | None = None
         self.selected_product_id: int | None = None
+        self.mysql_config_path = get_environment_config_path(self.app_base_dir, "mysql_config", self.app_environment)
         self._consultation_filters_ready = False
         self._sales_consultation_filters_ready = False
         self._contrib_consultation_filters_ready = False
         self._contrib_sales_consultation_filters_ready = False
         self.mysql_repo = MysqlCadastroRepository(
-            self.app_base_dir / "mysql_config.json",
-            self.app_base_dir / "mysql_schema.sql",
+            self.mysql_config_path,
+            self.project_root_dir / "mysql_schema.sql",
+            self.get_mysql_default_config(),
         )
         self._configure_styles()
         self._build_layout()
@@ -3947,23 +3960,34 @@ class SpedApp:
             messagebox.showerror("Analise Entrada e Saida", str(exc))
 
     def get_app_form_config(self) -> dict[str, str]:
+        defaults = self.get_app_default_config()
         return {
-            "window_title": self.app_window_title_var.get().strip() or APP_DEFAULT_CONFIG["window_title"],
-            "home_title": self.app_home_title_var.get().strip() or APP_DEFAULT_CONFIG["home_title"],
+            "window_title": self.app_window_title_var.get().strip() or defaults["window_title"],
+            "home_title": self.app_home_title_var.get().strip() or defaults["home_title"],
         }
 
+    def get_app_default_config(self) -> dict[str, str]:
+        if getattr(self, "app_environment", "dev") == "dev":
+            return {
+                "window_title": f"{APP_DEFAULT_CONFIG['window_title']} [DEV]",
+                "home_title": f"{APP_DEFAULT_CONFIG['home_title']} [DEV]",
+            }
+        return dict(APP_DEFAULT_CONFIG)
+
     def apply_app_config(self) -> None:
-        self.root.title(self.app_window_title_var.get().strip() or APP_DEFAULT_CONFIG["window_title"])
+        defaults = self.get_app_default_config()
+        self.root.title(self.app_window_title_var.get().strip() or defaults["window_title"])
 
     def save_app_config(self) -> None:
-        save_app_config_payload(self.app_config_path, self.get_app_form_config())
+        save_app_config_payload(self.app_config_path, self.get_app_form_config(), self.get_app_default_config())
         self.apply_app_config()
         self.app_config_status_var.set("Configuracao da aplicacao salva.")
         self.log_message(f"Configuracao da aplicacao salva em: {self.app_config_path}")
 
     def reset_app_config(self) -> None:
-        self.app_window_title_var.set(APP_DEFAULT_CONFIG["window_title"])
-        self.app_home_title_var.set(APP_DEFAULT_CONFIG["home_title"])
+        defaults = self.get_app_default_config()
+        self.app_window_title_var.set(defaults["window_title"])
+        self.app_home_title_var.set(defaults["home_title"])
         self.save_app_config()
 
     def build_app_config_tab(self, parent: ttk.Frame) -> None:
@@ -4011,13 +4035,20 @@ class SpedApp:
         if not self.mysql_repo.mysql_available():
             self.db_status_var.set("Driver MySQL ausente. Instale mysql-connector-python na venv para habilitar os cadastros.")
 
+    def get_mysql_default_config(self) -> dict[str, str]:
+        config = dict(MYSQL_DEFAULT_CONFIG)
+        if getattr(self, "app_environment", "dev") == "dev":
+            config["database"] = "sped_icms_dev"
+        return config
+
     def get_mysql_form_config(self) -> dict[str, str]:
+        defaults = self.get_mysql_default_config()
         return {
             "host": self.db_host_var.get().strip(),
             "port": self.db_port_var.get().strip() or "3306",
             "user": self.db_user_var.get().strip(),
             "password": self.db_password_var.get(),
-            "database": self.db_name_var.get().strip() or "sped_icms",
+            "database": self.db_name_var.get().strip() or defaults["database"],
         }
 
     def save_mysql_config(self, log_success: bool = True) -> None:

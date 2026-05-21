@@ -1,0 +1,8 @@
+.venv-dev/
+.venv-prod/
+__pycache__/
+*.py[cod]
+Sped/app/ui/logs/
+Sped/logs/
+Sped/build/
+Sped/dist/
