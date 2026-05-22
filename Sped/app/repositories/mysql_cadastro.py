@@ -1,14 +1,11 @@
 from __future__ import annotations
 
-import datetime as dt
 import json
 import sys
 import traceback
 from pathlib import Path
 
 from app.config import MYSQL_CONNECTION_TIMEOUT_SECONDS, MYSQL_DEFAULT_CONFIG
-from app.services.tax_rules import normalize_tax_code
-
 try:
     import mysql.connector
     from mysql.connector import Error as MySQLError
@@ -131,53 +128,6 @@ class MysqlCadastroRepository:
             )
             return cursor.fetchone() is not None
 
-        def normalize_existing_icms_cst_values() -> None:
-            if not column_exists("produtos_empresa", "cst_icms_entrada") or not column_exists("produtos_empresa", "cst_icms_saida"):
-                return
-            cursor.execute("SELECT id, cst_icms_entrada, cst_icms_saida FROM produtos_empresa")
-            updates: list[tuple[str, str, int]] = []
-            for product_id, cst_entrada, cst_saida in cursor.fetchall():
-                normalized_entrada = normalize_tax_code(cst_entrada, 3)
-                normalized_saida = normalize_tax_code(cst_saida, 3)
-                current_entrada = str(cst_entrada or "").strip()
-                current_saida = str(cst_saida or "").strip()
-                if normalized_entrada != current_entrada or normalized_saida != current_saida:
-                    updates.append((normalized_entrada, normalized_saida, int(product_id)))
-            if updates:
-                cursor.executemany(
-                    """
-                    UPDATE produtos_empresa
-                    SET cst_icms_entrada = %s,
-                        cst_icms_saida = %s
-                    WHERE id = %s
-                    """,
-                    updates,
-                )
-
-        if not column_exists("empresas", "ativo"):
-            cursor.execute("ALTER TABLE empresas ADD COLUMN ativo TINYINT(1) NOT NULL DEFAULT 1")
-
-        if not column_exists("produtos_empresa", "codigo_origem"):
-            cursor.execute("ALTER TABLE produtos_empresa ADD COLUMN codigo_origem VARCHAR(80) NOT NULL DEFAULT ''")
-
-        if not column_exists("produtos_empresa", "ativo"):
-            cursor.execute("ALTER TABLE produtos_empresa ADD COLUMN ativo TINYINT(1) NOT NULL DEFAULT 1")
-
-        if not column_exists("produtos_empresa", "cst_icms_entrada"):
-            cursor.execute("ALTER TABLE produtos_empresa ADD COLUMN cst_icms_entrada VARCHAR(4) NOT NULL DEFAULT ''")
-        if not column_exists("produtos_empresa", "cst_icms_saida"):
-            cursor.execute("ALTER TABLE produtos_empresa ADD COLUMN cst_icms_saida VARCHAR(4) NOT NULL DEFAULT ''")
-        if not column_exists("produtos_empresa", "cst_pis_entrada"):
-            cursor.execute("ALTER TABLE produtos_empresa ADD COLUMN cst_pis_entrada VARCHAR(4) NOT NULL DEFAULT ''")
-        if not column_exists("produtos_empresa", "cst_pis_saida"):
-            cursor.execute("ALTER TABLE produtos_empresa ADD COLUMN cst_pis_saida VARCHAR(4) NOT NULL DEFAULT ''")
-        if not column_exists("produtos_empresa", "cst_cofins_entrada"):
-            cursor.execute("ALTER TABLE produtos_empresa ADD COLUMN cst_cofins_entrada VARCHAR(4) NOT NULL DEFAULT ''")
-        if not column_exists("produtos_empresa", "cst_cofins_saida"):
-            cursor.execute("ALTER TABLE produtos_empresa ADD COLUMN cst_cofins_saida VARCHAR(4) NOT NULL DEFAULT ''")
-        if not column_exists("produtos_empresa", "tipo_produto"):
-            cursor.execute("ALTER TABLE produtos_empresa ADD COLUMN tipo_produto VARCHAR(30) NOT NULL DEFAULT 'Revenda'")
-
         if column_exists("sped_perfis", "id"):
             if not column_exists("sped_perfis", "empresa_nome_sped"):
                 cursor.execute("ALTER TABLE sped_perfis ADD COLUMN empresa_nome_sped VARCHAR(255) NOT NULL DEFAULT '' AFTER nome")
@@ -186,29 +136,6 @@ class MysqlCadastroRepository:
 
         if column_exists("sped_arquivos", "id") and not column_exists("sped_arquivos", "empresa_nome_sped"):
             cursor.execute("ALTER TABLE sped_arquivos ADD COLUMN empresa_nome_sped VARCHAR(255) NOT NULL DEFAULT '' AFTER periodo_fim")
-
-        normalize_existing_icms_cst_values()
-
-    def find_company_id_by_tax_id(self, tax_id: str) -> int | None:
-        normalized_tax_id = "".join(char for char in str(tax_id or "") if char.isdigit())
-        if not normalized_tax_id:
-            return None
-        connection = self.get_connection()
-        try:
-            cursor = connection.cursor()
-            cursor.execute(
-                """
-                SELECT id
-                FROM empresas
-                WHERE REPLACE(REPLACE(REPLACE(cnpj, '.', ''), '/', ''), '-', '') = %s
-                LIMIT 1
-                """,
-                (normalized_tax_id,),
-            )
-            row = cursor.fetchone()
-            return int(row[0]) if row else None
-        finally:
-            connection.close()
 
     def get_sped_archive_by_hash(self, environment: str, file_hash_sha256: str) -> dict[str, object] | None:
         connection = self.get_connection()
@@ -233,7 +160,6 @@ class MysqlCadastroRepository:
         self,
         environment: str,
         profile_name: str,
-        company_id: int | None = None,
         description: str = "",
         company_name: str = "",
         company_tax_id: str = "",
@@ -272,14 +198,13 @@ class MysqlCadastroRepository:
                 cursor.execute(
                     """
                     UPDATE sped_perfis
-                    SET empresa_id = COALESCE(empresa_id, %s),
-                        nome = CASE WHEN nome = '' THEN %s ELSE nome END,
+                    SET nome = CASE WHEN nome = '' THEN %s ELSE nome END,
                         empresa_nome_sped = CASE WHEN empresa_nome_sped = '' THEN %s ELSE empresa_nome_sped END,
                         empresa_cnpj_sped = CASE WHEN empresa_cnpj_sped = '' THEN %s ELSE empresa_cnpj_sped END,
                         ativo = 1
                     WHERE id = %s
                     """,
-                    (company_id, normalized_name, normalized_company_name, normalized_company_tax_id, profile_id),
+                    (normalized_name, normalized_company_name, normalized_company_tax_id, profile_id),
                 )
                 connection.commit()
                 return profile_id
@@ -287,16 +212,15 @@ class MysqlCadastroRepository:
             cursor.execute(
                 """
                 INSERT INTO sped_perfis (
-                    empresa_id,
                     ambiente,
                     nome,
                     empresa_nome_sped,
                     empresa_cnpj_sped,
                     descricao,
                     ativo
-                ) VALUES (%s, %s, %s, %s, %s, %s, 1)
+                ) VALUES (%s, %s, %s, %s, %s, 1)
                 """,
-                (company_id, environment, normalized_name, normalized_company_name, normalized_company_tax_id, description),
+                (environment, normalized_name, normalized_company_name, normalized_company_tax_id, description),
             )
             connection.commit()
             return int(cursor.lastrowid)
@@ -325,7 +249,6 @@ class MysqlCadastroRepository:
                 """
                 INSERT INTO sped_arquivos (
                     perfil_id,
-                    empresa_id,
                     ambiente,
                     tipo_sped,
                     periodo_inicio,
@@ -338,11 +261,10 @@ class MysqlCadastroRepository:
                     caminho_arquivo_original,
                     caminho_arquivo_arquivado,
                     observacao
-                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 """,
                 (
                     data.get("perfil_id"),
-                    data.get("empresa_id"),
                     data["ambiente"],
                     data.get("tipo_sped", ""),
                     data.get("periodo_inicio") or None,
@@ -567,20 +489,18 @@ class MysqlCadastroRepository:
                     p.empresa_nome_sped,
                     p.empresa_cnpj_sped,
                     p.ambiente,
-                    p.empresa_id,
-                    COALESCE(e.razao_social, '') AS empresa_nome,
-                    COALESCE(e.cnpj, p.empresa_cnpj_sped, '') AS empresa_cnpj,
+                    p.empresa_nome_sped AS empresa_nome,
+                    p.empresa_cnpj_sped AS empresa_cnpj,
                     COUNT(a.id) AS total_arquivos,
                     COALESCE(SUM(a.arquivo_tamanho), 0) AS total_bytes,
                     MIN(a.periodo_inicio) AS periodo_inicio,
                     MAX(a.periodo_fim) AS periodo_fim,
                     MAX(a.created_at) AS ultimo_arquivo_em
                 FROM sped_perfis p
-                LEFT JOIN empresas e ON e.id = p.empresa_id
                 LEFT JOIN sped_arquivos a ON a.perfil_id = p.id
                 WHERE p.ambiente = %s
                   AND p.ativo = 1
-                GROUP BY p.id, p.nome, p.empresa_nome_sped, p.empresa_cnpj_sped, p.ambiente, p.empresa_id, e.razao_social, e.cnpj
+                GROUP BY p.id, p.nome, p.empresa_nome_sped, p.empresa_cnpj_sped, p.ambiente
                 ORDER BY ultimo_arquivo_em DESC, p.nome
                 """,
                 (environment,),
@@ -604,8 +524,7 @@ class MysqlCadastroRepository:
                     a.id,
                     a.perfil_id,
                     COALESCE(p.nome, '') AS perfil_nome,
-                    a.empresa_id,
-                    COALESCE(e.razao_social, '') AS empresa_nome,
+                    a.empresa_nome_sped AS empresa_nome,
                     a.ambiente,
                     a.tipo_sped,
                     a.periodo_inicio,
@@ -624,7 +543,6 @@ class MysqlCadastroRepository:
                     COALESCE(c190.total, 0) AS total_c190
                 FROM sped_arquivos a
                 LEFT JOIN sped_perfis p ON p.id = a.perfil_id
-                LEFT JOIN empresas e ON e.id = a.empresa_id
                 LEFT JOIN (
                     SELECT sped_arquivo_id, COUNT(*) AS total
                     FROM sped_produtos_0200
@@ -651,286 +569,6 @@ class MysqlCadastroRepository:
                 tuple(params),
             )
             return [dict(row) for row in cursor.fetchall()]
-        finally:
-            connection.close()
-
-    def list_companies(self) -> list[dict[str, object]]:
-        columns = self.get_table_columns("empresas")
-        has_ativo = "ativo" in columns
-        connection = self.get_connection()
-        try:
-            cursor = connection.cursor(dictionary=True)
-            cursor.execute(
-                f"""
-                SELECT
-                    id,
-                    razao_social,
-                    nome_fantasia,
-                    cnpj,
-                    inscricao_estadual
-                    {", ativo" if has_ativo else ""}
-                FROM empresas
-                ORDER BY razao_social, id
-                """
-            )
-            rows = list(cursor.fetchall())
-            if not has_ativo:
-                for row in rows:
-                    row["ativo"] = 1
-            return rows
-        finally:
-            connection.close()
-
-    def save_company(self, company_id: int | None, data: dict[str, str]) -> int:
-        connection = self.get_connection()
-        try:
-            cursor = connection.cursor()
-            values = (
-                data["razao_social"],
-                data["nome_fantasia"],
-                data["cnpj"],
-                data["inscricao_estadual"],
-                int(data.get("ativo", 1)),
-            )
-            if company_id:
-                cursor.execute(
-                    """
-                    UPDATE empresas
-                    SET razao_social = %s,
-                        nome_fantasia = %s,
-                        cnpj = %s,
-                        inscricao_estadual = %s,
-                        ativo = %s
-                    WHERE id = %s
-                    """,
-                    (*values, company_id),
-                )
-                saved_id = company_id
-            else:
-                cursor.execute(
-                    """
-                    INSERT INTO empresas (
-                        razao_social,
-                        nome_fantasia,
-                        cnpj,
-                        inscricao_estadual,
-                        ativo
-                    ) VALUES (%s, %s, %s, %s, %s)
-                    """,
-                    values,
-                )
-                saved_id = int(cursor.lastrowid)
-            connection.commit()
-            return saved_id
-        finally:
-            connection.close()
-
-    def deactivate_company(self, company_id: int) -> None:
-        connection = self.get_connection()
-        try:
-            cursor = connection.cursor()
-            cursor.execute("UPDATE empresas SET ativo = 0 WHERE id = %s", (company_id,))
-            connection.commit()
-        finally:
-            connection.close()
-
-    def reactivate_company(self, company_id: int) -> None:
-        connection = self.get_connection()
-        try:
-            cursor = connection.cursor()
-            cursor.execute("UPDATE empresas SET ativo = 1 WHERE id = %s", (company_id,))
-            connection.commit()
-        finally:
-            connection.close()
-
-    def list_products(self, company_id: int) -> list[dict[str, object]]:
-        columns = self.get_table_columns("produtos_empresa")
-        has_codigo_origem = "codigo_origem" in columns
-        has_ativo = "ativo" in columns
-        has_cst_icms_entrada = "cst_icms_entrada" in columns
-        has_cst_icms_saida = "cst_icms_saida" in columns
-        has_cst_pis_entrada = "cst_pis_entrada" in columns
-        has_cst_pis_saida = "cst_pis_saida" in columns
-        has_cst_cofins_entrada = "cst_cofins_entrada" in columns
-        has_cst_cofins_saida = "cst_cofins_saida" in columns
-        has_tipo_produto = "tipo_produto" in columns
-        connection = self.get_connection()
-        try:
-            cursor = connection.cursor(dictionary=True)
-            cursor.execute(
-                f"""
-                SELECT
-                    id,
-                    codigo,
-                    {"codigo_origem," if has_codigo_origem else "'' AS codigo_origem,"}
-                    descricao,
-                    ncm,
-                    unidade,
-                    {"cst_icms_entrada," if has_cst_icms_entrada else "'' AS cst_icms_entrada,"}
-                    {"cst_icms_saida," if has_cst_icms_saida else "'' AS cst_icms_saida,"}
-                    {"cst_pis_entrada," if has_cst_pis_entrada else "'' AS cst_pis_entrada,"}
-                    {"cst_pis_saida," if has_cst_pis_saida else "'' AS cst_pis_saida,"}
-                    {"cst_cofins_entrada," if has_cst_cofins_entrada else "'' AS cst_cofins_entrada,"}
-                    {"cst_cofins_saida," if has_cst_cofins_saida else "'' AS cst_cofins_saida,"}
-                    {"tipo_produto," if has_tipo_produto else "'Revenda' AS tipo_produto,"}
-                    icms_entrada,
-                    icms_saida,
-                    pis_entrada,
-                    pis_saida,
-                    cofins_entrada,
-                    cofins_saida
-                    {", ativo" if has_ativo else ""}
-                FROM produtos_empresa
-                WHERE empresa_id = %s
-                ORDER BY descricao, codigo, id
-                """,
-                (company_id,),
-            )
-            rows = list(cursor.fetchall())
-            for row in rows:
-                if not has_codigo_origem:
-                    row["codigo_origem"] = ""
-                row["cst_icms_entrada"] = normalize_tax_code(row.get("cst_icms_entrada", "") if has_cst_icms_entrada else "", 3)
-                row["cst_icms_saida"] = normalize_tax_code(row.get("cst_icms_saida", "") if has_cst_icms_saida else "", 3)
-                row["cst_pis_entrada"] = normalize_tax_code(row.get("cst_pis_entrada", "") if has_cst_pis_entrada else "", 2)
-                row["cst_pis_saida"] = normalize_tax_code(row.get("cst_pis_saida", "") if has_cst_pis_saida else "", 2)
-                row["cst_cofins_entrada"] = normalize_tax_code(row.get("cst_cofins_entrada", "") if has_cst_cofins_entrada else "", 2)
-                row["cst_cofins_saida"] = normalize_tax_code(row.get("cst_cofins_saida", "") if has_cst_cofins_saida else "", 2)
-                if not has_tipo_produto:
-                    row["tipo_produto"] = "Revenda"
-                if not has_ativo:
-                    row["ativo"] = 1
-            return rows
-        finally:
-            connection.close()
-
-    def save_product(self, product_id: int | None, company_id: int, data: dict[str, object]) -> int:
-        connection = self.get_connection()
-        try:
-            cursor = connection.cursor()
-            normalized_cst_icms_entrada = normalize_tax_code(data.get("cst_icms_entrada", ""), 3)
-            normalized_cst_icms_saida = normalize_tax_code(data.get("cst_icms_saida", ""), 3)
-            values = (
-                company_id,
-                data["codigo_origem"],
-                data["descricao"],
-                data["ncm"],
-                data["unidade"],
-                normalized_cst_icms_entrada,
-                normalized_cst_icms_saida,
-                data["cst_pis_entrada"],
-                data["cst_pis_saida"],
-                data["cst_cofins_entrada"],
-                data["cst_cofins_saida"],
-                data["tipo_produto"],
-                data["icms_entrada"],
-                data["icms_saida"],
-                data["pis_entrada"],
-                data["pis_saida"],
-                data["cofins_entrada"],
-                data["cofins_saida"],
-                int(data.get("ativo", 1)),
-            )
-            if product_id:
-                cursor.execute(
-                    """
-                    UPDATE produtos_empresa
-                    SET empresa_id = %s,
-                        codigo_origem = %s,
-                        descricao = %s,
-                        ncm = %s,
-                        unidade = %s,
-                        cst_icms_entrada = %s,
-                        cst_icms_saida = %s,
-                        cst_pis_entrada = %s,
-                        cst_pis_saida = %s,
-                        cst_cofins_entrada = %s,
-                        cst_cofins_saida = %s,
-                        tipo_produto = %s,
-                        icms_entrada = %s,
-                        icms_saida = %s,
-                        pis_entrada = %s,
-                        pis_saida = %s,
-                        cofins_entrada = %s,
-                        cofins_saida = %s,
-                        ativo = %s
-                    WHERE id = %s
-                    """,
-                    (*values, product_id),
-                )
-                saved_id = product_id
-            else:
-                temporary_code = f"TMP-{company_id}-{dt.datetime.now().strftime('%Y%m%d%H%M%S%f')}"
-                cursor.execute(
-                    """
-                    INSERT INTO produtos_empresa (
-                        empresa_id,
-                        codigo,
-                        codigo_origem,
-                        descricao,
-                        ncm,
-                        unidade,
-                        cst_icms_entrada,
-                        cst_icms_saida,
-                        cst_pis_entrada,
-                        cst_pis_saida,
-                        cst_cofins_entrada,
-                        cst_cofins_saida,
-                        tipo_produto,
-                        icms_entrada,
-                        icms_saida,
-                        pis_entrada,
-                        pis_saida,
-                        cofins_entrada,
-                        cofins_saida,
-                        ativo
-                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-                    """,
-                    (
-                        company_id,
-                        temporary_code,
-                        data["codigo_origem"],
-                        data["descricao"],
-                        data["ncm"],
-                        data["unidade"],
-                        normalized_cst_icms_entrada,
-                        normalized_cst_icms_saida,
-                        data["cst_pis_entrada"],
-                        data["cst_pis_saida"],
-                        data["cst_cofins_entrada"],
-                        data["cst_cofins_saida"],
-                        data["tipo_produto"],
-                        data["icms_entrada"],
-                        data["icms_saida"],
-                        data["pis_entrada"],
-                        data["pis_saida"],
-                        data["cofins_entrada"],
-                        data["cofins_saida"],
-                        int(data.get("ativo", 1)),
-                    ),
-                )
-                saved_id = int(cursor.lastrowid)
-                cursor.execute("UPDATE produtos_empresa SET codigo = %s WHERE id = %s", (str(saved_id), saved_id))
-            connection.commit()
-            return saved_id
-        finally:
-            connection.close()
-
-    def deactivate_product(self, product_id: int) -> None:
-        connection = self.get_connection()
-        try:
-            cursor = connection.cursor()
-            cursor.execute("UPDATE produtos_empresa SET ativo = 0 WHERE id = %s", (product_id,))
-            connection.commit()
-        finally:
-            connection.close()
-
-    def reactivate_product(self, product_id: int) -> None:
-        connection = self.get_connection()
-        try:
-            cursor = connection.cursor()
-            cursor.execute("UPDATE produtos_empresa SET ativo = 1 WHERE id = %s", (product_id,))
-            connection.commit()
         finally:
             connection.close()
 

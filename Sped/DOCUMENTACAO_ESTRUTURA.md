@@ -116,8 +116,7 @@ Responsabilidade: regra de negocio, transformacoes, conciliacoes, calculos e pre
   - Indices de itens fiscais XML.
 
 - `product_import.py`
-  - Importacao/candidatos de produtos por XML, SPED Fiscal, SPED Contribuicoes e SPED 0200.
-  - Usado pelos fluxos de previa e importacao de produtos.
+  - Utilitarios de produtos/NCM/CEST usados por conciliacoes e relatorios fiscais.
 
 - `operation_summary.py`
   - Consolida operacoes, C190/C590, bases, reducoes, apuracao e detalhes por documento/produto.
@@ -211,7 +210,7 @@ Responsabilidade: escrita de arquivos de saida.
 Pasta: `Sped/app/repositories/`
 
 - `mysql_cadastro.py`
-  - Acesso ao MySQL para cadastro de produtos/empresas.
+  - Acesso ao MySQL para configuracao e arquivamento de SPEDs originais.
   - Mantem queries e operacoes de persistencia fora da UI.
 
 ## Arquivos auxiliares de raiz

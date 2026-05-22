@@ -55,36 +55,25 @@ $env:SPED_ENV = "dev"
 
 e abre o sistema usando os arquivos `*.dev.json`.
 
-## Como rodar a nova interface em desenvolvimento
+## Como rodar a interface Qt em desenvolvimento
 
-A interface atual continua existindo. A nova interface em reconstrucao abre separadamente:
+A interface Qt em migracao abre separadamente:
 
 ```powershell
-.\scripts\run-next-dev.ps1
+.\scripts\run-qt-dev.ps1
 ```
 
 Ela usa o mesmo ambiente `dev`, mas roda por:
 
 ```text
-Sped/NovoRevisor.py
+Sped/NovoRevisorQt.py
 ```
 
-Os arquivos da nova interface ficam em:
+Os arquivos da interface Qt ficam em:
 
 ```text
-Sped/app/ui_next/
+Sped/app/ui_qt/
 ```
-
-Nesta primeira etapa, a nova interface ja possui:
-
-- Dashboard;
-- SPEDs Arquivados;
-- Consultas Fiscais;
-- Configuracoes.
-
-Em `Consultas Fiscais`, a tela funciona como um menu de consultas. Cada card abre uma tela propria para evitar misturar processamento, filtros e grades diferentes no mesmo espaco.
-
-A tela `Consulta Entradas ICMS` ja traz a migracao inicial da antiga consulta de entradas em tela separada: selecao de SPEDs/XMLs, filtros por periodo, CST, CFOP, status e busca, grade por produto/periodo, totais no rodape, exportacao CSV e popups de Entradas, Diagnostico de Credito, Comparacao de Diagnostico, Curva ABC, Reducao BC, Apuracao e Espelho Docs.
 
 ## Como rodar em producao
 

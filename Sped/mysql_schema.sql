@@ -1,48 +1,5 @@
-CREATE TABLE IF NOT EXISTS empresas (
-    id INT NOT NULL AUTO_INCREMENT PRIMARY KEY,
-    razao_social VARCHAR(255) NOT NULL,
-    nome_fantasia VARCHAR(255) NOT NULL DEFAULT '',
-    cnpj VARCHAR(18) NOT NULL,
-    inscricao_estadual VARCHAR(30) NOT NULL DEFAULT '',
-    ativo TINYINT(1) NOT NULL DEFAULT 1,
-    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-    UNIQUE KEY uq_empresas_cnpj (cnpj)
-);
-
-CREATE TABLE IF NOT EXISTS produtos_empresa (
-    id INT NOT NULL AUTO_INCREMENT PRIMARY KEY,
-    empresa_id INT NOT NULL,
-    codigo VARCHAR(60) NOT NULL,
-    codigo_origem VARCHAR(80) NOT NULL DEFAULT '',
-    descricao VARCHAR(255) NOT NULL,
-    ncm VARCHAR(20) NOT NULL DEFAULT '',
-    unidade VARCHAR(10) NOT NULL DEFAULT 'UN',
-    cst_icms_entrada VARCHAR(4) NOT NULL DEFAULT '',
-    cst_icms_saida VARCHAR(4) NOT NULL DEFAULT '',
-    cst_pis_entrada VARCHAR(4) NOT NULL DEFAULT '',
-    cst_pis_saida VARCHAR(4) NOT NULL DEFAULT '',
-    cst_cofins_entrada VARCHAR(4) NOT NULL DEFAULT '',
-    cst_cofins_saida VARCHAR(4) NOT NULL DEFAULT '',
-    tipo_produto VARCHAR(30) NOT NULL DEFAULT 'Revenda',
-    icms_entrada DECIMAL(10,4) NOT NULL DEFAULT 0.0000,
-    icms_saida DECIMAL(10,4) NOT NULL DEFAULT 0.0000,
-    pis_entrada DECIMAL(10,4) NOT NULL DEFAULT 0.0000,
-    pis_saida DECIMAL(10,4) NOT NULL DEFAULT 0.0000,
-    cofins_entrada DECIMAL(10,4) NOT NULL DEFAULT 0.0000,
-    cofins_saida DECIMAL(10,4) NOT NULL DEFAULT 0.0000,
-    ativo TINYINT(1) NOT NULL DEFAULT 1,
-    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-    CONSTRAINT fk_produtos_empresa_empresa FOREIGN KEY (empresa_id) REFERENCES empresas (id),
-    UNIQUE KEY uq_produtos_empresa_codigo (empresa_id, codigo),
-    KEY idx_produtos_empresa_descricao (descricao),
-    KEY idx_produtos_empresa_ncm (ncm)
-);
-
 CREATE TABLE IF NOT EXISTS sped_perfis (
     id INT NOT NULL AUTO_INCREMENT PRIMARY KEY,
-    empresa_id INT NULL,
     ambiente VARCHAR(10) NOT NULL DEFAULT 'dev',
     nome VARCHAR(255) NOT NULL,
     empresa_nome_sped VARCHAR(255) NOT NULL DEFAULT '',
@@ -51,16 +8,13 @@ CREATE TABLE IF NOT EXISTS sped_perfis (
     ativo TINYINT(1) NOT NULL DEFAULT 1,
     created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-    CONSTRAINT fk_sped_perfis_empresa FOREIGN KEY (empresa_id) REFERENCES empresas (id),
     UNIQUE KEY uq_sped_perfis_ambiente_nome (ambiente, nome),
-    KEY idx_sped_perfis_empresa (empresa_id),
     KEY idx_sped_perfis_cnpj_sped (empresa_cnpj_sped)
 );
 
 CREATE TABLE IF NOT EXISTS sped_arquivos (
     id INT NOT NULL AUTO_INCREMENT PRIMARY KEY,
     perfil_id INT NULL,
-    empresa_id INT NULL,
     ambiente VARCHAR(10) NOT NULL DEFAULT 'dev',
     tipo_sped VARCHAR(30) NOT NULL DEFAULT '',
     periodo_inicio DATE NULL,
@@ -75,10 +29,8 @@ CREATE TABLE IF NOT EXISTS sped_arquivos (
     observacao TEXT NULL,
     created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
     CONSTRAINT fk_sped_arquivos_perfil FOREIGN KEY (perfil_id) REFERENCES sped_perfis (id),
-    CONSTRAINT fk_sped_arquivos_empresa FOREIGN KEY (empresa_id) REFERENCES empresas (id),
     UNIQUE KEY uq_sped_arquivos_ambiente_hash (ambiente, arquivo_hash_sha256),
     KEY idx_sped_arquivos_perfil (perfil_id),
-    KEY idx_sped_arquivos_empresa (empresa_id),
     KEY idx_sped_arquivos_periodo (periodo_inicio, periodo_fim),
     KEY idx_sped_arquivos_cnpj (empresa_cnpj)
 );

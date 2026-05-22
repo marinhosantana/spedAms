@@ -7,7 +7,7 @@ from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Callable
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import QObject, QThread, Qt, Signal
 from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (
     QAbstractItemView,
@@ -39,7 +39,7 @@ from app.exporters.workbook_exporter import write_simple_csv_file, write_simple_
 from app.repositories.mysql_cadastro import MysqlCadastroRepository
 from app.parsers.sped_fiscal_parser import read_sped_file
 from app.services.app_paths import get_application_base_dir, get_application_environment, get_environment_config_path, get_project_root_dir
-from app.services.compare_operations import filter_xml_summary_rows_by_scope
+from app.services.compare_operations import filter_xml_summary_rows_by_scope, normalize_compare_operation_scope
 from app.services.compare_workflows import build_xml_cfop_summary_rows, build_xml_entry_credit_rows, compare_sped_with_sheet, compare_sped_with_xml_folder
 from app.services.analysis_reports import (
     build_credit_diagnostic_datasets,
@@ -73,6 +73,41 @@ COLORS = {
     "warn": "#b56b12",
     "bad": "#b42318",
 }
+
+
+class CompareWorker(QObject):
+    finished = Signal(list, list, list, dict, str, str, str)
+    failed = Signal(str)
+    progress = Signal(int, int, str)
+
+    def __init__(self, sped_path: Path, source_path: Path, compare_mode: str, source_kind: str, operation_scope: str) -> None:
+        super().__init__()
+        self.sped_path = sped_path
+        self.source_path = source_path
+        self.compare_mode = compare_mode
+        self.source_kind = source_kind
+        self.operation_scope = operation_scope
+
+    def run(self) -> None:
+        try:
+            if self.source_kind == "sheet":
+                present, missing, stats = compare_sped_with_sheet(
+                    self.sped_path,
+                    self.source_path,
+                    self.operation_scope,
+                    self.progress.emit,
+                )
+                sped_missing_xml: list[object] = []
+            else:
+                present, missing, sped_missing_xml, stats = compare_sped_with_xml_folder(
+                    self.sped_path,
+                    self.source_path,
+                    self.operation_scope,
+                    self.progress.emit,
+                )
+            self.finished.emit(present, missing, sped_missing_xml, stats, self.compare_mode, self.source_kind, self.operation_scope)
+        except Exception as exc:
+            self.failed.emit(str(exc))
 
 
 class QtSpedApp(QMainWindow):
@@ -925,7 +960,8 @@ class QtSpedApp(QMainWindow):
         toolbar_layout.addWidget(self.create_button("Limpar", self.clear_compare_page))
         toolbar_layout.addWidget(self.create_button("Exportar Excel", lambda: self.export_compare_rows("xlsx")))
         toolbar_layout.addWidget(self.create_button("Exportar CSV", lambda: self.export_compare_rows("csv")))
-        toolbar_layout.addWidget(self.create_button("Comparar notas", self.process_compare_page, primary=True))
+        self.compare_run_button = self.create_button("Comparar notas", self.process_compare_page, primary=True)
+        toolbar_layout.addWidget(self.compare_run_button)
         layout.addWidget(toolbar)
 
         setup = self.create_panel()
@@ -1290,11 +1326,9 @@ class QtSpedApp(QMainWindow):
         existing = self.mysql_repo.get_sped_archive_by_hash(self.environment, metadata.file_hash_sha256)
         if existing:
             return int(existing["id"])
-        company_id = self.mysql_repo.find_company_id_by_tax_id(metadata.company_tax_id)
         profile_id = self.mysql_repo.ensure_sped_profile(
             self.environment,
             metadata.default_profile_name,
-            company_id,
             "Perfil criado pela interface Qt.",
             metadata.company_name,
             metadata.company_tax_id,
@@ -1302,7 +1336,6 @@ class QtSpedApp(QMainWindow):
         archive_id = self.mysql_repo.save_sped_archive(
             {
                 "perfil_id": profile_id,
-                "empresa_id": company_id,
                 "ambiente": self.environment,
                 "tipo_sped": metadata.sped_type,
                 "periodo_inicio": metadata.period_start,
@@ -1449,55 +1482,96 @@ class QtSpedApp(QMainWindow):
         if has_xml == has_sheet:
             QMessageBox.warning(self, "SPED x XML", "Selecione apenas uma origem: pasta XML ou planilha.")
             return
-        operation_scope = self.compare_scope_combo.currentText()
-        try:
-            QApplication.setOverrideCursor(Qt.WaitCursor)
-            if has_sheet:
-                present, missing, stats = compare_sped_with_sheet(Path(sped_text), Path(sheet_text), operation_scope)
-                groups = [("Lancada", present), ("Nao lancada", missing)]
-            else:
-                present, missing, sped_missing_xml, stats = compare_sped_with_xml_folder(Path(sped_text), Path(xml_text), operation_scope)
-                groups = [("Lancada", present), ("Nao lancada", missing), ("Lancado SPED / Sem XML", sped_missing_xml)]
-                cancelled = stats.get("cancelled_xml_invoices", [])
-                if isinstance(cancelled, list):
-                    groups.append(("XML cancelado", cancelled))
-            operation_by_key = stats.get("operation_by_key", {})
-            source_operation_by_key = stats.get("source_operation_by_key", {})
-            if not isinstance(operation_by_key, dict):
-                operation_by_key = {}
-            if not isinstance(source_operation_by_key, dict):
-                source_operation_by_key = {}
-            rows: list[list[object]] = []
-            for status, invoices in groups:
-                for invoice in invoices:
-                    key = getattr(invoice, "key", "")
-                    operation = operation_by_key.get(key, "") or source_operation_by_key.get(key, "") or operation_scope
-                    rows.append(
-                        [
-                            status,
-                            operation,
-                            getattr(invoice, "model", ""),
-                            key,
-                            getattr(invoice, "number", ""),
-                            getattr(invoice, "series", ""),
-                            getattr(invoice, "issue_date", ""),
-                            getattr(invoice, "issuer_cnpj", ""),
-                            getattr(invoice, "total_value", ""),
-                            getattr(invoice, "file_path", ""),
-                        ]
-                    )
-            self.compare_rows = rows
-            self.compare_stats = dict(stats)
-            self.set_table_rows(self.compare_table, rows)
-            self.compare_status_label.setText(
-                f"Docs SPED: {stats.get('sped_keys', 0)} | Encontrados: {stats.get('present_total', 0)} | Nao lancados/nao encontrados: {stats.get('missing_total', 0)} | SPED sem XML: {stats.get('sped_missing_xml_total', 0)}"
-            )
-            self.statusBar().showMessage("Comparacao SPED x XML/Planilha concluida.")
-        except Exception as exc:
-            QMessageBox.critical(self, "SPED x XML", str(exc))
-            self.statusBar().showMessage(f"Falha na comparacao: {exc}")
-        finally:
-            QApplication.restoreOverrideCursor()
+        operation_scope = normalize_compare_operation_scope(self.compare_scope_combo.currentText())
+        source_kind = "sheet" if has_sheet else "xml"
+        source_path = Path(sheet_text) if has_sheet else Path(xml_text)
+        self.compare_rows = []
+        self.compare_stats = {}
+        self.compare_table.setRowCount(0)
+        self.compare_status_label.setText("Comparando arquivos... aguarde.")
+        self.statusBar().showMessage("Comparando SPED x XML/Planilha...")
+        self.compare_run_button.setEnabled(False)
+        QApplication.setOverrideCursor(Qt.WaitCursor)
+
+        self.compare_thread = QThread(self)
+        self.compare_worker = CompareWorker(Path(sped_text), source_path, compare_mode, source_kind, operation_scope)
+        self.compare_worker.moveToThread(self.compare_thread)
+        self.compare_thread.started.connect(self.compare_worker.run)
+        self.compare_worker.progress.connect(self.update_compare_status)
+        self.compare_worker.finished.connect(self.render_compare_results)
+        self.compare_worker.failed.connect(self.handle_compare_error)
+        self.compare_worker.finished.connect(self.compare_thread.quit)
+        self.compare_worker.failed.connect(self.compare_thread.quit)
+        self.compare_thread.finished.connect(self.compare_worker.deleteLater)
+        self.compare_thread.finished.connect(self.compare_thread.deleteLater)
+        self.compare_thread.finished.connect(lambda: setattr(self, "compare_worker", None))
+        self.compare_thread.finished.connect(lambda: setattr(self, "compare_thread", None))
+        self.compare_thread.start()
+
+    def update_compare_status(self, current: int, total: int, message: str) -> None:
+        percent = int(100 * current / max(total, 1))
+        self.compare_status_label.setText(f"{message} ({percent}%)")
+
+    def handle_compare_error(self, message: str) -> None:
+        QApplication.restoreOverrideCursor()
+        self.compare_run_button.setEnabled(True)
+        QMessageBox.critical(self, "SPED x XML", message)
+        self.compare_status_label.setText(f"Falha na comparacao: {message}")
+        self.statusBar().showMessage(f"Falha na comparacao: {message}")
+
+    def render_compare_results(
+        self,
+        present: list[object],
+        missing: list[object],
+        sped_missing_xml: list[object],
+        stats: dict[str, object],
+        compare_mode: str,
+        source_kind: str,
+        operation_scope: str,
+    ) -> None:
+        groups = [("Lancada", present), ("Nao lancada", missing)]
+        if source_kind == "xml":
+            groups.append(("Lancado SPED / Sem XML", sped_missing_xml))
+            cancelled = stats.get("cancelled_xml_invoices", [])
+            if isinstance(cancelled, list):
+                groups.append(("XML cancelado", cancelled))
+        operation_by_key = stats.get("operation_by_key", {})
+        source_operation_by_key = stats.get("source_operation_by_key", {})
+        if not isinstance(operation_by_key, dict):
+            operation_by_key = {}
+        if not isinstance(source_operation_by_key, dict):
+            source_operation_by_key = {}
+        selected_operation = normalize_compare_operation_scope(operation_scope)
+        rows: list[list[object]] = []
+        for status, invoices in groups:
+            for invoice in invoices:
+                key = getattr(invoice, "key", "")
+                operation = str(operation_by_key.get(key, "") or source_operation_by_key.get(key, "") or "")
+                if not operation and selected_operation != "Ambos":
+                    operation = selected_operation
+                rows.append(
+                    [
+                        status,
+                        operation,
+                        getattr(invoice, "model", ""),
+                        key,
+                        getattr(invoice, "number", ""),
+                        getattr(invoice, "series", ""),
+                        getattr(invoice, "issue_date", ""),
+                        getattr(invoice, "issuer_cnpj", ""),
+                        getattr(invoice, "total_value", ""),
+                        getattr(invoice, "file_path", ""),
+                    ]
+                )
+        self.compare_rows = rows
+        self.compare_stats = dict(stats)
+        self.set_table_rows(self.compare_table, rows)
+        self.compare_status_label.setText(
+            f"Docs SPED: {stats.get('sped_keys', 0)} | Encontrados: {stats.get('present_total', 0)} | Nao lancados/nao encontrados: {stats.get('missing_total', 0)} | SPED sem XML: {stats.get('sped_missing_xml_total', 0)}"
+        )
+        self.statusBar().showMessage("Comparacao SPED x XML/Planilha concluida.")
+        self.compare_run_button.setEnabled(True)
+        QApplication.restoreOverrideCursor()
 
     def rebuild_period_checks(self, labels: list[str]) -> None:
         while self.periods_layout.count():
