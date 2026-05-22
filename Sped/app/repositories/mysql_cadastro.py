@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import sys
 import traceback
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 
 from app.config import MYSQL_CONNECTION_TIMEOUT_SECONDS, MYSQL_DEFAULT_CONFIG
@@ -128,6 +129,34 @@ class MysqlCadastroRepository:
             )
             return cursor.fetchone() is not None
 
+        def table_constraint_exists(table_name: str, constraint_name: str) -> bool:
+            cursor.execute(
+                """
+                SELECT 1
+                FROM information_schema.TABLE_CONSTRAINTS
+                WHERE TABLE_SCHEMA = %s
+                  AND TABLE_NAME = %s
+                  AND CONSTRAINT_NAME = %s
+                LIMIT 1
+                """,
+                (database_name, table_name, constraint_name),
+            )
+            return cursor.fetchone() is not None
+
+        def index_exists(table_name: str, index_name: str) -> bool:
+            cursor.execute(
+                """
+                SELECT 1
+                FROM information_schema.STATISTICS
+                WHERE TABLE_SCHEMA = %s
+                  AND TABLE_NAME = %s
+                  AND INDEX_NAME = %s
+                LIMIT 1
+                """,
+                (database_name, table_name, index_name),
+            )
+            return cursor.fetchone() is not None
+
         if column_exists("sped_perfis", "id"):
             if not column_exists("sped_perfis", "empresa_nome_sped"):
                 cursor.execute("ALTER TABLE sped_perfis ADD COLUMN empresa_nome_sped VARCHAR(255) NOT NULL DEFAULT '' AFTER nome")
@@ -136,6 +165,348 @@ class MysqlCadastroRepository:
 
         if column_exists("sped_arquivos", "id") and not column_exists("sped_arquivos", "empresa_nome_sped"):
             cursor.execute("ALTER TABLE sped_arquivos ADD COLUMN empresa_nome_sped VARCHAR(255) NOT NULL DEFAULT '' AFTER periodo_fim")
+
+        if column_exists("cad_tipos_produto", "id"):
+            if not column_exists("cad_tipos_produto", "ambiente"):
+                cursor.execute("ALTER TABLE cad_tipos_produto ADD COLUMN ambiente VARCHAR(10) NOT NULL DEFAULT 'dev' AFTER id")
+            if table_constraint_exists("cad_tipos_produto", "fk_cad_tipos_produto_empresa"):
+                cursor.execute("ALTER TABLE cad_tipos_produto DROP FOREIGN KEY fk_cad_tipos_produto_empresa")
+            if index_exists("cad_tipos_produto", "uq_cad_tipos_produto_empresa_nome"):
+                cursor.execute("ALTER TABLE cad_tipos_produto DROP INDEX uq_cad_tipos_produto_empresa_nome")
+            if column_exists("cad_tipos_produto", "empresa_id"):
+                cursor.execute("ALTER TABLE cad_tipos_produto DROP COLUMN empresa_id")
+            if not index_exists("cad_tipos_produto", "idx_cad_tipos_produto_ambiente_nome"):
+                cursor.execute("ALTER TABLE cad_tipos_produto ADD KEY idx_cad_tipos_produto_ambiente_nome (ambiente, nome)")
+
+    def _only_digits(self, value: object) -> str:
+        return "".join(char for char in str(value or "") if char.isdigit())
+
+    def _decimal_text(self, value: object) -> str:
+        text = str(value or "").strip()
+        if "," in text:
+            text = text.replace(".", "").replace(",", ".")
+        if not text:
+            return "0"
+        try:
+            return str(Decimal(text))
+        except InvalidOperation:
+            return "0"
+
+    def list_companies(self, environment: str) -> list[dict[str, object]]:
+        connection = self.get_connection()
+        try:
+            cursor = connection.cursor(dictionary=True)
+            cursor.execute(
+                """
+                SELECT id, ambiente, nome, cnpj, inscricao_estadual, observacao
+                FROM cad_empresas
+                WHERE ambiente = %s
+                ORDER BY nome
+                """,
+                (environment,),
+            )
+            return [dict(row) for row in cursor.fetchall()]
+        finally:
+            connection.close()
+
+    def save_company(self, environment: str, data: dict[str, object]) -> int:
+        company_id = int(data.get("id") or 0)
+        values = (
+            environment,
+            str(data.get("nome", "")).strip(),
+            self._only_digits(data.get("cnpj", "")),
+            str(data.get("inscricao_estadual", "")).strip(),
+            str(data.get("observacao", "")).strip(),
+        )
+        if not values[1]:
+            raise ValueError("Informe o nome da empresa.")
+        connection = self.get_connection()
+        try:
+            cursor = connection.cursor()
+            if company_id:
+                cursor.execute(
+                    """
+                    UPDATE cad_empresas
+                    SET ambiente = %s, nome = %s, cnpj = %s, inscricao_estadual = %s, observacao = %s
+                    WHERE id = %s
+                    """,
+                    (*values, company_id),
+                )
+                connection.commit()
+                return company_id
+            cursor.execute(
+                """
+                INSERT INTO cad_empresas (ambiente, nome, cnpj, inscricao_estadual, observacao)
+                VALUES (%s, %s, %s, %s, %s)
+                """,
+                values,
+            )
+            connection.commit()
+            return int(cursor.lastrowid)
+        finally:
+            connection.close()
+
+    def delete_company(self, company_id: int) -> None:
+        self._delete_by_id("cad_empresas", company_id)
+
+    def list_suppliers(self, company_id: int) -> list[dict[str, object]]:
+        connection = self.get_connection()
+        try:
+            cursor = connection.cursor(dictionary=True)
+            cursor.execute(
+                """
+                SELECT id, empresa_id, nome, cnpj, codigo, observacao
+                FROM cad_fornecedores
+                WHERE empresa_id = %s
+                ORDER BY nome
+                """,
+                (company_id,),
+            )
+            return [dict(row) for row in cursor.fetchall()]
+        finally:
+            connection.close()
+
+    def list_suppliers_catalog(self, environment: str) -> list[dict[str, object]]:
+        connection = self.get_connection()
+        try:
+            cursor = connection.cursor(dictionary=True)
+            cursor.execute(
+                """
+                SELECT
+                    f.id,
+                    f.empresa_id,
+                    e.nome AS empresa_nome,
+                    f.nome,
+                    f.cnpj,
+                    f.codigo,
+                    f.observacao
+                FROM cad_fornecedores f
+                INNER JOIN cad_empresas e ON e.id = f.empresa_id
+                WHERE e.ambiente = %s
+                ORDER BY e.nome, f.nome
+                """,
+                (environment,),
+            )
+            return [dict(row) for row in cursor.fetchall()]
+        finally:
+            connection.close()
+
+    def save_supplier(self, company_id: int, data: dict[str, object]) -> int:
+        supplier_id = int(data.get("id") or 0)
+        values = (
+            company_id,
+            str(data.get("nome", "")).strip(),
+            self._only_digits(data.get("cnpj", "")),
+            str(data.get("codigo", "")).strip(),
+            str(data.get("observacao", "")).strip(),
+        )
+        if not company_id:
+            raise ValueError("Selecione uma empresa para cadastrar fornecedor.")
+        if not values[1]:
+            raise ValueError("Informe o nome do fornecedor.")
+        connection = self.get_connection()
+        try:
+            cursor = connection.cursor()
+            if supplier_id:
+                cursor.execute(
+                    """
+                    UPDATE cad_fornecedores
+                    SET empresa_id = %s, nome = %s, cnpj = %s, codigo = %s, observacao = %s
+                    WHERE id = %s
+                    """,
+                    (*values, supplier_id),
+                )
+                connection.commit()
+                return supplier_id
+            cursor.execute(
+                """
+                INSERT INTO cad_fornecedores (empresa_id, nome, cnpj, codigo, observacao)
+                VALUES (%s, %s, %s, %s, %s)
+                """,
+                values,
+            )
+            connection.commit()
+            return int(cursor.lastrowid)
+        finally:
+            connection.close()
+
+    def delete_supplier(self, supplier_id: int) -> None:
+        self._delete_by_id("cad_fornecedores", supplier_id)
+
+    def list_product_types(self, environment: str) -> list[dict[str, object]]:
+        connection = self.get_connection()
+        try:
+            cursor = connection.cursor(dictionary=True)
+            cursor.execute(
+                """
+                SELECT id, ambiente, nome, descricao
+                FROM cad_tipos_produto
+                WHERE ambiente = %s
+                ORDER BY nome
+                """,
+                (environment,),
+            )
+            return [dict(row) for row in cursor.fetchall()]
+        finally:
+            connection.close()
+
+    def list_product_types_catalog(self, environment: str) -> list[dict[str, object]]:
+        return self.list_product_types(environment)
+
+    def save_product_type(self, environment: str, data: dict[str, object]) -> int:
+        type_id = int(data.get("id") or 0)
+        values = (environment, str(data.get("nome", "")).strip(), str(data.get("descricao", "")).strip())
+        if not values[1]:
+            raise ValueError("Informe o nome do tipo de produto.")
+        connection = self.get_connection()
+        try:
+            cursor = connection.cursor()
+            if type_id:
+                cursor.execute(
+                    """
+                    UPDATE cad_tipos_produto
+                    SET ambiente = %s, nome = %s, descricao = %s
+                    WHERE id = %s
+                    """,
+                    (*values, type_id),
+                )
+                connection.commit()
+                return type_id
+            cursor.execute(
+                "INSERT INTO cad_tipos_produto (ambiente, nome, descricao) VALUES (%s, %s, %s)",
+                values,
+            )
+            connection.commit()
+            return int(cursor.lastrowid)
+        finally:
+            connection.close()
+
+    def delete_product_type(self, type_id: int) -> None:
+        self._delete_by_id("cad_tipos_produto", type_id)
+
+    def list_supplier_products(self, supplier_id: int) -> list[dict[str, object]]:
+        connection = self.get_connection()
+        try:
+            cursor = connection.cursor(dictionary=True)
+            cursor.execute(
+                """
+                SELECT
+                    p.*,
+                    COALESCE(t.nome, '') AS tipo_produto
+                FROM cad_produtos_fornecedor p
+                LEFT JOIN cad_tipos_produto t ON t.id = p.tipo_produto_id
+                WHERE p.fornecedor_id = %s
+                ORDER BY p.codigo_fornecedor, p.descricao
+                """,
+                (supplier_id,),
+            )
+            return [dict(row) for row in cursor.fetchall()]
+        finally:
+            connection.close()
+
+    def list_products_catalog(self, environment: str) -> list[dict[str, object]]:
+        connection = self.get_connection()
+        try:
+            cursor = connection.cursor(dictionary=True)
+            cursor.execute(
+                """
+                SELECT
+                    p.*,
+                    f.empresa_id,
+                    f.nome AS fornecedor_nome,
+                    e.nome AS empresa_nome,
+                    COALESCE(t.nome, '') AS tipo_produto
+                FROM cad_produtos_fornecedor p
+                INNER JOIN cad_fornecedores f ON f.id = p.fornecedor_id
+                INNER JOIN cad_empresas e ON e.id = f.empresa_id
+                LEFT JOIN cad_tipos_produto t ON t.id = p.tipo_produto_id
+                WHERE e.ambiente = %s
+                ORDER BY e.nome, f.nome, p.codigo_fornecedor, p.descricao
+                """,
+                (environment,),
+            )
+            return [dict(row) for row in cursor.fetchall()]
+        finally:
+            connection.close()
+
+    def save_supplier_product(self, supplier_id: int, data: dict[str, object]) -> int:
+        product_id = int(data.get("id") or 0)
+        if not supplier_id:
+            raise ValueError("Selecione um fornecedor para cadastrar produto.")
+        if not str(data.get("codigo_fornecedor", "")).strip():
+            raise ValueError("Informe o codigo do produto do fornecedor.")
+        values = (
+            supplier_id,
+            int(data.get("tipo_produto_id") or 0) or None,
+            str(data.get("codigo_fornecedor", "")).strip(),
+            str(data.get("codigo_empresa", "")).strip(),
+            str(data.get("descricao", "")).strip(),
+            self._only_digits(data.get("ean", "")),
+            self._only_digits(data.get("ncm", "")),
+            self._only_digits(data.get("cest", "")),
+            str(data.get("c_classtrib", "")).strip(),
+            str(data.get("c_benef", "")).strip(),
+            str(data.get("cst_icms", "")).strip(),
+            self._decimal_text(data.get("aliquota_icms", "")),
+            str(data.get("cst_ipi", "")).strip(),
+            self._decimal_text(data.get("aliquota_ipi", "")),
+            str(data.get("cst_pis_cofins", "")).strip(),
+            self._decimal_text(data.get("aliquota_pis_cofins", "")),
+            self._decimal_text(data.get("bc_st", "")),
+            self._decimal_text(data.get("mva", "")),
+            self._decimal_text(data.get("valor_icms_st", "")),
+            self._decimal_text(data.get("aliquota_icms_st", "")),
+        )
+        connection = self.get_connection()
+        try:
+            cursor = connection.cursor()
+            if product_id:
+                cursor.execute(
+                    """
+                    UPDATE cad_produtos_fornecedor
+                    SET fornecedor_id = %s, tipo_produto_id = %s, codigo_fornecedor = %s, codigo_empresa = %s,
+                        descricao = %s, ean = %s, ncm = %s, cest = %s, c_classtrib = %s, c_benef = %s,
+                        cst_icms = %s, aliquota_icms = %s, cst_ipi = %s, aliquota_ipi = %s,
+                        cst_pis_cofins = %s, aliquota_pis_cofins = %s, bc_st = %s, mva = %s,
+                        valor_icms_st = %s, aliquota_icms_st = %s
+                    WHERE id = %s
+                    """,
+                    (*values, product_id),
+                )
+                connection.commit()
+                return product_id
+            cursor.execute(
+                """
+                INSERT INTO cad_produtos_fornecedor (
+                    fornecedor_id, tipo_produto_id, codigo_fornecedor, codigo_empresa, descricao, ean, ncm, cest,
+                    c_classtrib, c_benef, cst_icms, aliquota_icms, cst_ipi, aliquota_ipi,
+                    cst_pis_cofins, aliquota_pis_cofins, bc_st, mva, valor_icms_st, aliquota_icms_st
+                ) VALUES (
+                    %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+                    %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
+                )
+                """,
+                values,
+            )
+            connection.commit()
+            return int(cursor.lastrowid)
+        finally:
+            connection.close()
+
+    def delete_supplier_product(self, product_id: int) -> None:
+        self._delete_by_id("cad_produtos_fornecedor", product_id)
+
+    def _delete_by_id(self, table_name: str, row_id: int) -> None:
+        allowed_tables = {"cad_empresas", "cad_fornecedores", "cad_tipos_produto", "cad_produtos_fornecedor"}
+        if table_name not in allowed_tables:
+            raise ValueError("Tabela nao permitida para exclusao.")
+        connection = self.get_connection()
+        try:
+            cursor = connection.cursor()
+            cursor.execute(f"DELETE FROM {table_name} WHERE id = %s", (int(row_id),))
+            connection.commit()
+        finally:
+            connection.close()
 
     def get_sped_archive_by_hash(self, environment: str, file_hash_sha256: str) -> dict[str, object] | None:
         connection = self.get_connection()

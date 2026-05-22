@@ -520,8 +520,10 @@ class SpedApp:
         app_config_tab = ttk.Frame(settings_notebook, padding=6, style="Card.TFrame")
         mysql_connection_tab = ttk.Frame(settings_notebook, padding=6, style="Card.TFrame")
         sped_archive_tab = ttk.Frame(settings_notebook, padding=6, style="Card.TFrame")
+        catalog_tab = ttk.Frame(settings_notebook, padding=6, style="Card.TFrame")
         settings_notebook.add(app_config_tab, text="Aplicacao")
         settings_notebook.add(mysql_connection_tab, text="Conexao MySQL")
+        settings_notebook.add(catalog_tab, text="Cadastro Empresa")
         settings_notebook.add(sped_archive_tab, text="SPEDs Arquivados")
 
         contrib_process_tab = ttk.Frame(contrib_notebook, padding=6, style="Card.TFrame")
@@ -556,6 +558,8 @@ class SpedApp:
         diagnostic_tab.rowconfigure(2, weight=1)
         mysql_connection_tab.columnconfigure(0, weight=1)
         app_config_tab.columnconfigure(0, weight=1)
+        catalog_tab.columnconfigure(0, weight=1)
+        catalog_tab.rowconfigure(0, weight=1)
         sped_archive_tab.columnconfigure(0, weight=1)
         sped_archive_tab.rowconfigure(0, weight=1)
 
@@ -1764,6 +1768,7 @@ class SpedApp:
         self.build_entry_exit_analysis_tab(entry_exit_root_tab)
         self.build_app_config_tab(app_config_tab)
         self.build_mysql_connection_tab(mysql_connection_tab)
+        self.build_catalog_tab(catalog_tab)
         self.build_sped_archive_tab(sped_archive_tab)
 
         self.log = ttk.Treeview(frame, columns=("mensagem",), show="headings", height=1)
@@ -4052,6 +4057,382 @@ class SpedApp:
         ttk.Button(config_actions, text="Testar Conexao", style="Secondary.TButton", command=self.test_mysql_connection).pack(side=LEFT, padx=(8, 0))
         ttk.Button(config_actions, text="Criar Banco/Tabelas", style="Primary.TButton", command=self.create_mysql_schema).pack(side=LEFT, padx=(8, 0))
         ttk.Label(config_box, textvariable=self.db_status_var, wraplength=1250).grid(row=3, column=0, columnspan=4, sticky="w", pady=(10, 0))
+
+    def build_catalog_tab(self, parent: ttk.Frame) -> None:
+        parent.columnconfigure(0, weight=1)
+        parent.rowconfigure(1, weight=1)
+        self.catalog_status_var = StringVar(value="Atualize o cadastro para carregar empresas, fornecedores e produtos.")
+        self.catalog_company_vars = {key: StringVar() for key in ("id", "nome", "cnpj", "inscricao_estadual", "observacao")}
+        self.catalog_supplier_vars = {key: StringVar() for key in ("id", "nome", "cnpj", "codigo", "observacao")}
+        self.catalog_type_vars = {key: StringVar() for key in ("id", "nome", "descricao")}
+        self.catalog_product_vars = {
+            key: StringVar()
+            for key in (
+                "id",
+                "codigo_fornecedor",
+                "codigo_empresa",
+                "descricao",
+                "ean",
+                "ncm",
+                "cest",
+                "c_classtrib",
+                "c_benef",
+                "cst_icms",
+                "aliquota_icms",
+                "cst_ipi",
+                "aliquota_ipi",
+                "cst_pis_cofins",
+                "aliquota_pis_cofins",
+                "bc_st",
+                "mva",
+                "valor_icms_st",
+                "aliquota_icms_st",
+            )
+        }
+        self.catalog_product_type_var = StringVar()
+        self.catalog_companies_by_id: dict[int, dict[str, object]] = {}
+        self.catalog_suppliers_by_id: dict[int, dict[str, object]] = {}
+        self.catalog_types_by_id: dict[int, dict[str, object]] = {}
+        self.catalog_products_by_id: dict[int, dict[str, object]] = {}
+
+        toolbar = ttk.Frame(parent)
+        toolbar.grid(row=0, column=0, sticky="ew", pady=(0, 8))
+        ttk.Button(toolbar, text="Atualizar", style="Primary.TButton", command=self.refresh_catalog).pack(side=LEFT)
+        ttk.Label(toolbar, textvariable=self.catalog_status_var, wraplength=1000).pack(side=LEFT, padx=(12, 0))
+
+        body = ttk.Frame(parent)
+        body.grid(row=1, column=0, sticky="nsew")
+        body.columnconfigure(0, weight=1)
+        body.columnconfigure(1, weight=1)
+        body.rowconfigure(0, weight=1)
+        body.rowconfigure(1, weight=1)
+
+        self.catalog_company_tree = self.build_catalog_section(
+            body,
+            "Empresas",
+            0,
+            0,
+            ("id", "nome", "cnpj"),
+            {"id": "ID", "nome": "Empresa", "cnpj": "CNPJ"},
+            {"id": 50, "nome": 260, "cnpj": 130},
+            self.catalog_company_vars,
+            (("nome", "Empresa"), ("cnpj", "CNPJ"), ("inscricao_estadual", "IE"), ("observacao", "Observacao")),
+            self.save_catalog_company,
+            self.clear_catalog_company_form,
+            self.delete_catalog_company,
+        )
+        self.catalog_company_tree.bind("<<TreeviewSelect>>", lambda _event: self.handle_catalog_company_select())
+
+        self.catalog_supplier_tree = self.build_catalog_section(
+            body,
+            "Fornecedores da Empresa",
+            0,
+            1,
+            ("id", "nome", "cnpj", "codigo"),
+            {"id": "ID", "nome": "Fornecedor", "cnpj": "CNPJ", "codigo": "Codigo"},
+            {"id": 50, "nome": 230, "cnpj": 130, "codigo": 90},
+            self.catalog_supplier_vars,
+            (("nome", "Fornecedor"), ("cnpj", "CNPJ"), ("codigo", "Codigo"), ("observacao", "Observacao")),
+            self.save_catalog_supplier,
+            self.clear_catalog_supplier_form,
+            self.delete_catalog_supplier,
+        )
+        self.catalog_supplier_tree.bind("<<TreeviewSelect>>", lambda _event: self.handle_catalog_supplier_select())
+
+        self.catalog_type_tree = self.build_catalog_section(
+            body,
+            "Tipos de Produto",
+            1,
+            0,
+            ("id", "nome", "descricao"),
+            {"id": "ID", "nome": "Tipo", "descricao": "Descricao"},
+            {"id": 50, "nome": 180, "descricao": 220},
+            self.catalog_type_vars,
+            (("nome", "Tipo"), ("descricao", "Descricao")),
+            self.save_catalog_type,
+            self.clear_catalog_type_form,
+            self.delete_catalog_type,
+        )
+        self.catalog_type_tree.bind("<<TreeviewSelect>>", lambda _event: self.handle_catalog_type_select())
+
+        product_box = ttk.LabelFrame(body, text="Produtos do Fornecedor", padding=8)
+        product_box.grid(row=1, column=1, sticky="nsew", padx=(8, 0), pady=(8, 0))
+        product_box.columnconfigure(0, weight=1)
+        product_box.rowconfigure(0, weight=1)
+        product_columns = ("id", "codigo_fornecedor", "codigo_empresa", "descricao", "tipo_produto", "ncm", "cst_icms", "aliquota_icms")
+        self.catalog_product_tree = ttk.Treeview(product_box, columns=product_columns, show="headings", height=8, selectmode="browse")
+        product_headings = {
+            "id": "ID",
+            "codigo_fornecedor": "Cod. Forn.",
+            "codigo_empresa": "Cod. Empresa",
+            "descricao": "Descricao",
+            "tipo_produto": "Tipo",
+            "ncm": "NCM",
+            "cst_icms": "CST ICMS",
+            "aliquota_icms": "% ICMS",
+        }
+        product_widths = {"id": 50, "codigo_fornecedor": 90, "codigo_empresa": 100, "descricao": 240, "tipo_produto": 120, "ncm": 90, "cst_icms": 75, "aliquota_icms": 75}
+        for column_id in product_columns:
+            self.catalog_product_tree.heading(column_id, text=product_headings[column_id])
+            self.catalog_product_tree.column(column_id, width=product_widths[column_id], anchor="center")
+        self.catalog_product_tree.grid(row=0, column=0, sticky="nsew")
+        self.catalog_product_tree.bind("<<TreeviewSelect>>", lambda _event: self.handle_catalog_product_select())
+        product_scroll = ttk.Scrollbar(product_box, orient="vertical", command=self.catalog_product_tree.yview)
+        product_scroll.grid(row=0, column=1, sticky="ns")
+        self.catalog_product_tree.configure(yscrollcommand=product_scroll.set)
+
+        product_form = ttk.Frame(product_box)
+        product_form.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(8, 0))
+        product_form.columnconfigure(1, weight=1)
+        product_form.columnconfigure(3, weight=1)
+        ttk.Label(product_form, text="Tipo").grid(row=0, column=0, sticky="w", pady=2)
+        self.catalog_product_type_combo = ttk.Combobox(product_form, textvariable=self.catalog_product_type_var, state="readonly")
+        self.catalog_product_type_combo.grid(row=0, column=1, columnspan=3, sticky="ew", padx=(6, 0), pady=2)
+        product_fields = (
+            ("codigo_fornecedor", "Cod. Produto Fornecedor"),
+            ("codigo_empresa", "Cod. Produto Empresa"),
+            ("descricao", "Descricao"),
+            ("ean", "EAN"),
+            ("ncm", "NCM"),
+            ("cest", "CEST"),
+            ("c_classtrib", "cClassTrib"),
+            ("c_benef", "cBenef"),
+            ("cst_icms", "CST ICMS"),
+            ("aliquota_icms", "% ICMS"),
+            ("cst_ipi", "CST IPI"),
+            ("aliquota_ipi", "% IPI"),
+            ("cst_pis_cofins", "CST PIS/COFINS"),
+            ("aliquota_pis_cofins", "% PIS/COFINS"),
+            ("bc_st", "BC ST"),
+            ("mva", "MVA"),
+            ("valor_icms_st", "Valor ICMS ST"),
+            ("aliquota_icms_st", "% ICMS ST"),
+        )
+        for index, (key, label) in enumerate(product_fields, start=1):
+            row = ((index - 1) // 2) + 1
+            column = 0 if index % 2 else 2
+            ttk.Label(product_form, text=label).grid(row=row, column=column, sticky="w", pady=2)
+            ttk.Entry(product_form, textvariable=self.catalog_product_vars[key]).grid(row=row, column=column + 1, sticky="ew", padx=(6, 8), pady=2)
+        product_actions = ttk.Frame(product_form)
+        product_actions.grid(row=10, column=0, columnspan=4, sticky="e", pady=(6, 0))
+        ttk.Button(product_actions, text="Salvar Produto", style="Primary.TButton", command=self.save_catalog_product).pack(side=LEFT)
+        ttk.Button(product_actions, text="Novo", style="Secondary.TButton", command=self.clear_catalog_product_form).pack(side=LEFT, padx=(8, 0))
+        ttk.Button(product_actions, text="Excluir", style="Secondary.TButton", command=self.delete_catalog_product).pack(side=LEFT, padx=(8, 0))
+
+    def build_catalog_section(
+        self,
+        parent: ttk.Frame,
+        title: str,
+        row: int,
+        column: int,
+        columns: tuple[str, ...],
+        headings: dict[str, str],
+        widths: dict[str, int],
+        variables: dict[str, StringVar],
+        fields: tuple[tuple[str, str], ...],
+        save_command: object,
+        clear_command: object,
+        delete_command: object,
+    ) -> ttk.Treeview:
+        box = ttk.LabelFrame(parent, text=title, padding=8)
+        box.grid(row=row, column=column, sticky="nsew", padx=(0 if column == 0 else 8, 0), pady=(0 if row == 0 else 8, 0))
+        box.columnconfigure(0, weight=1)
+        box.rowconfigure(0, weight=1)
+        tree = ttk.Treeview(box, columns=columns, show="headings", height=8, selectmode="browse")
+        for column_id in columns:
+            tree.heading(column_id, text=headings[column_id])
+            tree.column(column_id, width=widths[column_id], anchor="center")
+        tree.grid(row=0, column=0, sticky="nsew")
+        scrollbar = ttk.Scrollbar(box, orient="vertical", command=tree.yview)
+        scrollbar.grid(row=0, column=1, sticky="ns")
+        tree.configure(yscrollcommand=scrollbar.set)
+        form = ttk.Frame(box)
+        form.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(8, 0))
+        form.columnconfigure(1, weight=1)
+        for index, (key, label) in enumerate(fields):
+            ttk.Label(form, text=label).grid(row=index, column=0, sticky="w", pady=2)
+            ttk.Entry(form, textvariable=variables[key]).grid(row=index, column=1, sticky="ew", padx=(6, 0), pady=2)
+        actions = ttk.Frame(form)
+        actions.grid(row=len(fields), column=0, columnspan=2, sticky="e", pady=(6, 0))
+        ttk.Button(actions, text="Salvar", style="Primary.TButton", command=save_command).pack(side=LEFT)
+        ttk.Button(actions, text="Novo", style="Secondary.TButton", command=clear_command).pack(side=LEFT, padx=(8, 0))
+        ttk.Button(actions, text="Excluir", style="Secondary.TButton", command=delete_command).pack(side=LEFT, padx=(8, 0))
+        return tree
+
+    def selected_catalog_id(self, tree: ttk.Treeview) -> int:
+        selected = tree.selection()
+        return int(selected[0]) if selected else 0
+
+    def refresh_catalog(self) -> None:
+        try:
+            self.save_mysql_config(log_success=False)
+            self.mysql_repo.ensure_schema()
+            companies = self.mysql_repo.list_companies(self.app_environment)
+            self.catalog_companies_by_id = {int(row["id"]): row for row in companies}
+            self.catalog_company_tree.delete(*self.catalog_company_tree.get_children())
+            for row in companies:
+                company_id = int(row["id"])
+                self.catalog_company_tree.insert("", END, iid=str(company_id), values=(company_id, row.get("nome", ""), row.get("cnpj", "")))
+            if companies:
+                first_id = str(int(companies[0]["id"]))
+                self.catalog_company_tree.selection_set(first_id)
+                self.catalog_company_tree.focus(first_id)
+                self.handle_catalog_company_select()
+            else:
+                self.refresh_catalog_children(0)
+            self.catalog_status_var.set(f"{len(companies)} empresa(s) cadastrada(s).")
+        except Exception as exc:
+            self.catalog_status_var.set(f"Falha no cadastro: {exc}")
+            messagebox.showerror("Cadastro Empresa", str(exc))
+
+    def refresh_catalog_children(self, company_id: int) -> None:
+        suppliers = self.mysql_repo.list_suppliers(company_id) if company_id else []
+        types = self.mysql_repo.list_product_types(self.app_environment)
+        self.catalog_suppliers_by_id = {int(row["id"]): row for row in suppliers}
+        self.catalog_types_by_id = {int(row["id"]): row for row in types}
+        self.catalog_supplier_tree.delete(*self.catalog_supplier_tree.get_children())
+        self.catalog_type_tree.delete(*self.catalog_type_tree.get_children())
+        self.catalog_product_tree.delete(*self.catalog_product_tree.get_children())
+        for row in suppliers:
+            supplier_id = int(row["id"])
+            self.catalog_supplier_tree.insert("", END, iid=str(supplier_id), values=(supplier_id, row.get("nome", ""), row.get("cnpj", ""), row.get("codigo", "")))
+        for row in types:
+            type_id = int(row["id"])
+            self.catalog_type_tree.insert("", END, iid=str(type_id), values=(type_id, row.get("nome", ""), row.get("descricao", "")))
+        self.catalog_product_type_combo["values"] = [""] + [f"{type_id} - {row.get('nome', '')}" for type_id, row in self.catalog_types_by_id.items()]
+        self.clear_catalog_supplier_form()
+        self.clear_catalog_type_form()
+        self.clear_catalog_product_form()
+
+    def handle_catalog_company_select(self) -> None:
+        company_id = self.selected_catalog_id(self.catalog_company_tree)
+        row = self.catalog_companies_by_id.get(company_id, {})
+        for key in self.catalog_company_vars:
+            self.catalog_company_vars[key].set(str(row.get(key, "")))
+        self.refresh_catalog_children(company_id)
+
+    def handle_catalog_supplier_select(self) -> None:
+        supplier_id = self.selected_catalog_id(self.catalog_supplier_tree)
+        row = self.catalog_suppliers_by_id.get(supplier_id, {})
+        for key in self.catalog_supplier_vars:
+            self.catalog_supplier_vars[key].set(str(row.get(key, "")))
+        self.refresh_catalog_products(supplier_id)
+
+    def handle_catalog_type_select(self) -> None:
+        type_id = self.selected_catalog_id(self.catalog_type_tree)
+        row = self.catalog_types_by_id.get(type_id, {})
+        for key in self.catalog_type_vars:
+            self.catalog_type_vars[key].set(str(row.get(key, "")))
+
+    def refresh_catalog_products(self, supplier_id: int) -> None:
+        products = self.mysql_repo.list_supplier_products(supplier_id) if supplier_id else []
+        self.catalog_products_by_id = {int(row["id"]): row for row in products}
+        self.catalog_product_tree.delete(*self.catalog_product_tree.get_children())
+        for row in products:
+            product_id = int(row["id"])
+            self.catalog_product_tree.insert(
+                "",
+                END,
+                iid=str(product_id),
+                values=(
+                    product_id,
+                    row.get("codigo_fornecedor", ""),
+                    row.get("codigo_empresa", ""),
+                    row.get("descricao", ""),
+                    row.get("tipo_produto", ""),
+                    row.get("ncm", ""),
+                    row.get("cst_icms", ""),
+                    row.get("aliquota_icms", ""),
+                ),
+            )
+        self.clear_catalog_product_form()
+
+    def handle_catalog_product_select(self) -> None:
+        product_id = self.selected_catalog_id(self.catalog_product_tree)
+        row = self.catalog_products_by_id.get(product_id, {})
+        for key in self.catalog_product_vars:
+            self.catalog_product_vars[key].set(str(row.get(key, "")))
+        type_id = int(row.get("tipo_produto_id") or 0)
+        self.catalog_product_type_var.set(f"{type_id} - {self.catalog_types_by_id[type_id].get('nome', '')}" if type_id in self.catalog_types_by_id else "")
+
+    def clear_catalog_company_form(self) -> None:
+        for variable in self.catalog_company_vars.values():
+            variable.set("")
+
+    def clear_catalog_supplier_form(self) -> None:
+        for variable in self.catalog_supplier_vars.values():
+            variable.set("")
+
+    def clear_catalog_type_form(self) -> None:
+        for variable in self.catalog_type_vars.values():
+            variable.set("")
+
+    def clear_catalog_product_form(self) -> None:
+        for variable in self.catalog_product_vars.values():
+            variable.set("")
+        self.catalog_product_type_var.set("")
+
+    def save_catalog_company(self) -> None:
+        try:
+            company_id = self.mysql_repo.save_company(self.app_environment, {key: var.get() for key, var in self.catalog_company_vars.items()})
+            self.refresh_catalog()
+            self.catalog_company_tree.selection_set(str(company_id))
+        except Exception as exc:
+            messagebox.showerror("Cadastro Empresa", str(exc))
+
+    def save_catalog_supplier(self) -> None:
+        try:
+            company_id = self.selected_catalog_id(self.catalog_company_tree)
+            supplier_id = self.mysql_repo.save_supplier(company_id, {key: var.get() for key, var in self.catalog_supplier_vars.items()})
+            self.refresh_catalog_children(company_id)
+            self.catalog_supplier_tree.selection_set(str(supplier_id))
+            self.handle_catalog_supplier_select()
+        except Exception as exc:
+            messagebox.showerror("Cadastro Fornecedor", str(exc))
+
+    def save_catalog_type(self) -> None:
+        try:
+            company_id = self.selected_catalog_id(self.catalog_company_tree)
+            type_id = self.mysql_repo.save_product_type(self.app_environment, {key: var.get() for key, var in self.catalog_type_vars.items()})
+            self.refresh_catalog_children(company_id)
+            self.catalog_type_tree.selection_set(str(type_id))
+        except Exception as exc:
+            messagebox.showerror("Tipo de Produto", str(exc))
+
+    def save_catalog_product(self) -> None:
+        try:
+            supplier_id = self.selected_catalog_id(self.catalog_supplier_tree)
+            payload = {key: var.get() for key, var in self.catalog_product_vars.items()}
+            payload["tipo_produto_id"] = self.catalog_product_type_var.get().split(" - ", 1)[0]
+            product_id = self.mysql_repo.save_supplier_product(supplier_id, payload)
+            self.refresh_catalog_products(supplier_id)
+            self.catalog_product_tree.selection_set(str(product_id))
+        except Exception as exc:
+            messagebox.showerror("Cadastro Produto", str(exc))
+
+    def delete_catalog_company(self) -> None:
+        company_id = self.selected_catalog_id(self.catalog_company_tree)
+        if company_id and messagebox.askyesno("Cadastro Empresa", "Excluir a empresa e seus fornecedores/produtos?"):
+            self.mysql_repo.delete_company(company_id)
+            self.refresh_catalog()
+
+    def delete_catalog_supplier(self) -> None:
+        supplier_id = self.selected_catalog_id(self.catalog_supplier_tree)
+        if supplier_id and messagebox.askyesno("Cadastro Fornecedor", "Excluir o fornecedor e seus produtos?"):
+            self.mysql_repo.delete_supplier(supplier_id)
+            self.refresh_catalog_children(self.selected_catalog_id(self.catalog_company_tree))
+
+    def delete_catalog_type(self) -> None:
+        type_id = self.selected_catalog_id(self.catalog_type_tree)
+        if type_id and messagebox.askyesno("Tipo de Produto", "Excluir este tipo? Produtos vinculados ficarao sem tipo."):
+            self.mysql_repo.delete_product_type(type_id)
+            self.refresh_catalog_children(self.selected_catalog_id(self.catalog_company_tree))
+
+    def delete_catalog_product(self) -> None:
+        product_id = self.selected_catalog_id(self.catalog_product_tree)
+        if product_id and messagebox.askyesno("Cadastro Produto", "Excluir este produto?"):
+            self.mysql_repo.delete_supplier_product(product_id)
+            self.refresh_catalog_products(self.selected_catalog_id(self.catalog_supplier_tree))
 
     def build_sped_archive_tab(self, parent: ttk.Frame) -> None:
         parent.columnconfigure(0, weight=1)

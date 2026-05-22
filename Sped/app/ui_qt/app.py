@@ -27,6 +27,7 @@ from PySide6.QtWidgets import (
     QPushButton,
     QSizePolicy,
     QStackedWidget,
+    QTabWidget,
     QTableWidget,
     QTableWidgetItem,
     QTextEdit,
@@ -186,6 +187,32 @@ class QtSpedApp(QMainWindow):
                 background: {COLORS["sidebar_active"]};
                 color: #ffffff;
             }}
+            QPushButton#navGroup {{
+                background: transparent;
+                color: #9fb3c8;
+                border: 0;
+                border-radius: 6px;
+                font-size: 16px;
+                font-weight: 900;
+                padding: 13px 8px 9px 8px;
+                text-align: left;
+            }}
+            QPushButton#navGroup:hover, QPushButton#navGroup:checked {{
+                background: #203041;
+                color: #ffffff;
+            }}
+            QPushButton#sidebarToggle {{
+                background: #203041;
+                color: #ffffff;
+                border: 0;
+                border-radius: 6px;
+                padding: 9px 10px;
+                font-size: 16px;
+                font-weight: 900;
+            }}
+            QPushButton#sidebarToggle:hover {{
+                background: {COLORS["sidebar_active"]};
+            }}
             QLabel#pageTitle {{
                 color: {COLORS["text"]};
                 font-size: 24px;
@@ -341,35 +368,91 @@ class QtSpedApp(QMainWindow):
         sidebar = QWidget()
         sidebar.setObjectName("sidebar")
         sidebar.setFixedWidth(230)
+        self.sidebar = sidebar
+        self.sidebar_expanded_width = 230
+        self.sidebar_collapsed_width = 48
         nav_layout = QVBoxLayout(sidebar)
-        nav_layout.setContentsMargins(10, 18, 10, 18)
+        nav_layout.setContentsMargins(6, 10, 6, 10)
         nav_layout.setSpacing(4)
+
+        self.sidebar_toggle_button = QPushButton("<")
+        self.sidebar_toggle_button.setObjectName("sidebarToggle")
+        self.sidebar_toggle_button.clicked.connect(self.toggle_sidebar)
+        nav_layout.addWidget(self.sidebar_toggle_button)
+
+        self.sidebar_content = QWidget()
+        sidebar_content_layout = QVBoxLayout(self.sidebar_content)
+        sidebar_content_layout.setContentsMargins(4, 8, 4, 8)
+        sidebar_content_layout.setSpacing(4)
         brand = QLabel("SPED Next")
         brand.setObjectName("brand")
-        nav_layout.addWidget(brand)
-        nav_layout.addSpacing(12)
+        sidebar_content_layout.addWidget(brand)
+        sidebar_content_layout.addSpacing(12)
 
         self.nav_buttons: list[QPushButton] = []
-        for title, index in (
-            ("Dashboard", 0),
-            ("Consulta Entradas", 1),
-            ("Consulta Saidas", 2),
-            ("PIS/COFINS Entradas", 3),
-            ("PIS/COFINS Saidas", 4),
-            ("XML", 5),
-            ("SPED x XML", 6),
-            ("Regras Dinamicas", 7),
-            ("SPEDs Arquivados", 8),
-            ("Configuracoes", 9),
-        ):
-            button = QPushButton(title)
-            button.setObjectName("navButton")
-            button.setCheckable(True)
-            button.clicked.connect(lambda _checked=False, current=index, label=title: self.show_page(current, label))
-            nav_layout.addWidget(button)
-            self.nav_buttons.append(button)
-        nav_layout.addStretch()
+        self.nav_page_indices: list[int] = []
+        self.nav_group_buttons: dict[str, QPushButton] = {}
+        self.nav_group_containers: dict[str, QWidget] = {}
+        nav_groups = (
+            (
+                "Consultas",
+                (
+                    ("Dashboard", 0),
+                    ("Consulta Entradas", 1),
+                    ("Consulta Saidas", 2),
+                    ("PIS/COFINS Entradas", 3),
+                    ("PIS/COFINS Saidas", 4),
+                    ("XML", 5),
+                    ("SPED x XML", 6),
+                ),
+            ),
+            (
+                "Cadastros",
+                (
+                    ("Empresas", 9),
+                    ("Fornecedores", 10),
+                    ("Tipos de Produto", 11),
+                    ("Produtos", 12),
+                ),
+            ),
+            (
+                "Sistema",
+                (
+                    ("Regras Dinamicas", 7),
+                    ("SPEDs Arquivados", 8),
+                    ("Configuracoes", 13),
+                ),
+            ),
+        )
+        for group_title, items in nav_groups:
+            group_button = QPushButton(f"> {group_title}")
+            group_button.setObjectName("navGroup")
+            group_button.setCheckable(True)
+            group_button.setChecked(group_title == "Consultas")
+            group_button.clicked.connect(lambda checked=False, current=group_title: self.toggle_nav_group(current))
+            sidebar_content_layout.addWidget(group_button)
+            self.nav_group_buttons[group_title] = group_button
+
+            group_container = QWidget()
+            group_container.setVisible(group_title == "Consultas")
+            group_layout = QVBoxLayout(group_container)
+            group_layout.setContentsMargins(8, 0, 0, 0)
+            group_layout.setSpacing(4)
+            for title, index in items:
+                button = QPushButton(title)
+                button.setObjectName("navButton")
+                button.setCheckable(True)
+                button.clicked.connect(lambda _checked=False, current=index, label=title: self.show_page(current, label))
+                group_layout.addWidget(button)
+                self.nav_buttons.append(button)
+                self.nav_page_indices.append(index)
+            sidebar_content_layout.addWidget(group_container)
+            self.nav_group_containers[group_title] = group_container
+        sidebar_content_layout.addStretch()
+        nav_layout.addWidget(self.sidebar_content, 1)
         shell.addWidget(sidebar)
+        for group_title, container in self.nav_group_containers.items():
+            self.set_nav_group_visible(group_title, container.isVisible())
 
         content = QWidget()
         content_layout = QVBoxLayout(content)
@@ -396,19 +479,50 @@ class QtSpedApp(QMainWindow):
         self.stack.addWidget(self.build_compare_page())
         self.stack.addWidget(self.build_runtime_rules_page())
         self.stack.addWidget(self.build_archives_page())
+        self.stack.addWidget(self.build_catalog_company_page())
+        self.stack.addWidget(self.build_catalog_supplier_page())
+        self.stack.addWidget(self.build_catalog_type_page())
+        self.stack.addWidget(self.build_catalog_product_page())
         self.stack.addWidget(self.build_settings_page())
         content_layout.addWidget(self.stack, 1)
         shell.addWidget(content, 1)
         self.setCentralWidget(root)
         self.statusBar().showMessage("Pronto.")
+        self.set_sidebar_collapsed(False)
 
     def show_page(self, index: int, title: str) -> None:
         self.stack.setCurrentIndex(index)
         self.page_title.setText(title)
         for button_index, button in enumerate(self.nav_buttons):
-            button.setChecked(button_index == index)
+            button.setChecked(self.nav_page_indices[button_index] == index)
+        self.set_sidebar_collapsed(True)
         if title == "SPEDs Arquivados":
             self.refresh_archives()
+        if title in {"Empresas", "Fornecedores", "Tipos de Produto", "Produtos"}:
+            self.refresh_current_catalog_page()
+
+    def toggle_sidebar(self) -> None:
+        self.set_sidebar_collapsed(self.sidebar_content.isVisible())
+
+    def set_sidebar_collapsed(self, collapsed: bool) -> None:
+        self.sidebar_content.setVisible(not collapsed)
+        self.sidebar.setFixedWidth(self.sidebar_collapsed_width if collapsed else self.sidebar_expanded_width)
+        self.sidebar_toggle_button.setText(">" if collapsed else "<")
+
+    def toggle_nav_group(self, group_title: str) -> None:
+        container = self.nav_group_containers.get(group_title)
+        if container is None:
+            return
+        self.set_nav_group_visible(group_title, not container.isVisible())
+
+    def set_nav_group_visible(self, group_title: str, visible: bool) -> None:
+        container = self.nav_group_containers.get(group_title)
+        button = self.nav_group_buttons.get(group_title)
+        if container is None or button is None:
+            return
+        container.setVisible(visible)
+        button.setChecked(visible)
+        button.setText(f"v {group_title}" if visible else f"> {group_title}")
 
     def build_dashboard_page(self) -> QWidget:
         page = QWidget()
@@ -460,6 +574,436 @@ class QtSpedApp(QMainWindow):
         split.addWidget(self.archive_file_table, 2)
         layout.addLayout(split, 1)
         return page
+
+    def build_catalog_page(self) -> QWidget:
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(12)
+
+        toolbar = self.create_panel()
+        toolbar_layout = QHBoxLayout(toolbar)
+        toolbar_layout.setContentsMargins(12, 10, 12, 10)
+        title = QLabel("Cadastro da Empresa")
+        title.setObjectName("sectionTitle")
+        self.catalog_status = QLabel("Atualize o cadastro para carregar empresas, fornecedores e produtos.")
+        self.catalog_status.setObjectName("muted")
+        toolbar_layout.addWidget(title)
+        toolbar_layout.addWidget(self.catalog_status, 1)
+        toolbar_layout.addWidget(self.create_button("Atualizar", self.refresh_catalog, primary=True))
+        layout.addWidget(toolbar)
+
+        self.catalog_company_fields = self.create_line_fields(("id", "nome", "cnpj", "inscricao_estadual", "observacao"))
+        self.catalog_supplier_fields = self.create_line_fields(("id", "nome", "cnpj", "codigo", "observacao"))
+        self.catalog_type_fields = self.create_line_fields(("id", "nome", "descricao"))
+        self.catalog_product_fields = self.create_line_fields(
+            (
+                "id",
+                "codigo_fornecedor",
+                "codigo_empresa",
+                "descricao",
+                "ean",
+                "ncm",
+                "cest",
+                "c_classtrib",
+                "c_benef",
+                "cst_icms",
+                "aliquota_icms",
+                "cst_ipi",
+                "aliquota_ipi",
+                "cst_pis_cofins",
+                "aliquota_pis_cofins",
+                "bc_st",
+                "mva",
+                "valor_icms_st",
+                "aliquota_icms_st",
+            )
+        )
+        self.catalog_companies_by_id: dict[int, dict[str, object]] = {}
+        self.catalog_suppliers_by_id: dict[int, dict[str, object]] = {}
+        self.catalog_types_by_id: dict[int, dict[str, object]] = {}
+        self.catalog_products_by_id: dict[int, dict[str, object]] = {}
+
+        grid = QGridLayout()
+        grid.setSpacing(12)
+        layout.addLayout(grid, 1)
+
+        self.catalog_company_table = self.create_catalog_section(
+            grid,
+            0,
+            0,
+            "Empresas",
+            ["ID", "Empresa", "CNPJ"],
+            self.catalog_company_fields,
+            [("nome", "Empresa"), ("cnpj", "CNPJ"), ("inscricao_estadual", "IE"), ("observacao", "Observacao")],
+            self.save_catalog_company,
+            self.clear_catalog_company_form,
+            self.delete_catalog_company,
+        )
+        self.catalog_company_table.itemSelectionChanged.connect(self.handle_catalog_company_select)
+
+        self.catalog_supplier_table = self.create_catalog_section(
+            grid,
+            0,
+            1,
+            "Fornecedores da Empresa",
+            ["ID", "Fornecedor", "CNPJ", "Codigo"],
+            self.catalog_supplier_fields,
+            [("nome", "Fornecedor"), ("cnpj", "CNPJ"), ("codigo", "Codigo"), ("observacao", "Observacao")],
+            self.save_catalog_supplier,
+            self.clear_catalog_supplier_form,
+            self.delete_catalog_supplier,
+        )
+        self.catalog_supplier_table.itemSelectionChanged.connect(self.handle_catalog_supplier_select)
+
+        self.catalog_type_table = self.create_catalog_section(
+            grid,
+            1,
+            0,
+            "Tipos de Produto",
+            ["ID", "Tipo", "Descricao"],
+            self.catalog_type_fields,
+            [("nome", "Tipo"), ("descricao", "Descricao")],
+            self.save_catalog_type,
+            self.clear_catalog_type_form,
+            self.delete_catalog_type,
+        )
+        self.catalog_type_table.itemSelectionChanged.connect(self.handle_catalog_type_select)
+
+        product_panel = self.create_panel()
+        product_layout = QVBoxLayout(product_panel)
+        product_layout.setContentsMargins(12, 12, 12, 12)
+        product_layout.setSpacing(8)
+        product_title = QLabel("Produtos do Fornecedor")
+        product_title.setObjectName("sectionTitle")
+        product_layout.addWidget(product_title)
+        self.catalog_product_table = self.create_data_table(["ID", "Cod. Forn.", "Cod. Empresa", "Descricao", "Tipo", "NCM", "CST ICMS", "% ICMS"])
+        self.catalog_product_table.setColumnWidth(0, 55)
+        self.catalog_product_table.setColumnWidth(1, 90)
+        self.catalog_product_table.setColumnWidth(2, 100)
+        self.catalog_product_table.setColumnWidth(3, 260)
+        self.catalog_product_table.itemSelectionChanged.connect(self.handle_catalog_product_select)
+        product_layout.addWidget(self.catalog_product_table, 1)
+
+        product_form = QGridLayout()
+        product_form.setHorizontalSpacing(8)
+        product_form.setVerticalSpacing(6)
+        self.catalog_product_type_combo = QComboBox()
+        product_form.addWidget(QLabel("Tipo"), 0, 0)
+        product_form.addWidget(self.catalog_product_type_combo, 0, 1, 1, 3)
+        product_labels = [
+            ("codigo_fornecedor", "Cod. Produto Fornecedor"),
+            ("codigo_empresa", "Cod. Produto Empresa"),
+            ("descricao", "Descricao"),
+            ("ean", "EAN"),
+            ("ncm", "NCM"),
+            ("cest", "CEST"),
+            ("c_classtrib", "cClassTrib"),
+            ("c_benef", "cBenef"),
+            ("cst_icms", "CST ICMS"),
+            ("aliquota_icms", "% ICMS"),
+            ("cst_ipi", "CST IPI"),
+            ("aliquota_ipi", "% IPI"),
+            ("cst_pis_cofins", "CST PIS/COFINS"),
+            ("aliquota_pis_cofins", "% PIS/COFINS"),
+            ("bc_st", "BC ST"),
+            ("mva", "MVA"),
+            ("valor_icms_st", "Valor ICMS ST"),
+            ("aliquota_icms_st", "% ICMS ST"),
+        ]
+        for index, (key, label) in enumerate(product_labels, start=1):
+            row = ((index - 1) // 2) + 1
+            column = 0 if index % 2 else 2
+            product_form.addWidget(QLabel(label), row, column)
+            product_form.addWidget(self.catalog_product_fields[key], row, column + 1)
+        actions = QHBoxLayout()
+        actions.addStretch()
+        actions.addWidget(self.create_button("Salvar Produto", self.save_catalog_product, primary=True))
+        actions.addWidget(self.create_button("Novo", self.clear_catalog_product_form))
+        actions.addWidget(self.create_button("Excluir", self.delete_catalog_product))
+        product_form.addLayout(actions, 10, 0, 1, 4)
+        product_layout.addLayout(product_form)
+        grid.addWidget(product_panel, 1, 1)
+        grid.setColumnStretch(0, 1)
+        grid.setColumnStretch(1, 1)
+        grid.setRowStretch(0, 1)
+        grid.setRowStretch(1, 1)
+        return page
+
+    def build_catalog_company_page(self) -> QWidget:
+        page = self.create_single_catalog_page("Empresas")
+        self.company_page_fields = self.create_line_fields(("id", "nome", "cnpj", "inscricao_estadual", "observacao"))
+        self.company_page_table = self.create_data_table(["ID", "Empresa", "CNPJ", "IE"])
+        self.add_single_catalog_form(
+            page,
+            self.company_page_table,
+            self.company_page_fields,
+            [("nome", "Empresa"), ("cnpj", "CNPJ"), ("inscricao_estadual", "IE"), ("observacao", "Observacao")],
+            self.save_company_page,
+            self.clear_company_page_form,
+            self.delete_company_page,
+        )
+        self.company_page_table.itemSelectionChanged.connect(self.handle_company_page_select)
+        return page
+
+    def build_catalog_supplier_page(self) -> QWidget:
+        page = self.create_single_catalog_page("Fornecedores")
+        self.supplier_page_fields = self.create_line_fields(("id", "nome", "cnpj", "codigo", "observacao"))
+        self.supplier_page_company_combo = QComboBox()
+        self.supplier_page_table = self.create_data_table(["ID", "Empresa", "Fornecedor", "CNPJ", "Codigo"])
+        self.add_single_catalog_form(
+            page,
+            self.supplier_page_table,
+            self.supplier_page_fields,
+            [("nome", "Fornecedor"), ("cnpj", "CNPJ"), ("codigo", "Codigo"), ("observacao", "Observacao")],
+            self.save_supplier_page,
+            self.clear_supplier_page_form,
+            self.delete_supplier_page,
+            [("Empresa", self.supplier_page_company_combo)],
+        )
+        self.supplier_page_table.itemSelectionChanged.connect(self.handle_supplier_page_select)
+        return page
+
+    def build_catalog_type_page(self) -> QWidget:
+        page = self.create_single_catalog_page("Tipos de Produto")
+        self.type_page_fields = self.create_line_fields(("id", "nome", "descricao"))
+        self.type_page_table = self.create_data_table(["ID", "Tipo", "Descricao"])
+        self.add_single_catalog_form(
+            page,
+            self.type_page_table,
+            self.type_page_fields,
+            [("nome", "Tipo"), ("descricao", "Descricao")],
+            self.save_type_page,
+            self.clear_type_page_form,
+            self.delete_type_page,
+        )
+        self.type_page_table.itemSelectionChanged.connect(self.handle_type_page_select)
+        return page
+
+    def build_catalog_product_page(self) -> QWidget:
+        page = self.create_single_catalog_page("Produtos")
+        self.product_page_fields = self.create_line_fields(
+            (
+                "id",
+                "codigo_fornecedor",
+                "codigo_empresa",
+                "descricao",
+                "ean",
+                "ncm",
+                "cest",
+                "c_classtrib",
+                "c_benef",
+                "cst_icms",
+                "aliquota_icms",
+                "cst_ipi",
+                "aliquota_ipi",
+                "cst_pis_cofins",
+                "aliquota_pis_cofins",
+                "bc_st",
+                "mva",
+                "valor_icms_st",
+                "aliquota_icms_st",
+            )
+        )
+        self.product_page_supplier_combo = QComboBox()
+        self.product_page_type_combo = QComboBox()
+        self.product_page_table = self.create_data_table(["ID", "Empresa", "Fornecedor", "Cod. Forn.", "Cod. Empresa", "Descricao", "Tipo", "NCM"])
+        self.product_page_tabs = QTabWidget()
+
+        consult_tab = QWidget()
+        consult_layout = QVBoxLayout(consult_tab)
+        consult_layout.setContentsMargins(10, 10, 10, 10)
+        consult_layout.setSpacing(8)
+        search_row = QHBoxLayout()
+        search_row.addWidget(QLabel("Consultar"))
+        product_search = QLineEdit()
+        product_search.setPlaceholderText("Pesquisar por empresa, fornecedor, codigo, descricao, tipo ou NCM")
+        product_search.textChanged.connect(lambda text: self.filter_table_rows(self.product_page_table, text))
+        search_row.addWidget(product_search, 1)
+        search_row.addWidget(self.create_button("Atualizar", self.refresh_product_page, primary=True))
+        search_row.addWidget(self.create_button("Editar Selecionado", self.edit_product_page_selected))
+        search_row.addWidget(self.create_button("Excluir", self.delete_product_page))
+        consult_layout.addLayout(search_row)
+        self.product_page_table.doubleClicked.connect(lambda _index: self.edit_product_page_selected())
+        consult_layout.addWidget(self.product_page_table, 1)
+        self.product_page_tabs.addTab(consult_tab, "Consulta")
+
+        form_tab = QWidget()
+        form_layout = QVBoxLayout(form_tab)
+        form_layout.setContentsMargins(10, 10, 10, 10)
+        form_layout.setSpacing(8)
+        form = QGridLayout()
+        form.setHorizontalSpacing(8)
+        form.setVerticalSpacing(6)
+        form.addWidget(QLabel("Fornecedor"), 0, 0)
+        form.addWidget(self.product_page_supplier_combo, 0, 1, 1, 3)
+        form.addWidget(QLabel("Tipo"), 1, 0)
+        form.addWidget(self.product_page_type_combo, 1, 1, 1, 3)
+        product_fields = [
+            ("codigo_fornecedor", "Cod. Produto Fornecedor"),
+            ("codigo_empresa", "Cod. Produto Empresa"),
+            ("descricao", "Descricao"),
+            ("ean", "EAN"),
+            ("ncm", "NCM"),
+            ("cest", "CEST"),
+            ("c_classtrib", "cClassTrib"),
+            ("c_benef", "cBenef"),
+            ("cst_icms", "CST ICMS"),
+            ("aliquota_icms", "% ICMS"),
+            ("cst_ipi", "CST IPI"),
+            ("aliquota_ipi", "% IPI"),
+            ("cst_pis_cofins", "CST PIS/COFINS"),
+            ("aliquota_pis_cofins", "% PIS/COFINS"),
+            ("bc_st", "BC ST"),
+            ("mva", "MVA"),
+            ("valor_icms_st", "Valor ICMS ST"),
+            ("aliquota_icms_st", "% ICMS ST"),
+        ]
+        for index, (key, label) in enumerate(product_fields):
+            row = 2 + index // 2
+            column = 0 if index % 2 == 0 else 2
+            form.addWidget(QLabel(label), row, column)
+            form.addWidget(self.product_page_fields[key], row, column + 1)
+        actions = QHBoxLayout()
+        actions.addStretch()
+        actions.addWidget(self.create_button("Salvar Alteracoes", self.save_product_page, primary=True))
+        actions.addWidget(self.create_button("Novo", self.clear_product_page_form))
+        actions.addWidget(self.create_button("Excluir", self.delete_product_page))
+        form.addLayout(actions, 11, 0, 1, 4)
+        form_layout.addLayout(form)
+        form_layout.addStretch()
+        self.product_page_tabs.addTab(form_tab, "Cadastro / Edicao")
+        page.layout().addWidget(self.product_page_tabs, 1)
+        self.product_page_table.itemSelectionChanged.connect(self.handle_product_page_select)
+        return page
+
+    def create_single_catalog_page(self, title: str) -> QWidget:
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(12)
+        header = self.create_panel()
+        header_layout = QHBoxLayout(header)
+        header_layout.setContentsMargins(12, 10, 12, 10)
+        title_label = QLabel(title)
+        title_label.setObjectName("sectionTitle")
+        header_layout.addWidget(title_label)
+        header_layout.addStretch()
+        header_layout.addWidget(self.create_button("Consultar/Atualizar", lambda: self.refresh_current_catalog_page(), primary=True))
+        layout.addWidget(header)
+        return page
+
+    def add_single_catalog_form(
+        self,
+        page: QWidget,
+        table: QTableWidget,
+        fields: dict[str, QLineEdit],
+        form_fields: list[tuple[str, str]],
+        save_callback: Callable[[], None],
+        clear_callback: Callable[[], None],
+        delete_callback: Callable[[], None],
+        combos: list[tuple[str, QComboBox]] | None = None,
+    ) -> None:
+        layout = page.layout()
+        panel = self.create_panel()
+        panel_layout = QVBoxLayout(panel)
+        panel_layout.setContentsMargins(12, 12, 12, 12)
+        tabs = QTabWidget()
+        if not hasattr(self, "catalog_page_tabs_by_table"):
+            self.catalog_page_tabs_by_table: dict[int, QTabWidget] = {}
+        self.catalog_page_tabs_by_table[id(table)] = tabs
+
+        consult_tab = QWidget()
+        consult_layout = QVBoxLayout(consult_tab)
+        consult_layout.setContentsMargins(10, 10, 10, 10)
+        consult_layout.setSpacing(8)
+        search_row = QHBoxLayout()
+        search_label = QLabel("Consultar")
+        search_input = QLineEdit()
+        search_input.setPlaceholderText("Pesquisar na lista")
+        search_input.textChanged.connect(lambda text, current_table=table: self.filter_table_rows(current_table, text))
+        search_row.addWidget(search_label)
+        search_row.addWidget(search_input, 1)
+        search_row.addWidget(self.create_button("Editar Selecionado", lambda current_table=table: self.edit_single_catalog_selected(current_table)))
+        search_row.addWidget(self.create_button("Excluir", delete_callback))
+        consult_layout.addLayout(search_row)
+        table.doubleClicked.connect(lambda _index, current_table=table: self.edit_single_catalog_selected(current_table))
+        consult_layout.addWidget(table, 1)
+        tabs.addTab(consult_tab, "Consulta")
+
+        form_tab = QWidget()
+        form_tab_layout = QVBoxLayout(form_tab)
+        form_tab_layout.setContentsMargins(10, 10, 10, 10)
+        form = QGridLayout()
+        form.setHorizontalSpacing(8)
+        form.setVerticalSpacing(6)
+        row_index = 0
+        for label, combo in combos or []:
+            form.addWidget(QLabel(label), row_index, 0)
+            form.addWidget(combo, row_index, 1, 1, 3)
+            row_index += 1
+        for index, (key, label) in enumerate(form_fields):
+            row = row_index + index // 2
+            column = 0 if index % 2 == 0 else 2
+            form.addWidget(QLabel(label), row, column)
+            form.addWidget(fields[key], row, column + 1)
+        actions = QHBoxLayout()
+        actions.addStretch()
+        actions.addWidget(self.create_button("Salvar Alteracoes", save_callback, primary=True))
+        actions.addWidget(self.create_button("Novo", lambda current_table=table, command=clear_callback: self.clear_single_catalog_form(current_table, command)))
+        actions.addWidget(self.create_button("Excluir", delete_callback))
+        form.addLayout(actions, row_index + ((len(form_fields) + 1) // 2), 0, 1, 4)
+        form_tab_layout.addLayout(form)
+        form_tab_layout.addStretch()
+        tabs.addTab(form_tab, "Cadastro / Edicao")
+
+        panel_layout.addWidget(tabs, 1)
+        layout.addWidget(panel, 1)
+
+    def create_line_fields(self, keys: tuple[str, ...]) -> dict[str, QLineEdit]:
+        fields = {key: QLineEdit() for key in keys}
+        if "id" in fields:
+            fields["id"].setReadOnly(True)
+        return fields
+
+    def create_catalog_section(
+        self,
+        grid: QGridLayout,
+        row: int,
+        column: int,
+        title: str,
+        headers: list[str],
+        fields: dict[str, QLineEdit],
+        form_fields: list[tuple[str, str]],
+        save_callback: Callable[[], None],
+        clear_callback: Callable[[], None],
+        delete_callback: Callable[[], None],
+    ) -> QTableWidget:
+        panel = self.create_panel()
+        layout = QVBoxLayout(panel)
+        layout.setContentsMargins(12, 12, 12, 12)
+        layout.setSpacing(8)
+        label = QLabel(title)
+        label.setObjectName("sectionTitle")
+        layout.addWidget(label)
+        table = self.create_data_table(headers)
+        table.setColumnWidth(0, 55)
+        layout.addWidget(table, 1)
+        form = QGridLayout()
+        form.setHorizontalSpacing(8)
+        form.setVerticalSpacing(6)
+        for index, (key, field_label) in enumerate(form_fields):
+            form.addWidget(QLabel(field_label), index, 0)
+            form.addWidget(fields[key], index, 1)
+        actions = QHBoxLayout()
+        actions.addStretch()
+        actions.addWidget(self.create_button("Salvar", save_callback, primary=True))
+        actions.addWidget(self.create_button("Novo", clear_callback))
+        actions.addWidget(self.create_button("Excluir", delete_callback))
+        form.addLayout(actions, len(form_fields), 0, 1, 2)
+        layout.addLayout(form)
+        grid.addWidget(panel, row, column)
+        return table
 
     def build_settings_page(self) -> QWidget:
         page = QWidget()
@@ -1111,6 +1655,406 @@ class QtSpedApp(QMainWindow):
                 item.setForeground(QColor(COLORS["text"]))
                 item.setTextAlignment(Qt.AlignCenter)
                 table.setItem(row_index, column_index, item)
+
+    def selected_catalog_id(self, table: QTableWidget) -> int:
+        selected = table.selectionModel().selectedRows()
+        if not selected:
+            return 0
+        item = table.item(selected[0].row(), 0)
+        return int(item.text()) if item and item.text().isdigit() else 0
+
+    def refresh_current_catalog_page(self) -> None:
+        title = self.page_title.text()
+        if title == "Empresas":
+            self.refresh_company_page()
+        elif title == "Fornecedores":
+            self.refresh_supplier_page()
+        elif title == "Tipos de Produto":
+            self.refresh_type_page()
+        elif title == "Produtos":
+            self.refresh_product_page()
+        else:
+            self.refresh_catalog()
+
+    def fill_company_combo(self, combo: QComboBox) -> None:
+        combo.clear()
+        for row in self.mysql_repo.list_companies(self.environment):
+            combo.addItem(str(row.get("nome", "")), int(row["id"]))
+
+    def fill_supplier_combo(self, combo: QComboBox) -> None:
+        combo.clear()
+        self.catalog_supplier_company_by_id = {}
+        for row in self.mysql_repo.list_suppliers_catalog(self.environment):
+            self.catalog_supplier_company_by_id[int(row["id"])] = int(row.get("empresa_id") or 0)
+            combo.addItem(f"{row.get('empresa_nome', '')} / {row.get('nome', '')}", int(row["id"]))
+
+    def fill_type_combo(self, combo: QComboBox) -> None:
+        combo.clear()
+        combo.addItem("", 0)
+        rows = self.mysql_repo.list_product_types(self.environment)
+        for row in rows:
+            combo.addItem(str(row.get("nome", "")), int(row["id"]))
+
+    def refresh_company_page(self) -> None:
+        self.mysql_repo.ensure_schema()
+        rows = self.mysql_repo.list_companies(self.environment)
+        self.company_page_rows = {int(row["id"]): row for row in rows}
+        self.set_table_rows(
+            self.company_page_table,
+            [[int(row["id"]), row.get("nome", ""), row.get("cnpj", ""), row.get("inscricao_estadual", "")] for row in rows],
+        )
+
+    def handle_company_page_select(self) -> None:
+        self.fill_line_fields(self.company_page_fields, getattr(self, "company_page_rows", {}).get(self.selected_catalog_id(self.company_page_table), {}))
+
+    def clear_company_page_form(self) -> None:
+        self.fill_line_fields(self.company_page_fields, {})
+
+    def save_company_page(self) -> None:
+        try:
+            row_id = self.mysql_repo.save_company(self.environment, self.line_field_payload(self.company_page_fields))
+            self.refresh_company_page()
+            self.select_table_row_by_id(self.company_page_table, row_id)
+        except Exception as exc:
+            QMessageBox.critical(self, "Empresas", str(exc))
+
+    def delete_company_page(self) -> None:
+        row_id = self.selected_catalog_id(self.company_page_table)
+        if row_id and QMessageBox.question(self, "Empresas", "Excluir a empresa e seus fornecedores/produtos?") == QMessageBox.Yes:
+            self.mysql_repo.delete_company(row_id)
+            self.refresh_company_page()
+
+    def refresh_supplier_page(self) -> None:
+        self.mysql_repo.ensure_schema()
+        self.fill_company_combo(self.supplier_page_company_combo)
+        rows = self.mysql_repo.list_suppliers_catalog(self.environment)
+        self.supplier_page_rows = {int(row["id"]): row for row in rows}
+        self.set_table_rows(
+            self.supplier_page_table,
+            [[int(row["id"]), row.get("empresa_nome", ""), row.get("nome", ""), row.get("cnpj", ""), row.get("codigo", "")] for row in rows],
+        )
+
+    def handle_supplier_page_select(self) -> None:
+        row = getattr(self, "supplier_page_rows", {}).get(self.selected_catalog_id(self.supplier_page_table), {})
+        self.fill_line_fields(self.supplier_page_fields, row)
+        self.select_combo_data(self.supplier_page_company_combo, int(row.get("empresa_id") or 0))
+
+    def clear_supplier_page_form(self) -> None:
+        self.fill_line_fields(self.supplier_page_fields, {})
+
+    def save_supplier_page(self) -> None:
+        try:
+            company_id = int(self.supplier_page_company_combo.currentData() or 0)
+            row_id = self.mysql_repo.save_supplier(company_id, self.line_field_payload(self.supplier_page_fields))
+            self.refresh_supplier_page()
+            self.select_table_row_by_id(self.supplier_page_table, row_id)
+        except Exception as exc:
+            QMessageBox.critical(self, "Fornecedores", str(exc))
+
+    def delete_supplier_page(self) -> None:
+        row_id = self.selected_catalog_id(self.supplier_page_table)
+        if row_id and QMessageBox.question(self, "Fornecedores", "Excluir o fornecedor e seus produtos?") == QMessageBox.Yes:
+            self.mysql_repo.delete_supplier(row_id)
+            self.refresh_supplier_page()
+
+    def refresh_type_page(self) -> None:
+        self.mysql_repo.ensure_schema()
+        rows = self.mysql_repo.list_product_types_catalog(self.environment)
+        self.type_page_rows = {int(row["id"]): row for row in rows}
+        self.set_table_rows(
+            self.type_page_table,
+            [[int(row["id"]), row.get("nome", ""), row.get("descricao", "")] for row in rows],
+        )
+
+    def handle_type_page_select(self) -> None:
+        row = getattr(self, "type_page_rows", {}).get(self.selected_catalog_id(self.type_page_table), {})
+        self.fill_line_fields(self.type_page_fields, row)
+
+    def clear_type_page_form(self) -> None:
+        self.fill_line_fields(self.type_page_fields, {})
+
+    def save_type_page(self) -> None:
+        try:
+            row_id = self.mysql_repo.save_product_type(self.environment, self.line_field_payload(self.type_page_fields))
+            self.refresh_type_page()
+            self.select_table_row_by_id(self.type_page_table, row_id)
+        except Exception as exc:
+            QMessageBox.critical(self, "Tipos de Produto", str(exc))
+
+    def delete_type_page(self) -> None:
+        row_id = self.selected_catalog_id(self.type_page_table)
+        if row_id and QMessageBox.question(self, "Tipos de Produto", "Excluir este tipo? Produtos vinculados ficarao sem tipo.") == QMessageBox.Yes:
+            self.mysql_repo.delete_product_type(row_id)
+            self.refresh_type_page()
+
+    def refresh_product_page(self) -> None:
+        self.mysql_repo.ensure_schema()
+        self.fill_supplier_combo(self.product_page_supplier_combo)
+        self.fill_type_combo(self.product_page_type_combo)
+        rows = self.mysql_repo.list_products_catalog(self.environment)
+        self.product_page_rows = {int(row["id"]): row for row in rows}
+        self.set_table_rows(
+            self.product_page_table,
+            [
+                [
+                    int(row["id"]),
+                    row.get("empresa_nome", ""),
+                    row.get("fornecedor_nome", ""),
+                    row.get("codigo_fornecedor", ""),
+                    row.get("codigo_empresa", ""),
+                    row.get("descricao", ""),
+                    row.get("tipo_produto", ""),
+                    row.get("ncm", ""),
+                ]
+                for row in rows
+            ],
+        )
+
+    def handle_product_page_select(self) -> None:
+        row = getattr(self, "product_page_rows", {}).get(self.selected_catalog_id(self.product_page_table), {})
+        self.fill_line_fields(self.product_page_fields, row)
+        self.select_combo_data(self.product_page_supplier_combo, int(row.get("fornecedor_id") or 0))
+        self.select_combo_data(self.product_page_type_combo, int(row.get("tipo_produto_id") or 0))
+
+    def edit_product_page_selected(self) -> None:
+        self.confirm_selected_for_edit(self.product_page_table)
+        if self.selected_catalog_id(self.product_page_table):
+            self.product_page_tabs.setCurrentIndex(1)
+
+    def clear_product_page_form(self) -> None:
+        self.fill_line_fields(self.product_page_fields, {})
+        self.product_page_type_combo.setCurrentIndex(0)
+        if hasattr(self, "product_page_tabs"):
+            self.product_page_tabs.setCurrentIndex(1)
+
+    def save_product_page(self) -> None:
+        try:
+            supplier_id = int(self.product_page_supplier_combo.currentData() or 0)
+            payload = self.line_field_payload(self.product_page_fields)
+            payload["tipo_produto_id"] = self.product_page_type_combo.currentData()
+            row_id = self.mysql_repo.save_supplier_product(supplier_id, payload)
+            self.refresh_product_page()
+            self.select_table_row_by_id(self.product_page_table, row_id)
+        except Exception as exc:
+            QMessageBox.critical(self, "Produtos", str(exc))
+
+    def delete_product_page(self) -> None:
+        row_id = self.selected_catalog_id(self.product_page_table)
+        if row_id and QMessageBox.question(self, "Produtos", "Excluir este produto?") == QMessageBox.Yes:
+            self.mysql_repo.delete_supplier_product(row_id)
+            self.refresh_product_page()
+
+    def select_combo_data(self, combo: QComboBox, value: int) -> None:
+        index = combo.findData(value)
+        combo.setCurrentIndex(index if index >= 0 else 0)
+
+    def filter_table_rows(self, table: QTableWidget, text: str) -> None:
+        normalized = text.strip().lower()
+        for row_index in range(table.rowCount()):
+            row_text = " ".join(
+                table.item(row_index, column_index).text().lower()
+                for column_index in range(table.columnCount())
+                if table.item(row_index, column_index) is not None
+            )
+            table.setRowHidden(row_index, normalized not in row_text)
+
+    def confirm_selected_for_edit(self, table: QTableWidget) -> None:
+        selected = table.selectionModel().selectedRows()
+        if not selected:
+            QMessageBox.information(self, "Editar Cadastro", "Selecione uma linha na lista para editar.")
+            return
+        table.setFocus()
+        self.statusBar().showMessage("Registro selecionado. Edite os campos do formulario e clique em Salvar Alteracoes.")
+
+    def edit_single_catalog_selected(self, table: QTableWidget) -> None:
+        self.confirm_selected_for_edit(table)
+        if self.selected_catalog_id(table):
+            tabs = getattr(self, "catalog_page_tabs_by_table", {}).get(id(table))
+            if tabs is not None:
+                tabs.setCurrentIndex(1)
+
+    def clear_single_catalog_form(self, table: QTableWidget, clear_callback: Callable[[], None]) -> None:
+        clear_callback()
+        tabs = getattr(self, "catalog_page_tabs_by_table", {}).get(id(table))
+        if tabs is not None:
+            tabs.setCurrentIndex(1)
+
+    def refresh_catalog(self) -> None:
+        if not hasattr(self, "catalog_company_table"):
+            return
+        try:
+            self.mysql_repo.ensure_schema()
+            companies = self.mysql_repo.list_companies(self.environment)
+            self.catalog_companies_by_id = {int(row["id"]): row for row in companies}
+            self.set_table_rows(
+                self.catalog_company_table,
+                [[int(row["id"]), row.get("nome", ""), row.get("cnpj", "")] for row in companies],
+            )
+            if companies:
+                self.catalog_company_table.selectRow(0)
+                self.handle_catalog_company_select()
+            else:
+                self.refresh_catalog_children(0)
+            self.catalog_status.setText(f"{len(companies)} empresa(s) cadastrada(s).")
+        except Exception as exc:
+            self.catalog_status.setText(f"Falha no cadastro: {exc}")
+            QMessageBox.critical(self, "Cadastro Empresa", str(exc))
+
+    def refresh_catalog_children(self, company_id: int) -> None:
+        suppliers = self.mysql_repo.list_suppliers(company_id) if company_id else []
+        types = self.mysql_repo.list_product_types(self.environment)
+        self.catalog_suppliers_by_id = {int(row["id"]): row for row in suppliers}
+        self.catalog_types_by_id = {int(row["id"]): row for row in types}
+        self.set_table_rows(
+            self.catalog_supplier_table,
+            [[int(row["id"]), row.get("nome", ""), row.get("cnpj", ""), row.get("codigo", "")] for row in suppliers],
+        )
+        self.set_table_rows(
+            self.catalog_type_table,
+            [[int(row["id"]), row.get("nome", ""), row.get("descricao", "")] for row in types],
+        )
+        self.catalog_product_type_combo.clear()
+        self.catalog_product_type_combo.addItem("", 0)
+        for type_id, row in self.catalog_types_by_id.items():
+            self.catalog_product_type_combo.addItem(str(row.get("nome", "")), type_id)
+        self.set_table_rows(self.catalog_product_table, [])
+        self.clear_catalog_supplier_form()
+        self.clear_catalog_type_form()
+        self.clear_catalog_product_form()
+
+    def handle_catalog_company_select(self) -> None:
+        company_id = self.selected_catalog_id(self.catalog_company_table)
+        row = self.catalog_companies_by_id.get(company_id, {})
+        self.fill_line_fields(self.catalog_company_fields, row)
+        self.refresh_catalog_children(company_id)
+
+    def handle_catalog_supplier_select(self) -> None:
+        supplier_id = self.selected_catalog_id(self.catalog_supplier_table)
+        row = self.catalog_suppliers_by_id.get(supplier_id, {})
+        self.fill_line_fields(self.catalog_supplier_fields, row)
+        self.refresh_catalog_products(supplier_id)
+
+    def handle_catalog_type_select(self) -> None:
+        type_id = self.selected_catalog_id(self.catalog_type_table)
+        self.fill_line_fields(self.catalog_type_fields, self.catalog_types_by_id.get(type_id, {}))
+
+    def refresh_catalog_products(self, supplier_id: int) -> None:
+        products = self.mysql_repo.list_supplier_products(supplier_id) if supplier_id else []
+        self.catalog_products_by_id = {int(row["id"]): row for row in products}
+        self.set_table_rows(
+            self.catalog_product_table,
+            [
+                [
+                    int(row["id"]),
+                    row.get("codigo_fornecedor", ""),
+                    row.get("codigo_empresa", ""),
+                    row.get("descricao", ""),
+                    row.get("tipo_produto", ""),
+                    row.get("ncm", ""),
+                    row.get("cst_icms", ""),
+                    row.get("aliquota_icms", ""),
+                ]
+                for row in products
+            ],
+        )
+        self.clear_catalog_product_form()
+
+    def handle_catalog_product_select(self) -> None:
+        product_id = self.selected_catalog_id(self.catalog_product_table)
+        row = self.catalog_products_by_id.get(product_id, {})
+        self.fill_line_fields(self.catalog_product_fields, row)
+        type_id = int(row.get("tipo_produto_id") or 0)
+        index = self.catalog_product_type_combo.findData(type_id)
+        self.catalog_product_type_combo.setCurrentIndex(index if index >= 0 else 0)
+
+    def fill_line_fields(self, fields: dict[str, QLineEdit], row: dict[str, object]) -> None:
+        for key, field in fields.items():
+            field.setText(str(row.get(key, "")))
+
+    def line_field_payload(self, fields: dict[str, QLineEdit]) -> dict[str, object]:
+        return {key: field.text().strip() for key, field in fields.items()}
+
+    def clear_catalog_company_form(self) -> None:
+        self.fill_line_fields(self.catalog_company_fields, {})
+
+    def clear_catalog_supplier_form(self) -> None:
+        self.fill_line_fields(self.catalog_supplier_fields, {})
+
+    def clear_catalog_type_form(self) -> None:
+        self.fill_line_fields(self.catalog_type_fields, {})
+
+    def clear_catalog_product_form(self) -> None:
+        self.fill_line_fields(self.catalog_product_fields, {})
+        self.catalog_product_type_combo.setCurrentIndex(0)
+
+    def save_catalog_company(self) -> None:
+        try:
+            company_id = self.mysql_repo.save_company(self.environment, self.line_field_payload(self.catalog_company_fields))
+            self.refresh_catalog()
+            self.select_table_row_by_id(self.catalog_company_table, company_id)
+        except Exception as exc:
+            QMessageBox.critical(self, "Cadastro Empresa", str(exc))
+
+    def save_catalog_supplier(self) -> None:
+        try:
+            company_id = self.selected_catalog_id(self.catalog_company_table)
+            supplier_id = self.mysql_repo.save_supplier(company_id, self.line_field_payload(self.catalog_supplier_fields))
+            self.refresh_catalog_children(company_id)
+            self.select_table_row_by_id(self.catalog_supplier_table, supplier_id)
+            self.handle_catalog_supplier_select()
+        except Exception as exc:
+            QMessageBox.critical(self, "Cadastro Fornecedor", str(exc))
+
+    def save_catalog_type(self) -> None:
+        try:
+            company_id = self.selected_catalog_id(self.catalog_company_table)
+            type_id = self.mysql_repo.save_product_type(self.environment, self.line_field_payload(self.catalog_type_fields))
+            self.refresh_catalog_children(company_id)
+            self.select_table_row_by_id(self.catalog_type_table, type_id)
+        except Exception as exc:
+            QMessageBox.critical(self, "Tipo de Produto", str(exc))
+
+    def save_catalog_product(self) -> None:
+        try:
+            supplier_id = self.selected_catalog_id(self.catalog_supplier_table)
+            payload = self.line_field_payload(self.catalog_product_fields)
+            payload["tipo_produto_id"] = self.catalog_product_type_combo.currentData()
+            product_id = self.mysql_repo.save_supplier_product(supplier_id, payload)
+            self.refresh_catalog_products(supplier_id)
+            self.select_table_row_by_id(self.catalog_product_table, product_id)
+        except Exception as exc:
+            QMessageBox.critical(self, "Cadastro Produto", str(exc))
+
+    def delete_catalog_company(self) -> None:
+        company_id = self.selected_catalog_id(self.catalog_company_table)
+        if company_id and QMessageBox.question(self, "Cadastro Empresa", "Excluir a empresa e seus fornecedores/produtos?") == QMessageBox.Yes:
+            self.mysql_repo.delete_company(company_id)
+            self.refresh_catalog()
+
+    def delete_catalog_supplier(self) -> None:
+        supplier_id = self.selected_catalog_id(self.catalog_supplier_table)
+        if supplier_id and QMessageBox.question(self, "Cadastro Fornecedor", "Excluir o fornecedor e seus produtos?") == QMessageBox.Yes:
+            self.mysql_repo.delete_supplier(supplier_id)
+            self.refresh_catalog_children(self.selected_catalog_id(self.catalog_company_table))
+
+    def delete_catalog_type(self) -> None:
+        type_id = self.selected_catalog_id(self.catalog_type_table)
+        if type_id and QMessageBox.question(self, "Tipo de Produto", "Excluir este tipo? Produtos vinculados ficarao sem tipo.") == QMessageBox.Yes:
+            self.mysql_repo.delete_product_type(type_id)
+            self.refresh_catalog_children(self.selected_catalog_id(self.catalog_company_table))
+
+    def delete_catalog_product(self) -> None:
+        product_id = self.selected_catalog_id(self.catalog_product_table)
+        if product_id and QMessageBox.question(self, "Cadastro Produto", "Excluir este produto?") == QMessageBox.Yes:
+            self.mysql_repo.delete_supplier_product(product_id)
+            self.refresh_catalog_products(self.selected_catalog_id(self.catalog_supplier_table))
+
+    def select_table_row_by_id(self, table: QTableWidget, row_id: int) -> None:
+        for row_index in range(table.rowCount()):
+            item = table.item(row_index, 0)
+            if item and item.text() == str(row_id):
+                table.selectRow(row_index)
+                return
 
     def build_placeholder_page(self, title: str, description: str) -> QWidget:
         page = QWidget()

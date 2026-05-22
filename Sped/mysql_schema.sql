@@ -134,3 +134,74 @@ CREATE TABLE IF NOT EXISTS sped_resumos_c190 (
     KEY idx_sped_resumos_c190_cfop (cfop),
     KEY idx_sped_resumos_c190_cst (cst_icms)
 );
+
+CREATE TABLE IF NOT EXISTS cad_empresas (
+    id INT NOT NULL AUTO_INCREMENT PRIMARY KEY,
+    ambiente VARCHAR(10) NOT NULL DEFAULT 'dev',
+    nome VARCHAR(255) NOT NULL,
+    cnpj VARCHAR(20) NOT NULL DEFAULT '',
+    inscricao_estadual VARCHAR(30) NOT NULL DEFAULT '',
+    observacao TEXT NULL,
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    UNIQUE KEY uq_cad_empresas_ambiente_nome (ambiente, nome),
+    KEY idx_cad_empresas_cnpj (cnpj),
+    KEY idx_cad_empresas_nome (nome)
+);
+
+CREATE TABLE IF NOT EXISTS cad_fornecedores (
+    id INT NOT NULL AUTO_INCREMENT PRIMARY KEY,
+    empresa_id INT NOT NULL,
+    nome VARCHAR(255) NOT NULL,
+    cnpj VARCHAR(20) NOT NULL DEFAULT '',
+    codigo VARCHAR(80) NOT NULL DEFAULT '',
+    observacao TEXT NULL,
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    CONSTRAINT fk_cad_fornecedores_empresa FOREIGN KEY (empresa_id) REFERENCES cad_empresas (id) ON DELETE CASCADE,
+    UNIQUE KEY uq_cad_fornecedores_empresa_nome (empresa_id, nome),
+    KEY idx_cad_fornecedores_cnpj (cnpj),
+    KEY idx_cad_fornecedores_nome (nome)
+);
+
+CREATE TABLE IF NOT EXISTS cad_tipos_produto (
+    id INT NOT NULL AUTO_INCREMENT PRIMARY KEY,
+    ambiente VARCHAR(10) NOT NULL DEFAULT 'dev',
+    nome VARCHAR(120) NOT NULL,
+    descricao TEXT NULL,
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    KEY idx_cad_tipos_produto_ambiente_nome (ambiente, nome)
+);
+
+CREATE TABLE IF NOT EXISTS cad_produtos_fornecedor (
+    id BIGINT NOT NULL AUTO_INCREMENT PRIMARY KEY,
+    fornecedor_id INT NOT NULL,
+    tipo_produto_id INT NULL,
+    codigo_fornecedor VARCHAR(80) NOT NULL DEFAULT '',
+    codigo_empresa VARCHAR(80) NOT NULL DEFAULT '',
+    descricao VARCHAR(255) NOT NULL DEFAULT '',
+    ean VARCHAR(30) NOT NULL DEFAULT '',
+    ncm VARCHAR(20) NOT NULL DEFAULT '',
+    cest VARCHAR(20) NOT NULL DEFAULT '',
+    c_classtrib VARCHAR(20) NOT NULL DEFAULT '',
+    c_benef VARCHAR(20) NOT NULL DEFAULT '',
+    cst_icms VARCHAR(4) NOT NULL DEFAULT '',
+    aliquota_icms DECIMAL(10,4) NOT NULL DEFAULT 0.0000,
+    cst_ipi VARCHAR(4) NOT NULL DEFAULT '',
+    aliquota_ipi DECIMAL(10,4) NOT NULL DEFAULT 0.0000,
+    cst_pis_cofins VARCHAR(4) NOT NULL DEFAULT '',
+    aliquota_pis_cofins DECIMAL(10,4) NOT NULL DEFAULT 0.0000,
+    bc_st DECIMAL(18,2) NOT NULL DEFAULT 0.00,
+    mva DECIMAL(10,4) NOT NULL DEFAULT 0.0000,
+    valor_icms_st DECIMAL(18,2) NOT NULL DEFAULT 0.00,
+    aliquota_icms_st DECIMAL(10,4) NOT NULL DEFAULT 0.0000,
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    CONSTRAINT fk_cad_produtos_fornecedor_fornecedor FOREIGN KEY (fornecedor_id) REFERENCES cad_fornecedores (id) ON DELETE CASCADE,
+    CONSTRAINT fk_cad_produtos_fornecedor_tipo FOREIGN KEY (tipo_produto_id) REFERENCES cad_tipos_produto (id) ON DELETE SET NULL,
+    UNIQUE KEY uq_cad_produtos_fornecedor_codigo (fornecedor_id, codigo_fornecedor),
+    KEY idx_cad_produtos_fornecedor_codigo_empresa (codigo_empresa),
+    KEY idx_cad_produtos_fornecedor_ncm (ncm),
+    KEY idx_cad_produtos_fornecedor_ean (ean)
+);
