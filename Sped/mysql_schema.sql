@@ -1,67 +1,25 @@
-CREATE TABLE IF NOT EXISTS empresas (
-    id INT NOT NULL AUTO_INCREMENT PRIMARY KEY,
-    razao_social VARCHAR(255) NOT NULL,
-    nome_fantasia VARCHAR(255) NOT NULL DEFAULT '',
-    cnpj VARCHAR(18) NOT NULL,
-    inscricao_estadual VARCHAR(30) NOT NULL DEFAULT '',
-    ativo TINYINT(1) NOT NULL DEFAULT 1,
-    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-    UNIQUE KEY uq_empresas_cnpj (cnpj)
-);
-
-CREATE TABLE IF NOT EXISTS produtos_empresa (
-    id INT NOT NULL AUTO_INCREMENT PRIMARY KEY,
-    empresa_id INT NOT NULL,
-    codigo VARCHAR(60) NOT NULL,
-    codigo_origem VARCHAR(80) NOT NULL DEFAULT '',
-    descricao VARCHAR(255) NOT NULL,
-    ncm VARCHAR(20) NOT NULL DEFAULT '',
-    unidade VARCHAR(10) NOT NULL DEFAULT 'UN',
-    cst_icms_entrada VARCHAR(4) NOT NULL DEFAULT '',
-    cst_icms_saida VARCHAR(4) NOT NULL DEFAULT '',
-    cst_pis_entrada VARCHAR(4) NOT NULL DEFAULT '',
-    cst_pis_saida VARCHAR(4) NOT NULL DEFAULT '',
-    cst_cofins_entrada VARCHAR(4) NOT NULL DEFAULT '',
-    cst_cofins_saida VARCHAR(4) NOT NULL DEFAULT '',
-    tipo_produto VARCHAR(30) NOT NULL DEFAULT 'Revenda',
-    icms_entrada DECIMAL(10,4) NOT NULL DEFAULT 0.0000,
-    icms_saida DECIMAL(10,4) NOT NULL DEFAULT 0.0000,
-    pis_entrada DECIMAL(10,4) NOT NULL DEFAULT 0.0000,
-    pis_saida DECIMAL(10,4) NOT NULL DEFAULT 0.0000,
-    cofins_entrada DECIMAL(10,4) NOT NULL DEFAULT 0.0000,
-    cofins_saida DECIMAL(10,4) NOT NULL DEFAULT 0.0000,
-    ativo TINYINT(1) NOT NULL DEFAULT 1,
-    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-    CONSTRAINT fk_produtos_empresa_empresa FOREIGN KEY (empresa_id) REFERENCES empresas (id),
-    UNIQUE KEY uq_produtos_empresa_codigo (empresa_id, codigo),
-    KEY idx_produtos_empresa_descricao (descricao),
-    KEY idx_produtos_empresa_ncm (ncm)
-);
-
 CREATE TABLE IF NOT EXISTS sped_perfis (
     id INT NOT NULL AUTO_INCREMENT PRIMARY KEY,
-    empresa_id INT NULL,
     ambiente VARCHAR(10) NOT NULL DEFAULT 'dev',
     nome VARCHAR(255) NOT NULL,
+    empresa_nome_sped VARCHAR(255) NOT NULL DEFAULT '',
+    empresa_cnpj_sped VARCHAR(20) NOT NULL DEFAULT '',
     descricao TEXT NULL,
     ativo TINYINT(1) NOT NULL DEFAULT 1,
     created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-    CONSTRAINT fk_sped_perfis_empresa FOREIGN KEY (empresa_id) REFERENCES empresas (id),
     UNIQUE KEY uq_sped_perfis_ambiente_nome (ambiente, nome),
-    KEY idx_sped_perfis_empresa (empresa_id)
+    KEY idx_sped_perfis_cnpj_sped (empresa_cnpj_sped)
 );
 
 CREATE TABLE IF NOT EXISTS sped_arquivos (
     id INT NOT NULL AUTO_INCREMENT PRIMARY KEY,
     perfil_id INT NULL,
-    empresa_id INT NULL,
     ambiente VARCHAR(10) NOT NULL DEFAULT 'dev',
     tipo_sped VARCHAR(30) NOT NULL DEFAULT '',
     periodo_inicio DATE NULL,
     periodo_fim DATE NULL,
+    empresa_nome_sped VARCHAR(255) NOT NULL DEFAULT '',
     empresa_cnpj VARCHAR(20) NOT NULL DEFAULT '',
     arquivo_nome_original VARCHAR(255) NOT NULL,
     arquivo_hash_sha256 CHAR(64) NOT NULL,
@@ -71,10 +29,8 @@ CREATE TABLE IF NOT EXISTS sped_arquivos (
     observacao TEXT NULL,
     created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
     CONSTRAINT fk_sped_arquivos_perfil FOREIGN KEY (perfil_id) REFERENCES sped_perfis (id),
-    CONSTRAINT fk_sped_arquivos_empresa FOREIGN KEY (empresa_id) REFERENCES empresas (id),
     UNIQUE KEY uq_sped_arquivos_ambiente_hash (ambiente, arquivo_hash_sha256),
     KEY idx_sped_arquivos_perfil (perfil_id),
-    KEY idx_sped_arquivos_empresa (empresa_id),
     KEY idx_sped_arquivos_periodo (periodo_inicio, periodo_fim),
     KEY idx_sped_arquivos_cnpj (empresa_cnpj)
 );
@@ -177,4 +133,82 @@ CREATE TABLE IF NOT EXISTS sped_resumos_c190 (
     KEY idx_sped_resumos_c190_doc (sped_arquivo_id, chave_documento, numero_documento),
     KEY idx_sped_resumos_c190_cfop (cfop),
     KEY idx_sped_resumos_c190_cst (cst_icms)
+);
+
+CREATE TABLE IF NOT EXISTS cad_empresas (
+    id INT NOT NULL AUTO_INCREMENT PRIMARY KEY,
+    ambiente VARCHAR(10) NOT NULL DEFAULT 'dev',
+    nome VARCHAR(255) NOT NULL,
+    cnpj VARCHAR(20) NOT NULL DEFAULT '',
+    inscricao_estadual VARCHAR(30) NOT NULL DEFAULT '',
+    observacao TEXT NULL,
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    UNIQUE KEY uq_cad_empresas_ambiente_nome (ambiente, nome),
+    KEY idx_cad_empresas_cnpj (cnpj),
+    KEY idx_cad_empresas_nome (nome)
+);
+
+CREATE TABLE IF NOT EXISTS cad_fornecedores (
+    id INT NOT NULL AUTO_INCREMENT PRIMARY KEY,
+    empresa_id INT NOT NULL,
+    nome VARCHAR(255) NOT NULL,
+    cnpj VARCHAR(20) NOT NULL DEFAULT '',
+    inscricao_estadual VARCHAR(30) NOT NULL DEFAULT '',
+    codigo VARCHAR(80) NOT NULL DEFAULT '',
+    observacao TEXT NULL,
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    CONSTRAINT fk_cad_fornecedores_empresa FOREIGN KEY (empresa_id) REFERENCES cad_empresas (id) ON DELETE CASCADE,
+    UNIQUE KEY uq_cad_fornecedores_empresa_nome (empresa_id, nome),
+    KEY idx_cad_fornecedores_cnpj (cnpj),
+    KEY idx_cad_fornecedores_nome (nome)
+);
+
+CREATE TABLE IF NOT EXISTS cad_tipos_produto (
+    id INT NOT NULL AUTO_INCREMENT PRIMARY KEY,
+    ambiente VARCHAR(10) NOT NULL DEFAULT 'dev',
+    nome VARCHAR(120) NOT NULL,
+    descricao TEXT NULL,
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    KEY idx_cad_tipos_produto_ambiente_nome (ambiente, nome)
+);
+
+CREATE TABLE IF NOT EXISTS cad_produtos_fornecedor (
+    id BIGINT NOT NULL AUTO_INCREMENT PRIMARY KEY,
+    fornecedor_id INT NOT NULL,
+    tipo_produto_id INT NULL,
+    codigo_fornecedor VARCHAR(80) NOT NULL DEFAULT '',
+    codigo_empresa VARCHAR(80) NOT NULL DEFAULT '',
+    descricao VARCHAR(255) NOT NULL DEFAULT '',
+    ean VARCHAR(30) NOT NULL DEFAULT '',
+    ean_unico VARCHAR(30) NULL,
+    ncm VARCHAR(20) NOT NULL DEFAULT '',
+    cest VARCHAR(20) NOT NULL DEFAULT '',
+    c_classtrib VARCHAR(20) NOT NULL DEFAULT '',
+    c_benef VARCHAR(20) NOT NULL DEFAULT '',
+    cst_icms VARCHAR(4) NOT NULL DEFAULT '',
+    aliquota_icms DECIMAL(10,4) NOT NULL DEFAULT 0.0000,
+    cst_ipi VARCHAR(4) NOT NULL DEFAULT '',
+    aliquota_ipi DECIMAL(10,4) NOT NULL DEFAULT 0.0000,
+    cst_pis_cofins VARCHAR(20) NOT NULL DEFAULT '',
+    aliquota_pis_cofins DECIMAL(10,4) NOT NULL DEFAULT 0.0000,
+    cst_pis VARCHAR(4) NOT NULL DEFAULT '',
+    cst_cofins VARCHAR(4) NOT NULL DEFAULT '',
+    aliquota_pis DECIMAL(10,4) NOT NULL DEFAULT 0.0000,
+    aliquota_cofins DECIMAL(10,4) NOT NULL DEFAULT 0.0000,
+    bc_st DECIMAL(18,2) NOT NULL DEFAULT 0.00,
+    mva DECIMAL(10,4) NOT NULL DEFAULT 0.0000,
+    valor_icms_st DECIMAL(18,2) NOT NULL DEFAULT 0.00,
+    aliquota_icms_st DECIMAL(10,4) NOT NULL DEFAULT 0.0000,
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    CONSTRAINT fk_cad_produtos_fornecedor_fornecedor FOREIGN KEY (fornecedor_id) REFERENCES cad_fornecedores (id) ON DELETE CASCADE,
+    CONSTRAINT fk_cad_produtos_fornecedor_tipo FOREIGN KEY (tipo_produto_id) REFERENCES cad_tipos_produto (id) ON DELETE SET NULL,
+    UNIQUE KEY uq_cad_produtos_fornecedor_codigo (fornecedor_id, codigo_fornecedor),
+    UNIQUE KEY uq_cad_produtos_fornecedor_ean_unico (fornecedor_id, ean_unico),
+    KEY idx_cad_produtos_fornecedor_codigo_empresa (codigo_empresa),
+    KEY idx_cad_produtos_fornecedor_ncm (ncm),
+    KEY idx_cad_produtos_fornecedor_ean (ean)
 );

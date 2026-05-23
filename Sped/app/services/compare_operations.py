@@ -68,6 +68,7 @@ def infer_compare_invoice_operation(invoice: CompareXmlInvoice, company_tax_id: 
         CompareXmlItem(
             item_no="",
             code="",
+            ean="",
             description="",
             unit="",
             ncm="",

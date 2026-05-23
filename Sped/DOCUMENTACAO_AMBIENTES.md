@@ -55,6 +55,26 @@ $env:SPED_ENV = "dev"
 
 e abre o sistema usando os arquivos `*.dev.json`.
 
+## Como rodar a interface Qt em desenvolvimento
+
+A interface Qt em migracao abre separadamente:
+
+```powershell
+.\scripts\run-qt-dev.ps1
+```
+
+Ela usa o mesmo ambiente `dev`, mas roda por:
+
+```text
+Sped/NovoRevisorQt.py
+```
+
+Os arquivos da interface Qt ficam em:
+
+```text
+Sped/app/ui_qt/
+```
+
 ## Como rodar em producao
 
 No PowerShell, na pasta `c:\spedAms`, execute:

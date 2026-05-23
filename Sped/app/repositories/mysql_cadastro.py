@@ -1,14 +1,12 @@
 from __future__ import annotations
 
-import datetime as dt
 import json
 import sys
 import traceback
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 
 from app.config import MYSQL_CONNECTION_TIMEOUT_SECONDS, MYSQL_DEFAULT_CONFIG
-from app.services.tax_rules import normalize_tax_code
-
 try:
     import mysql.connector
     from mysql.connector import Error as MySQLError
@@ -131,73 +129,1000 @@ class MysqlCadastroRepository:
             )
             return cursor.fetchone() is not None
 
-        def normalize_existing_icms_cst_values() -> None:
-            if not column_exists("produtos_empresa", "cst_icms_entrada") or not column_exists("produtos_empresa", "cst_icms_saida"):
-                return
-            cursor.execute("SELECT id, cst_icms_entrada, cst_icms_saida FROM produtos_empresa")
-            updates: list[tuple[str, str, int]] = []
-            for product_id, cst_entrada, cst_saida in cursor.fetchall():
-                normalized_entrada = normalize_tax_code(cst_entrada, 3)
-                normalized_saida = normalize_tax_code(cst_saida, 3)
-                current_entrada = str(cst_entrada or "").strip()
-                current_saida = str(cst_saida or "").strip()
-                if normalized_entrada != current_entrada or normalized_saida != current_saida:
-                    updates.append((normalized_entrada, normalized_saida, int(product_id)))
-            if updates:
-                cursor.executemany(
+        def table_constraint_exists(table_name: str, constraint_name: str) -> bool:
+            cursor.execute(
+                """
+                SELECT 1
+                FROM information_schema.TABLE_CONSTRAINTS
+                WHERE TABLE_SCHEMA = %s
+                  AND TABLE_NAME = %s
+                  AND CONSTRAINT_NAME = %s
+                LIMIT 1
+                """,
+                (database_name, table_name, constraint_name),
+            )
+            return cursor.fetchone() is not None
+
+        def index_exists(table_name: str, index_name: str) -> bool:
+            cursor.execute(
+                """
+                SELECT 1
+                FROM information_schema.STATISTICS
+                WHERE TABLE_SCHEMA = %s
+                  AND TABLE_NAME = %s
+                  AND INDEX_NAME = %s
+                LIMIT 1
+                """,
+                (database_name, table_name, index_name),
+            )
+            return cursor.fetchone() is not None
+
+        if column_exists("sped_perfis", "id"):
+            if not column_exists("sped_perfis", "empresa_nome_sped"):
+                cursor.execute("ALTER TABLE sped_perfis ADD COLUMN empresa_nome_sped VARCHAR(255) NOT NULL DEFAULT '' AFTER nome")
+            if not column_exists("sped_perfis", "empresa_cnpj_sped"):
+                cursor.execute("ALTER TABLE sped_perfis ADD COLUMN empresa_cnpj_sped VARCHAR(20) NOT NULL DEFAULT '' AFTER empresa_nome_sped")
+
+        if column_exists("sped_arquivos", "id") and not column_exists("sped_arquivos", "empresa_nome_sped"):
+            cursor.execute("ALTER TABLE sped_arquivos ADD COLUMN empresa_nome_sped VARCHAR(255) NOT NULL DEFAULT '' AFTER periodo_fim")
+
+        if column_exists("cad_tipos_produto", "id"):
+            if not column_exists("cad_tipos_produto", "ambiente"):
+                cursor.execute("ALTER TABLE cad_tipos_produto ADD COLUMN ambiente VARCHAR(10) NOT NULL DEFAULT 'dev' AFTER id")
+            if table_constraint_exists("cad_tipos_produto", "fk_cad_tipos_produto_empresa"):
+                cursor.execute("ALTER TABLE cad_tipos_produto DROP FOREIGN KEY fk_cad_tipos_produto_empresa")
+            if index_exists("cad_tipos_produto", "uq_cad_tipos_produto_empresa_nome"):
+                cursor.execute("ALTER TABLE cad_tipos_produto DROP INDEX uq_cad_tipos_produto_empresa_nome")
+            if column_exists("cad_tipos_produto", "empresa_id"):
+                cursor.execute("ALTER TABLE cad_tipos_produto DROP COLUMN empresa_id")
+            if not index_exists("cad_tipos_produto", "idx_cad_tipos_produto_ambiente_nome"):
+                cursor.execute("ALTER TABLE cad_tipos_produto ADD KEY idx_cad_tipos_produto_ambiente_nome (ambiente, nome)")
+
+        if column_exists("cad_produtos_fornecedor", "cst_pis_cofins"):
+            cursor.execute(
+                """
+                SELECT CHARACTER_MAXIMUM_LENGTH
+                FROM information_schema.COLUMNS
+                WHERE TABLE_SCHEMA = %s
+                  AND TABLE_NAME = 'cad_produtos_fornecedor'
+                  AND COLUMN_NAME = 'cst_pis_cofins'
+                LIMIT 1
+                """,
+                (database_name,),
+            )
+            row = cursor.fetchone()
+            current_length = int(row[0]) if row and row[0] is not None else 0
+            if current_length < 20:
+                cursor.execute(
+                    "ALTER TABLE cad_produtos_fornecedor MODIFY COLUMN cst_pis_cofins VARCHAR(20) NOT NULL DEFAULT ''"
+                )
+        if column_exists("cad_produtos_fornecedor", "id"):
+            if not column_exists("cad_produtos_fornecedor", "cst_pis"):
+                cursor.execute("ALTER TABLE cad_produtos_fornecedor ADD COLUMN cst_pis VARCHAR(4) NOT NULL DEFAULT '' AFTER cst_pis_cofins")
+            if not column_exists("cad_produtos_fornecedor", "cst_cofins"):
+                cursor.execute("ALTER TABLE cad_produtos_fornecedor ADD COLUMN cst_cofins VARCHAR(4) NOT NULL DEFAULT '' AFTER cst_pis")
+            if not column_exists("cad_produtos_fornecedor", "aliquota_pis"):
+                cursor.execute("ALTER TABLE cad_produtos_fornecedor ADD COLUMN aliquota_pis DECIMAL(10,4) NOT NULL DEFAULT 0.0000 AFTER aliquota_pis_cofins")
+            if not column_exists("cad_produtos_fornecedor", "aliquota_cofins"):
+                cursor.execute("ALTER TABLE cad_produtos_fornecedor ADD COLUMN aliquota_cofins DECIMAL(10,4) NOT NULL DEFAULT 0.0000 AFTER aliquota_pis")
+            if index_exists("cad_produtos_fornecedor", "uq_cad_produtos_fornecedor_ean"):
+                cursor.execute("ALTER TABLE cad_produtos_fornecedor DROP INDEX uq_cad_produtos_fornecedor_ean")
+            if not column_exists("cad_produtos_fornecedor", "ean_unico"):
+                cursor.execute("ALTER TABLE cad_produtos_fornecedor ADD COLUMN ean_unico VARCHAR(30) NULL AFTER ean")
+            cursor.execute(
+                """
+                UPDATE cad_produtos_fornecedor
+                SET ean_unico = CASE
+                    WHEN TRIM(COALESCE(ean, '')) = '' THEN NULL
+                    ELSE TRIM(ean)
+                END
+                """
+            )
+            if not index_exists("cad_produtos_fornecedor", "uq_cad_produtos_fornecedor_ean_unico"):
+                cursor.execute(
                     """
-                    UPDATE produtos_empresa
-                    SET cst_icms_entrada = %s,
-                        cst_icms_saida = %s
+                    SELECT fornecedor_id, ean_unico, COUNT(*) total
+                    FROM cad_produtos_fornecedor
+                    WHERE ean_unico IS NOT NULL AND TRIM(COALESCE(ean_unico, '')) <> ''
+                    GROUP BY fornecedor_id, ean_unico
+                    HAVING COUNT(*) > 1
+                    LIMIT 1
+                    """
+                )
+                has_duplicates = cursor.fetchone() is not None
+                if not has_duplicates:
+                    cursor.execute("ALTER TABLE cad_produtos_fornecedor ADD UNIQUE KEY uq_cad_produtos_fornecedor_ean_unico (fornecedor_id, ean_unico)")
+        if column_exists("cad_fornecedores", "id"):
+            if not column_exists("cad_fornecedores", "inscricao_estadual"):
+                cursor.execute("ALTER TABLE cad_fornecedores ADD COLUMN inscricao_estadual VARCHAR(30) NOT NULL DEFAULT '' AFTER cnpj")
+
+    def _only_digits(self, value: object) -> str:
+        return "".join(char for char in str(value or "") if char.isdigit())
+
+    def _decimal_text(self, value: object) -> str:
+        text = str(value or "").strip()
+        if "," in text:
+            text = text.replace(".", "").replace(",", ".")
+        if not text:
+            return "0"
+        try:
+            return str(Decimal(text))
+        except InvalidOperation:
+            return "0"
+
+    def _trim_text(self, value: object, max_length: int) -> str:
+        return str(value or "").strip()[:max_length]
+
+    def list_companies(self, environment: str) -> list[dict[str, object]]:
+        connection = self.get_connection()
+        try:
+            cursor = connection.cursor(dictionary=True)
+            cursor.execute(
+                """
+                SELECT id, ambiente, nome, cnpj, inscricao_estadual, observacao
+                FROM cad_empresas
+                WHERE ambiente = %s
+                ORDER BY nome
+                """,
+                (environment,),
+            )
+            return [dict(row) for row in cursor.fetchall()]
+        finally:
+            connection.close()
+
+    def save_company(self, environment: str, data: dict[str, object]) -> int:
+        company_id = int(data.get("id") or 0)
+        values = (
+            environment,
+            str(data.get("nome", "")).strip(),
+            self._only_digits(data.get("cnpj", "")),
+            str(data.get("inscricao_estadual", "")).strip(),
+            str(data.get("observacao", "")).strip(),
+        )
+        if not values[1]:
+            raise ValueError("Informe o nome da empresa.")
+        connection = self.get_connection()
+        try:
+            cursor = connection.cursor()
+            if company_id:
+                cursor.execute(
+                    """
+                    UPDATE cad_empresas
+                    SET ambiente = %s, nome = %s, cnpj = %s, inscricao_estadual = %s, observacao = %s
                     WHERE id = %s
                     """,
-                    updates,
+                    (*values, company_id),
                 )
+                connection.commit()
+                return company_id
+            cursor.execute(
+                """
+                INSERT INTO cad_empresas (ambiente, nome, cnpj, inscricao_estadual, observacao)
+                VALUES (%s, %s, %s, %s, %s)
+                """,
+                values,
+            )
+            connection.commit()
+            return int(cursor.lastrowid)
+        finally:
+            connection.close()
 
-        if not column_exists("empresas", "ativo"):
-            cursor.execute("ALTER TABLE empresas ADD COLUMN ativo TINYINT(1) NOT NULL DEFAULT 1")
+    def delete_company(self, company_id: int) -> None:
+        self._delete_by_id("cad_empresas", company_id)
 
-        if not column_exists("produtos_empresa", "codigo_origem"):
-            cursor.execute("ALTER TABLE produtos_empresa ADD COLUMN codigo_origem VARCHAR(80) NOT NULL DEFAULT ''")
+    def list_suppliers(self, company_id: int) -> list[dict[str, object]]:
+        connection = self.get_connection()
+        try:
+            cursor = connection.cursor(dictionary=True)
+            cursor.execute(
+                """
+                SELECT id, empresa_id, nome, cnpj, inscricao_estadual, codigo, observacao
+                FROM cad_fornecedores
+                WHERE empresa_id = %s
+                ORDER BY nome
+                """,
+                (company_id,),
+            )
+            return [dict(row) for row in cursor.fetchall()]
+        finally:
+            connection.close()
 
-        if not column_exists("produtos_empresa", "ativo"):
-            cursor.execute("ALTER TABLE produtos_empresa ADD COLUMN ativo TINYINT(1) NOT NULL DEFAULT 1")
+    def list_suppliers_catalog(self, environment: str) -> list[dict[str, object]]:
+        connection = self.get_connection()
+        try:
+            cursor = connection.cursor(dictionary=True)
+            cursor.execute(
+                """
+                SELECT
+                    f.id,
+                    f.empresa_id,
+                    e.nome AS empresa_nome,
+                    f.nome,
+                    f.cnpj,
+                    f.inscricao_estadual,
+                    f.codigo,
+                    f.observacao
+                FROM cad_fornecedores f
+                INNER JOIN cad_empresas e ON e.id = f.empresa_id
+                WHERE e.ambiente = %s
+                ORDER BY e.nome, f.nome
+                """,
+                (environment,),
+            )
+            return [dict(row) for row in cursor.fetchall()]
+        finally:
+            connection.close()
 
-        if not column_exists("produtos_empresa", "cst_icms_entrada"):
-            cursor.execute("ALTER TABLE produtos_empresa ADD COLUMN cst_icms_entrada VARCHAR(4) NOT NULL DEFAULT ''")
-        if not column_exists("produtos_empresa", "cst_icms_saida"):
-            cursor.execute("ALTER TABLE produtos_empresa ADD COLUMN cst_icms_saida VARCHAR(4) NOT NULL DEFAULT ''")
-        if not column_exists("produtos_empresa", "cst_pis_entrada"):
-            cursor.execute("ALTER TABLE produtos_empresa ADD COLUMN cst_pis_entrada VARCHAR(4) NOT NULL DEFAULT ''")
-        if not column_exists("produtos_empresa", "cst_pis_saida"):
-            cursor.execute("ALTER TABLE produtos_empresa ADD COLUMN cst_pis_saida VARCHAR(4) NOT NULL DEFAULT ''")
-        if not column_exists("produtos_empresa", "cst_cofins_entrada"):
-            cursor.execute("ALTER TABLE produtos_empresa ADD COLUMN cst_cofins_entrada VARCHAR(4) NOT NULL DEFAULT ''")
-        if not column_exists("produtos_empresa", "cst_cofins_saida"):
-            cursor.execute("ALTER TABLE produtos_empresa ADD COLUMN cst_cofins_saida VARCHAR(4) NOT NULL DEFAULT ''")
-        if not column_exists("produtos_empresa", "tipo_produto"):
-            cursor.execute("ALTER TABLE produtos_empresa ADD COLUMN tipo_produto VARCHAR(30) NOT NULL DEFAULT 'Revenda'")
+    def save_supplier(self, company_id: int, data: dict[str, object]) -> int:
+        supplier_id = int(data.get("id") or 0)
+        values = (
+            company_id,
+            str(data.get("nome", "")).strip(),
+            self._only_digits(data.get("cnpj", "")),
+            str(data.get("inscricao_estadual", "")).strip(),
+            str(data.get("codigo", "")).strip(),
+            str(data.get("observacao", "")).strip(),
+        )
+        if not company_id:
+            raise ValueError("Selecione uma empresa para cadastrar fornecedor.")
+        if not values[1]:
+            raise ValueError("Informe o nome do fornecedor.")
+        connection = self.get_connection()
+        try:
+            cursor = connection.cursor()
+            if supplier_id:
+                cursor.execute(
+                    """
+                    UPDATE cad_fornecedores
+                    SET empresa_id = %s, nome = %s, cnpj = %s, inscricao_estadual = %s, codigo = %s, observacao = %s
+                    WHERE id = %s
+                    """,
+                    (*values, supplier_id),
+                )
+                connection.commit()
+                return supplier_id
+            cursor.execute(
+                """
+                INSERT INTO cad_fornecedores (empresa_id, nome, cnpj, inscricao_estadual, codigo, observacao)
+                VALUES (%s, %s, %s, %s, %s, %s)
+                """,
+                values,
+            )
+            connection.commit()
+            return int(cursor.lastrowid)
+        finally:
+            connection.close()
 
-        normalize_existing_icms_cst_values()
+    def delete_supplier(self, supplier_id: int) -> None:
+        self._delete_by_id("cad_fornecedores", supplier_id)
 
-    def find_company_id_by_tax_id(self, tax_id: str) -> int | None:
-        normalized_tax_id = "".join(char for char in str(tax_id or "") if char.isdigit())
-        if not normalized_tax_id:
-            return None
+    def list_product_types(self, environment: str) -> list[dict[str, object]]:
+        connection = self.get_connection()
+        try:
+            cursor = connection.cursor(dictionary=True)
+            cursor.execute(
+                """
+                SELECT id, ambiente, nome, descricao
+                FROM cad_tipos_produto
+                WHERE ambiente = %s
+                ORDER BY nome
+                """,
+                (environment,),
+            )
+            return [dict(row) for row in cursor.fetchall()]
+        finally:
+            connection.close()
+
+    def list_product_types_catalog(self, environment: str) -> list[dict[str, object]]:
+        return self.list_product_types(environment)
+
+    def save_product_type(self, environment: str, data: dict[str, object]) -> int:
+        type_id = int(data.get("id") or 0)
+        values = (environment, str(data.get("nome", "")).strip(), str(data.get("descricao", "")).strip())
+        if not values[1]:
+            raise ValueError("Informe o nome do tipo de produto.")
+        connection = self.get_connection()
+        try:
+            cursor = connection.cursor()
+            if type_id:
+                cursor.execute(
+                    """
+                    UPDATE cad_tipos_produto
+                    SET ambiente = %s, nome = %s, descricao = %s
+                    WHERE id = %s
+                    """,
+                    (*values, type_id),
+                )
+                connection.commit()
+                return type_id
+            cursor.execute(
+                "INSERT INTO cad_tipos_produto (ambiente, nome, descricao) VALUES (%s, %s, %s)",
+                values,
+            )
+            connection.commit()
+            return int(cursor.lastrowid)
+        finally:
+            connection.close()
+
+    def delete_product_type(self, type_id: int) -> None:
+        self._delete_by_id("cad_tipos_produto", type_id)
+
+    def ensure_product_type(self, environment: str, type_name: str, description: str = "") -> int:
+        normalized_name = str(type_name or "").strip()
+        if not normalized_name:
+            raise ValueError("Nome da classificacao do produto obrigatorio.")
         connection = self.get_connection()
         try:
             cursor = connection.cursor()
             cursor.execute(
                 """
                 SELECT id
-                FROM empresas
-                WHERE REPLACE(REPLACE(REPLACE(cnpj, '.', ''), '/', ''), '-', '') = %s
+                FROM cad_tipos_produto
+                WHERE ambiente = %s
+                  AND UPPER(nome) = UPPER(%s)
                 LIMIT 1
                 """,
-                (normalized_tax_id,),
+                (environment, normalized_name),
+            )
+            row = cursor.fetchone()
+            if row:
+                return int(row[0])
+            cursor.execute(
+                """
+                INSERT INTO cad_tipos_produto (ambiente, nome, descricao)
+                VALUES (%s, %s, %s)
+                """,
+                (environment, normalized_name, str(description or "").strip()),
+            )
+            connection.commit()
+            return int(cursor.lastrowid)
+        finally:
+            connection.close()
+
+    def ensure_company(self, environment: str, name: str, cnpj: str = "", inscricao_estadual: str = "") -> int:
+        normalized_name = str(name or "").strip()
+        normalized_cnpj = self._only_digits(cnpj)
+        normalized_ie = str(inscricao_estadual or "").strip()
+        if not normalized_name:
+            raise ValueError("Nome da empresa obrigatorio.")
+        connection = self.get_connection()
+        try:
+            cursor = connection.cursor()
+            if normalized_cnpj:
+                cursor.execute(
+                    """
+                    SELECT id
+                    FROM cad_empresas
+                    WHERE ambiente = %s
+                      AND cnpj = %s
+                    LIMIT 1
+                    """,
+                    (environment, normalized_cnpj),
+                )
+                row = cursor.fetchone()
+                if row:
+                    if normalized_ie:
+                        cursor.execute(
+                            """
+                            UPDATE cad_empresas
+                            SET inscricao_estadual = CASE
+                                WHEN TRIM(COALESCE(inscricao_estadual, '')) = '' THEN %s
+                                ELSE inscricao_estadual
+                            END
+                            WHERE id = %s
+                            """,
+                            (normalized_ie, int(row[0])),
+                        )
+                        connection.commit()
+                    return int(row[0])
+            cursor.execute(
+                """
+                SELECT id
+                FROM cad_empresas
+                WHERE ambiente = %s
+                  AND UPPER(nome) = UPPER(%s)
+                LIMIT 1
+                """,
+                (environment, normalized_name),
+            )
+            row = cursor.fetchone()
+            if row:
+                if normalized_ie:
+                    cursor.execute(
+                        """
+                        UPDATE cad_empresas
+                        SET inscricao_estadual = CASE
+                            WHEN TRIM(COALESCE(inscricao_estadual, '')) = '' THEN %s
+                            ELSE inscricao_estadual
+                        END
+                        WHERE id = %s
+                        """,
+                        (normalized_ie, int(row[0])),
+                    )
+                    connection.commit()
+                return int(row[0])
+            cursor.execute(
+                """
+                INSERT INTO cad_empresas (ambiente, nome, cnpj, inscricao_estadual, observacao)
+                VALUES (%s, %s, %s, %s, 'Importado de XML')
+                """,
+                (environment, normalized_name, normalized_cnpj, normalized_ie),
+            )
+            connection.commit()
+            return int(cursor.lastrowid)
+        finally:
+            connection.close()
+
+    def find_company_id(self, environment: str, name: str, cnpj: str = "") -> int | None:
+        normalized_name = str(name or "").strip()
+        normalized_cnpj = self._only_digits(cnpj)
+        connection = self.get_connection()
+        try:
+            cursor = connection.cursor()
+            if normalized_cnpj:
+                cursor.execute(
+                    """
+                    SELECT id
+                    FROM cad_empresas
+                    WHERE ambiente = %s
+                      AND cnpj = %s
+                    LIMIT 1
+                    """,
+                    (environment, normalized_cnpj),
+                )
+                row = cursor.fetchone()
+                if row:
+                    return int(row[0])
+            cursor.execute(
+                """
+                SELECT id
+                FROM cad_empresas
+                WHERE ambiente = %s
+                  AND UPPER(nome) = UPPER(%s)
+                LIMIT 1
+                """,
+                (environment, normalized_name),
             )
             row = cursor.fetchone()
             return int(row[0]) if row else None
+        finally:
+            connection.close()
+
+    def ensure_supplier(self, company_id: int, name: str, cnpj: str = "", inscricao_estadual: str = "") -> int:
+        normalized_name = str(name or "").strip()
+        normalized_cnpj = self._only_digits(cnpj)
+        normalized_ie = str(inscricao_estadual or "").strip()
+        if not company_id:
+            raise ValueError("Empresa obrigatoria para fornecedor.")
+        if not normalized_name:
+            raise ValueError("Nome do fornecedor obrigatorio.")
+        connection = self.get_connection()
+        try:
+            cursor = connection.cursor()
+            if normalized_cnpj:
+                cursor.execute(
+                    """
+                    SELECT id
+                    FROM cad_fornecedores
+                    WHERE empresa_id = %s
+                      AND cnpj = %s
+                    LIMIT 1
+                    """,
+                    (company_id, normalized_cnpj),
+                )
+                row = cursor.fetchone()
+                if row:
+                    supplier_id = int(row[0])
+                    cursor.execute(
+                        """
+                        UPDATE cad_fornecedores
+                        SET nome = %s,
+                            cnpj = CASE WHEN %s <> '' THEN %s ELSE cnpj END,
+                            inscricao_estadual = CASE WHEN %s <> '' THEN %s ELSE inscricao_estadual END
+                        WHERE id = %s
+                        """,
+                        (normalized_name, normalized_cnpj, normalized_cnpj, normalized_ie, normalized_ie, supplier_id),
+                    )
+                    connection.commit()
+                    return supplier_id
+            cursor.execute(
+                """
+                SELECT id
+                FROM cad_fornecedores
+                WHERE empresa_id = %s
+                  AND UPPER(nome) = UPPER(%s)
+                LIMIT 1
+                """,
+                (company_id, normalized_name),
+            )
+            row = cursor.fetchone()
+            if row:
+                supplier_id = int(row[0])
+                cursor.execute(
+                    """
+                    UPDATE cad_fornecedores
+                    SET cnpj = CASE WHEN %s <> '' THEN %s ELSE cnpj END,
+                        inscricao_estadual = CASE WHEN %s <> '' THEN %s ELSE inscricao_estadual END
+                    WHERE id = %s
+                    """,
+                    (normalized_cnpj, normalized_cnpj, normalized_ie, normalized_ie, supplier_id),
+                )
+                connection.commit()
+                return supplier_id
+            cursor.execute(
+                """
+                INSERT INTO cad_fornecedores (empresa_id, nome, cnpj, inscricao_estadual, codigo, observacao)
+                VALUES (%s, %s, %s, %s, '', 'Importado de XML')
+                """,
+                (company_id, normalized_name, normalized_cnpj, normalized_ie),
+            )
+            connection.commit()
+            return int(cursor.lastrowid)
+        finally:
+            connection.close()
+
+    def find_supplier_id(self, company_id: int, name: str, cnpj: str = "") -> int | None:
+        normalized_name = str(name or "").strip()
+        normalized_cnpj = self._only_digits(cnpj)
+        connection = self.get_connection()
+        try:
+            cursor = connection.cursor()
+            if normalized_cnpj:
+                cursor.execute(
+                    """
+                    SELECT id
+                    FROM cad_fornecedores
+                    WHERE empresa_id = %s
+                      AND cnpj = %s
+                    LIMIT 1
+                    """,
+                    (company_id, normalized_cnpj),
+                )
+                row = cursor.fetchone()
+                if row:
+                    return int(row[0])
+            cursor.execute(
+                """
+                SELECT id
+                FROM cad_fornecedores
+                WHERE empresa_id = %s
+                  AND UPPER(nome) = UPPER(%s)
+                LIMIT 1
+                """,
+                (company_id, normalized_name),
+            )
+            row = cursor.fetchone()
+            return int(row[0]) if row else None
+        finally:
+            connection.close()
+
+    def list_supplier_products(self, supplier_id: int) -> list[dict[str, object]]:
+        connection = self.get_connection()
+        try:
+            cursor = connection.cursor(dictionary=True)
+            cursor.execute(
+                """
+                SELECT
+                    p.*,
+                    COALESCE(t.nome, '') AS tipo_produto
+                FROM cad_produtos_fornecedor p
+                LEFT JOIN cad_tipos_produto t ON t.id = p.tipo_produto_id
+                WHERE p.fornecedor_id = %s
+                ORDER BY p.codigo_fornecedor, p.descricao
+                """,
+                (supplier_id,),
+            )
+            return [dict(row) for row in cursor.fetchall()]
+        finally:
+            connection.close()
+
+    def list_products_catalog(self, environment: str) -> list[dict[str, object]]:
+        connection = self.get_connection()
+        try:
+            cursor = connection.cursor(dictionary=True)
+            cursor.execute(
+                """
+                SELECT
+                    p.*,
+                    f.empresa_id,
+                    f.nome AS fornecedor_nome,
+                    e.nome AS empresa_nome,
+                    COALESCE(t.nome, '') AS tipo_produto
+                FROM cad_produtos_fornecedor p
+                INNER JOIN cad_fornecedores f ON f.id = p.fornecedor_id
+                INNER JOIN cad_empresas e ON e.id = f.empresa_id
+                LEFT JOIN cad_tipos_produto t ON t.id = p.tipo_produto_id
+                WHERE e.ambiente = %s
+                ORDER BY e.nome, f.nome, p.codigo_fornecedor, p.descricao
+                """,
+                (environment,),
+            )
+            return [dict(row) for row in cursor.fetchall()]
+        finally:
+            connection.close()
+
+    def save_supplier_product(self, supplier_id: int, data: dict[str, object]) -> int:
+        product_id = int(data.get("id") or 0)
+        if not supplier_id:
+            raise ValueError("Selecione um fornecedor para cadastrar produto.")
+        if not str(data.get("codigo_fornecedor", "")).strip():
+            raise ValueError("Informe o codigo do produto do fornecedor.")
+        cst_pis = self._trim_text(data.get("cst_pis", data.get("cst_pis_cofins", "")), 4)
+        cst_cofins = self._trim_text(data.get("cst_cofins", data.get("cst_pis_cofins", "")), 4)
+        aliquota_pis = self._decimal_text(data.get("aliquota_pis", data.get("aliquota_pis_cofins", "")))
+        aliquota_cofins = self._decimal_text(data.get("aliquota_cofins", data.get("aliquota_pis_cofins", "")))
+        cst_pis_cofins = self._trim_text(data.get("cst_pis_cofins", f"{cst_pis}/{cst_cofins}".strip("/")), 20)
+        aliquota_pis_cofins = self._decimal_text(data.get("aliquota_pis_cofins", aliquota_pis))
+
+        normalized_code = self._trim_text(data.get("codigo_fornecedor", ""), 80)
+        normalized_ean = self._only_digits(data.get("ean", ""))[:30]
+        values = (
+            supplier_id,
+            int(data.get("tipo_produto_id") or 0) or None,
+            normalized_code,
+            self._trim_text(data.get("codigo_empresa", ""), 80),
+            self._trim_text(data.get("descricao", ""), 255),
+            normalized_ean,
+            normalized_ean or None,
+            self._only_digits(data.get("ncm", ""))[:20],
+            self._only_digits(data.get("cest", ""))[:20],
+            self._trim_text(data.get("c_classtrib", ""), 20),
+            self._trim_text(data.get("c_benef", ""), 20),
+            self._trim_text(data.get("cst_icms", ""), 4),
+            self._decimal_text(data.get("aliquota_icms", "")),
+            self._trim_text(data.get("cst_ipi", ""), 4),
+            self._decimal_text(data.get("aliquota_ipi", "")),
+            cst_pis_cofins,
+            aliquota_pis_cofins,
+            cst_pis,
+            cst_cofins,
+            aliquota_pis,
+            aliquota_cofins,
+            self._decimal_text(data.get("bc_st", "")),
+            self._decimal_text(data.get("mva", "")),
+            self._decimal_text(data.get("valor_icms_st", "")),
+            self._decimal_text(data.get("aliquota_icms_st", "")),
+        )
+        connection = self.get_connection()
+        try:
+            cursor = connection.cursor()
+            cursor.execute(
+                """
+                SELECT id
+                FROM cad_produtos_fornecedor
+                WHERE fornecedor_id = %s
+                  AND codigo_fornecedor = %s
+                  AND id <> %s
+                LIMIT 1
+                """,
+                (supplier_id, normalized_code, product_id),
+            )
+            if cursor.fetchone() is not None:
+                raise ValueError("Ja existe produto com o mesmo Codigo do Fornecedor para este fornecedor.")
+            if normalized_ean:
+                cursor.execute(
+                    """
+                    SELECT id
+                    FROM cad_produtos_fornecedor
+                    WHERE fornecedor_id = %s
+                      AND ean = %s
+                      AND id <> %s
+                    LIMIT 1
+                    """,
+                    (supplier_id, normalized_ean, product_id),
+                )
+                if cursor.fetchone() is not None:
+                    raise ValueError("Ja existe produto com o mesmo EAN para este fornecedor.")
+            if product_id:
+                cursor.execute(
+                    """
+                    UPDATE cad_produtos_fornecedor
+                    SET fornecedor_id = %s, tipo_produto_id = %s, codigo_fornecedor = %s, codigo_empresa = %s,
+                        descricao = %s, ean = %s, ean_unico = %s, ncm = %s, cest = %s, c_classtrib = %s, c_benef = %s,
+                        cst_icms = %s, aliquota_icms = %s, cst_ipi = %s, aliquota_ipi = %s,
+                        cst_pis_cofins = %s, aliquota_pis_cofins = %s, cst_pis = %s, cst_cofins = %s,
+                        aliquota_pis = %s, aliquota_cofins = %s, bc_st = %s, mva = %s,
+                        valor_icms_st = %s, aliquota_icms_st = %s
+                    WHERE id = %s
+                    """,
+                    (*values, product_id),
+                )
+                connection.commit()
+                return product_id
+            cursor.execute(
+                """
+                INSERT INTO cad_produtos_fornecedor (
+                    fornecedor_id, tipo_produto_id, codigo_fornecedor, codigo_empresa, descricao, ean, ean_unico, ncm, cest,
+                    c_classtrib, c_benef, cst_icms, aliquota_icms, cst_ipi, aliquota_ipi,
+                    cst_pis_cofins, aliquota_pis_cofins, cst_pis, cst_cofins, aliquota_pis, aliquota_cofins,
+                    bc_st, mva, valor_icms_st, aliquota_icms_st
+                ) VALUES (
+                    %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+                    %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+                    %s, %s, %s, %s
+                )
+                """,
+                values,
+            )
+            connection.commit()
+            return int(cursor.lastrowid)
+        finally:
+            connection.close()
+
+    def delete_supplier_product(self, product_id: int) -> None:
+        self._delete_by_id("cad_produtos_fornecedor", product_id)
+
+    def upsert_supplier_product_by_ean(
+        self,
+        supplier_id: int,
+        product_data: dict[str, object],
+        allow_update_existing: bool = True,
+    ) -> tuple[int, bool]:
+        normalized_ean = self._only_digits(product_data.get("ean", ""))
+        normalized_code = str(product_data.get("codigo_fornecedor", "")).strip()
+        row = None
+        existing_type_id: int | None = None
+        connection = self.get_connection()
+        try:
+            cursor = connection.cursor()
+            if normalized_ean:
+                cursor.execute(
+                    """
+                    SELECT id, tipo_produto_id
+                    FROM cad_produtos_fornecedor
+                    WHERE fornecedor_id = %s
+                      AND ean = %s
+                    LIMIT 1
+                    """,
+                    (supplier_id, normalized_ean),
+                )
+                row = cursor.fetchone()
+            if row is None and normalized_code:
+                cursor.execute(
+                    """
+                    SELECT id, tipo_produto_id
+                    FROM cad_produtos_fornecedor
+                    WHERE fornecedor_id = %s
+                      AND codigo_fornecedor = %s
+                    LIMIT 1
+                    """,
+                    (supplier_id, normalized_code),
+                )
+                row = cursor.fetchone()
+            if row:
+                existing_type_id = int(row[1]) if row[1] is not None else None
+        finally:
+            connection.close()
+
+        if row and not allow_update_existing:
+            return int(row[0]), True
+
+        payload = dict(product_data)
+        payload["id"] = int(row[0]) if row else 0
+        payload["ean"] = normalized_ean
+        payload["codigo_fornecedor"] = normalized_code
+        if row and existing_type_id is not None:
+            payload["tipo_produto_id"] = existing_type_id
+        product_id = self.save_supplier_product(supplier_id, payload)
+        return product_id, bool(row)
+
+    def supplier_product_exists(self, supplier_id: int, ean: str, code: str) -> bool:
+        normalized_ean = self._only_digits(ean)
+        normalized_code = str(code or "").strip()
+        connection = self.get_connection()
+        try:
+            cursor = connection.cursor()
+            if normalized_ean:
+                cursor.execute(
+                    """
+                    SELECT 1
+                    FROM cad_produtos_fornecedor
+                    WHERE fornecedor_id = %s
+                      AND ean = %s
+                    LIMIT 1
+                    """,
+                    (supplier_id, normalized_ean),
+                )
+                if cursor.fetchone() is not None:
+                    return True
+            if normalized_code:
+                cursor.execute(
+                    """
+                    SELECT 1
+                    FROM cad_produtos_fornecedor
+                    WHERE fornecedor_id = %s
+                      AND codigo_fornecedor = %s
+                    LIMIT 1
+                    """,
+                    (supplier_id, normalized_code),
+                )
+                return cursor.fetchone() is not None
+            return False
+        finally:
+            connection.close()
+
+    def find_supplier_product_by_key(self, supplier_id: int, ean: str, code: str) -> dict[str, object] | None:
+        normalized_ean = self._only_digits(ean)
+        normalized_code = str(code or "").strip()
+        connection = self.get_connection()
+        try:
+            cursor = connection.cursor(dictionary=True)
+            if normalized_ean:
+                cursor.execute(
+                    """
+                    SELECT *
+                    FROM cad_produtos_fornecedor
+                    WHERE fornecedor_id = %s
+                      AND ean = %s
+                    LIMIT 1
+                    """,
+                    (supplier_id, normalized_ean),
+                )
+                row = cursor.fetchone()
+                if row:
+                    return dict(row)
+            if normalized_code:
+                cursor.execute(
+                    """
+                    SELECT *
+                    FROM cad_produtos_fornecedor
+                    WHERE fornecedor_id = %s
+                      AND codigo_fornecedor = %s
+                    LIMIT 1
+                    """,
+                    (supplier_id, normalized_code),
+                )
+                row = cursor.fetchone()
+                if row:
+                    return dict(row)
+            return None
+        finally:
+            connection.close()
+
+    def find_supplier_product_duplicates(self, supplier_id: int, ean: str, code: str) -> list[dict[str, object]]:
+        normalized_ean = self._only_digits(ean)
+        normalized_code = str(code or "").strip()
+        connection = self.get_connection()
+        try:
+            cursor = connection.cursor(dictionary=True)
+            if normalized_ean:
+                cursor.execute(
+                    """
+                    SELECT id, fornecedor_id, codigo_fornecedor, ean, descricao
+                    FROM cad_produtos_fornecedor
+                    WHERE fornecedor_id = %s
+                      AND ean = %s
+                    ORDER BY id
+                    """,
+                    (supplier_id, normalized_ean),
+                )
+                rows = [dict(row) for row in cursor.fetchall()]
+                if len(rows) > 1:
+                    return rows
+            if normalized_code:
+                cursor.execute(
+                    """
+                    SELECT id, fornecedor_id, codigo_fornecedor, ean, descricao
+                    FROM cad_produtos_fornecedor
+                    WHERE fornecedor_id = %s
+                      AND codigo_fornecedor = %s
+                    ORDER BY id
+                    """,
+                    (supplier_id, normalized_code),
+                )
+                rows = [dict(row) for row in cursor.fetchall()]
+                if len(rows) > 1:
+                    return rows
+            return []
+        finally:
+            connection.close()
+
+    def backup_supplier_products_by_ids(self, product_ids: list[int]) -> Path:
+        from datetime import datetime
+        if not product_ids:
+            raise ValueError("Nenhum produto selecionado para backup.")
+        connection = self.get_connection()
+        try:
+            cursor = connection.cursor(dictionary=True)
+            placeholders = ", ".join(["%s"] * len(product_ids))
+            cursor.execute(
+                f"SELECT * FROM cad_produtos_fornecedor WHERE id IN ({placeholders}) ORDER BY id",
+                tuple(product_ids),
+            )
+            rows = [dict(row) for row in cursor.fetchall()]
+        finally:
+            connection.close()
+        backup_dir = self.config_path.parent / "backups"
+        backup_dir.mkdir(parents=True, exist_ok=True)
+        output = backup_dir / f"backup_cad_produtos_fornecedor_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
+        output.write_text(json.dumps(rows, ensure_ascii=False, indent=2, default=str), encoding="utf-8")
+        return output
+
+    def list_supplier_product_duplicates_catalog(self, environment: str) -> list[dict[str, object]]:
+        connection = self.get_connection()
+        try:
+            cursor = connection.cursor(dictionary=True)
+            rows: list[dict[str, object]] = []
+            cursor.execute(
+                """
+                SELECT
+                    p.id,
+                    p.fornecedor_id,
+                    e.nome AS empresa_nome,
+                    f.nome AS fornecedor_nome,
+                    p.codigo_fornecedor,
+                    p.ean,
+                    p.descricao,
+                    'codigo_fornecedor' AS duplicate_type
+                FROM cad_produtos_fornecedor p
+                INNER JOIN cad_fornecedores f ON f.id = p.fornecedor_id
+                INNER JOIN cad_empresas e ON e.id = f.empresa_id
+                INNER JOIN (
+                    SELECT fornecedor_id, codigo_fornecedor
+                    FROM cad_produtos_fornecedor
+                    WHERE TRIM(COALESCE(codigo_fornecedor, '')) <> ''
+                    GROUP BY fornecedor_id, codigo_fornecedor
+                    HAVING COUNT(*) > 1
+                ) d ON d.fornecedor_id = p.fornecedor_id AND d.codigo_fornecedor = p.codigo_fornecedor
+                WHERE e.ambiente = %s
+                ORDER BY e.nome, f.nome, p.codigo_fornecedor, p.id
+                """,
+                (environment,),
+            )
+            rows.extend([dict(row) for row in cursor.fetchall()])
+            cursor.execute(
+                """
+                SELECT
+                    p.id,
+                    p.fornecedor_id,
+                    e.nome AS empresa_nome,
+                    f.nome AS fornecedor_nome,
+                    p.codigo_fornecedor,
+                    p.ean,
+                    p.descricao,
+                    'ean' AS duplicate_type
+                FROM cad_produtos_fornecedor p
+                INNER JOIN cad_fornecedores f ON f.id = p.fornecedor_id
+                INNER JOIN cad_empresas e ON e.id = f.empresa_id
+                INNER JOIN (
+                    SELECT fornecedor_id, ean
+                    FROM cad_produtos_fornecedor
+                    WHERE TRIM(COALESCE(ean, '')) <> ''
+                    GROUP BY fornecedor_id, ean
+                    HAVING COUNT(*) > 1
+                ) d ON d.fornecedor_id = p.fornecedor_id AND d.ean = p.ean
+                WHERE e.ambiente = %s
+                ORDER BY e.nome, f.nome, p.ean, p.id
+                """,
+                (environment,),
+            )
+            rows.extend([dict(row) for row in cursor.fetchall()])
+            return rows
+        finally:
+            connection.close()
+
+    def delete_supplier_products_by_ids(self, product_ids: list[int]) -> int:
+        if not product_ids:
+            return 0
+        connection = self.get_connection()
+        try:
+            cursor = connection.cursor()
+            placeholders = ", ".join(["%s"] * len(product_ids))
+            cursor.execute(f"DELETE FROM cad_produtos_fornecedor WHERE id IN ({placeholders})", tuple(int(pid) for pid in product_ids))
+            connection.commit()
+            return int(cursor.rowcount or 0)
+        finally:
+            connection.close()
+
+    def _delete_by_id(self, table_name: str, row_id: int) -> None:
+        allowed_tables = {"cad_empresas", "cad_fornecedores", "cad_tipos_produto", "cad_produtos_fornecedor"}
+        if table_name not in allowed_tables:
+            raise ValueError("Tabela nao permitida para exclusao.")
+        connection = self.get_connection()
+        try:
+            cursor = connection.cursor()
+            cursor.execute(f"DELETE FROM {table_name} WHERE id = %s", (int(row_id),))
+            connection.commit()
         finally:
             connection.close()
 
@@ -220,48 +1145,71 @@ class MysqlCadastroRepository:
         finally:
             connection.close()
 
-    def ensure_sped_profile(self, environment: str, profile_name: str, company_id: int | None = None, description: str = "") -> int:
+    def ensure_sped_profile(
+        self,
+        environment: str,
+        profile_name: str,
+        description: str = "",
+        company_name: str = "",
+        company_tax_id: str = "",
+    ) -> int:
         normalized_name = str(profile_name or "").strip() or "SPED sem perfil"
+        normalized_company_name = str(company_name or "").strip()
+        normalized_company_tax_id = "".join(char for char in str(company_tax_id or "") if char.isdigit())
         connection = self.get_connection()
         try:
             cursor = connection.cursor()
-            cursor.execute(
-                """
-                SELECT id
-                FROM sped_perfis
-                WHERE ambiente = %s
-                  AND nome = %s
-                LIMIT 1
-                """,
-                (environment, normalized_name),
-            )
+            if normalized_company_tax_id:
+                cursor.execute(
+                    """
+                    SELECT id
+                    FROM sped_perfis
+                    WHERE ambiente = %s
+                      AND empresa_cnpj_sped = %s
+                    LIMIT 1
+                    """,
+                    (environment, normalized_company_tax_id),
+                )
+            else:
+                cursor.execute(
+                    """
+                    SELECT id
+                    FROM sped_perfis
+                    WHERE ambiente = %s
+                      AND nome = %s
+                    LIMIT 1
+                    """,
+                    (environment, normalized_name),
+                )
             row = cursor.fetchone()
             if row:
                 profile_id = int(row[0])
-                if company_id:
-                    cursor.execute(
-                        """
-                        UPDATE sped_perfis
-                        SET empresa_id = COALESCE(empresa_id, %s),
-                            ativo = 1
-                        WHERE id = %s
-                        """,
-                        (company_id, profile_id),
-                    )
-                    connection.commit()
+                cursor.execute(
+                    """
+                    UPDATE sped_perfis
+                    SET nome = CASE WHEN nome = '' THEN %s ELSE nome END,
+                        empresa_nome_sped = CASE WHEN empresa_nome_sped = '' THEN %s ELSE empresa_nome_sped END,
+                        empresa_cnpj_sped = CASE WHEN empresa_cnpj_sped = '' THEN %s ELSE empresa_cnpj_sped END,
+                        ativo = 1
+                    WHERE id = %s
+                    """,
+                    (normalized_name, normalized_company_name, normalized_company_tax_id, profile_id),
+                )
+                connection.commit()
                 return profile_id
 
             cursor.execute(
                 """
                 INSERT INTO sped_perfis (
-                    empresa_id,
                     ambiente,
                     nome,
+                    empresa_nome_sped,
+                    empresa_cnpj_sped,
                     descricao,
                     ativo
-                ) VALUES (%s, %s, %s, %s, 1)
+                ) VALUES (%s, %s, %s, %s, %s, 1)
                 """,
-                (company_id, environment, normalized_name, description),
+                (environment, normalized_name, normalized_company_name, normalized_company_tax_id, description),
             )
             connection.commit()
             return int(cursor.lastrowid)
@@ -290,11 +1238,11 @@ class MysqlCadastroRepository:
                 """
                 INSERT INTO sped_arquivos (
                     perfil_id,
-                    empresa_id,
                     ambiente,
                     tipo_sped,
                     periodo_inicio,
                     periodo_fim,
+                    empresa_nome_sped,
                     empresa_cnpj,
                     arquivo_nome_original,
                     arquivo_hash_sha256,
@@ -306,11 +1254,11 @@ class MysqlCadastroRepository:
                 """,
                 (
                     data.get("perfil_id"),
-                    data.get("empresa_id"),
                     data["ambiente"],
                     data.get("tipo_sped", ""),
                     data.get("periodo_inicio") or None,
                     data.get("periodo_fim") or None,
+                    data.get("empresa_nome_sped", ""),
                     data.get("empresa_cnpj", ""),
                     data["arquivo_nome_original"],
                     data["arquivo_hash_sha256"],
@@ -527,21 +1475,21 @@ class MysqlCadastroRepository:
                 SELECT
                     p.id,
                     p.nome,
+                    p.empresa_nome_sped,
+                    p.empresa_cnpj_sped,
                     p.ambiente,
-                    p.empresa_id,
-                    COALESCE(e.razao_social, '') AS empresa_nome,
-                    COALESCE(e.cnpj, '') AS empresa_cnpj,
+                    p.empresa_nome_sped AS empresa_nome,
+                    p.empresa_cnpj_sped AS empresa_cnpj,
                     COUNT(a.id) AS total_arquivos,
                     COALESCE(SUM(a.arquivo_tamanho), 0) AS total_bytes,
                     MIN(a.periodo_inicio) AS periodo_inicio,
                     MAX(a.periodo_fim) AS periodo_fim,
                     MAX(a.created_at) AS ultimo_arquivo_em
                 FROM sped_perfis p
-                LEFT JOIN empresas e ON e.id = p.empresa_id
                 LEFT JOIN sped_arquivos a ON a.perfil_id = p.id
                 WHERE p.ambiente = %s
                   AND p.ativo = 1
-                GROUP BY p.id, p.nome, p.ambiente, p.empresa_id, e.razao_social, e.cnpj
+                GROUP BY p.id, p.nome, p.empresa_nome_sped, p.empresa_cnpj_sped, p.ambiente
                 ORDER BY ultimo_arquivo_em DESC, p.nome
                 """,
                 (environment,),
@@ -565,12 +1513,12 @@ class MysqlCadastroRepository:
                     a.id,
                     a.perfil_id,
                     COALESCE(p.nome, '') AS perfil_nome,
-                    a.empresa_id,
-                    COALESCE(e.razao_social, '') AS empresa_nome,
+                    a.empresa_nome_sped AS empresa_nome,
                     a.ambiente,
                     a.tipo_sped,
                     a.periodo_inicio,
                     a.periodo_fim,
+                    a.empresa_nome_sped,
                     a.empresa_cnpj,
                     a.arquivo_nome_original,
                     a.arquivo_hash_sha256,
@@ -584,7 +1532,6 @@ class MysqlCadastroRepository:
                     COALESCE(c190.total, 0) AS total_c190
                 FROM sped_arquivos a
                 LEFT JOIN sped_perfis p ON p.id = a.perfil_id
-                LEFT JOIN empresas e ON e.id = a.empresa_id
                 LEFT JOIN (
                     SELECT sped_arquivo_id, COUNT(*) AS total
                     FROM sped_produtos_0200
@@ -611,286 +1558,6 @@ class MysqlCadastroRepository:
                 tuple(params),
             )
             return [dict(row) for row in cursor.fetchall()]
-        finally:
-            connection.close()
-
-    def list_companies(self) -> list[dict[str, object]]:
-        columns = self.get_table_columns("empresas")
-        has_ativo = "ativo" in columns
-        connection = self.get_connection()
-        try:
-            cursor = connection.cursor(dictionary=True)
-            cursor.execute(
-                f"""
-                SELECT
-                    id,
-                    razao_social,
-                    nome_fantasia,
-                    cnpj,
-                    inscricao_estadual
-                    {", ativo" if has_ativo else ""}
-                FROM empresas
-                ORDER BY razao_social, id
-                """
-            )
-            rows = list(cursor.fetchall())
-            if not has_ativo:
-                for row in rows:
-                    row["ativo"] = 1
-            return rows
-        finally:
-            connection.close()
-
-    def save_company(self, company_id: int | None, data: dict[str, str]) -> int:
-        connection = self.get_connection()
-        try:
-            cursor = connection.cursor()
-            values = (
-                data["razao_social"],
-                data["nome_fantasia"],
-                data["cnpj"],
-                data["inscricao_estadual"],
-                int(data.get("ativo", 1)),
-            )
-            if company_id:
-                cursor.execute(
-                    """
-                    UPDATE empresas
-                    SET razao_social = %s,
-                        nome_fantasia = %s,
-                        cnpj = %s,
-                        inscricao_estadual = %s,
-                        ativo = %s
-                    WHERE id = %s
-                    """,
-                    (*values, company_id),
-                )
-                saved_id = company_id
-            else:
-                cursor.execute(
-                    """
-                    INSERT INTO empresas (
-                        razao_social,
-                        nome_fantasia,
-                        cnpj,
-                        inscricao_estadual,
-                        ativo
-                    ) VALUES (%s, %s, %s, %s, %s)
-                    """,
-                    values,
-                )
-                saved_id = int(cursor.lastrowid)
-            connection.commit()
-            return saved_id
-        finally:
-            connection.close()
-
-    def deactivate_company(self, company_id: int) -> None:
-        connection = self.get_connection()
-        try:
-            cursor = connection.cursor()
-            cursor.execute("UPDATE empresas SET ativo = 0 WHERE id = %s", (company_id,))
-            connection.commit()
-        finally:
-            connection.close()
-
-    def reactivate_company(self, company_id: int) -> None:
-        connection = self.get_connection()
-        try:
-            cursor = connection.cursor()
-            cursor.execute("UPDATE empresas SET ativo = 1 WHERE id = %s", (company_id,))
-            connection.commit()
-        finally:
-            connection.close()
-
-    def list_products(self, company_id: int) -> list[dict[str, object]]:
-        columns = self.get_table_columns("produtos_empresa")
-        has_codigo_origem = "codigo_origem" in columns
-        has_ativo = "ativo" in columns
-        has_cst_icms_entrada = "cst_icms_entrada" in columns
-        has_cst_icms_saida = "cst_icms_saida" in columns
-        has_cst_pis_entrada = "cst_pis_entrada" in columns
-        has_cst_pis_saida = "cst_pis_saida" in columns
-        has_cst_cofins_entrada = "cst_cofins_entrada" in columns
-        has_cst_cofins_saida = "cst_cofins_saida" in columns
-        has_tipo_produto = "tipo_produto" in columns
-        connection = self.get_connection()
-        try:
-            cursor = connection.cursor(dictionary=True)
-            cursor.execute(
-                f"""
-                SELECT
-                    id,
-                    codigo,
-                    {"codigo_origem," if has_codigo_origem else "'' AS codigo_origem,"}
-                    descricao,
-                    ncm,
-                    unidade,
-                    {"cst_icms_entrada," if has_cst_icms_entrada else "'' AS cst_icms_entrada,"}
-                    {"cst_icms_saida," if has_cst_icms_saida else "'' AS cst_icms_saida,"}
-                    {"cst_pis_entrada," if has_cst_pis_entrada else "'' AS cst_pis_entrada,"}
-                    {"cst_pis_saida," if has_cst_pis_saida else "'' AS cst_pis_saida,"}
-                    {"cst_cofins_entrada," if has_cst_cofins_entrada else "'' AS cst_cofins_entrada,"}
-                    {"cst_cofins_saida," if has_cst_cofins_saida else "'' AS cst_cofins_saida,"}
-                    {"tipo_produto," if has_tipo_produto else "'Revenda' AS tipo_produto,"}
-                    icms_entrada,
-                    icms_saida,
-                    pis_entrada,
-                    pis_saida,
-                    cofins_entrada,
-                    cofins_saida
-                    {", ativo" if has_ativo else ""}
-                FROM produtos_empresa
-                WHERE empresa_id = %s
-                ORDER BY descricao, codigo, id
-                """,
-                (company_id,),
-            )
-            rows = list(cursor.fetchall())
-            for row in rows:
-                if not has_codigo_origem:
-                    row["codigo_origem"] = ""
-                row["cst_icms_entrada"] = normalize_tax_code(row.get("cst_icms_entrada", "") if has_cst_icms_entrada else "", 3)
-                row["cst_icms_saida"] = normalize_tax_code(row.get("cst_icms_saida", "") if has_cst_icms_saida else "", 3)
-                row["cst_pis_entrada"] = normalize_tax_code(row.get("cst_pis_entrada", "") if has_cst_pis_entrada else "", 2)
-                row["cst_pis_saida"] = normalize_tax_code(row.get("cst_pis_saida", "") if has_cst_pis_saida else "", 2)
-                row["cst_cofins_entrada"] = normalize_tax_code(row.get("cst_cofins_entrada", "") if has_cst_cofins_entrada else "", 2)
-                row["cst_cofins_saida"] = normalize_tax_code(row.get("cst_cofins_saida", "") if has_cst_cofins_saida else "", 2)
-                if not has_tipo_produto:
-                    row["tipo_produto"] = "Revenda"
-                if not has_ativo:
-                    row["ativo"] = 1
-            return rows
-        finally:
-            connection.close()
-
-    def save_product(self, product_id: int | None, company_id: int, data: dict[str, object]) -> int:
-        connection = self.get_connection()
-        try:
-            cursor = connection.cursor()
-            normalized_cst_icms_entrada = normalize_tax_code(data.get("cst_icms_entrada", ""), 3)
-            normalized_cst_icms_saida = normalize_tax_code(data.get("cst_icms_saida", ""), 3)
-            values = (
-                company_id,
-                data["codigo_origem"],
-                data["descricao"],
-                data["ncm"],
-                data["unidade"],
-                normalized_cst_icms_entrada,
-                normalized_cst_icms_saida,
-                data["cst_pis_entrada"],
-                data["cst_pis_saida"],
-                data["cst_cofins_entrada"],
-                data["cst_cofins_saida"],
-                data["tipo_produto"],
-                data["icms_entrada"],
-                data["icms_saida"],
-                data["pis_entrada"],
-                data["pis_saida"],
-                data["cofins_entrada"],
-                data["cofins_saida"],
-                int(data.get("ativo", 1)),
-            )
-            if product_id:
-                cursor.execute(
-                    """
-                    UPDATE produtos_empresa
-                    SET empresa_id = %s,
-                        codigo_origem = %s,
-                        descricao = %s,
-                        ncm = %s,
-                        unidade = %s,
-                        cst_icms_entrada = %s,
-                        cst_icms_saida = %s,
-                        cst_pis_entrada = %s,
-                        cst_pis_saida = %s,
-                        cst_cofins_entrada = %s,
-                        cst_cofins_saida = %s,
-                        tipo_produto = %s,
-                        icms_entrada = %s,
-                        icms_saida = %s,
-                        pis_entrada = %s,
-                        pis_saida = %s,
-                        cofins_entrada = %s,
-                        cofins_saida = %s,
-                        ativo = %s
-                    WHERE id = %s
-                    """,
-                    (*values, product_id),
-                )
-                saved_id = product_id
-            else:
-                temporary_code = f"TMP-{company_id}-{dt.datetime.now().strftime('%Y%m%d%H%M%S%f')}"
-                cursor.execute(
-                    """
-                    INSERT INTO produtos_empresa (
-                        empresa_id,
-                        codigo,
-                        codigo_origem,
-                        descricao,
-                        ncm,
-                        unidade,
-                        cst_icms_entrada,
-                        cst_icms_saida,
-                        cst_pis_entrada,
-                        cst_pis_saida,
-                        cst_cofins_entrada,
-                        cst_cofins_saida,
-                        tipo_produto,
-                        icms_entrada,
-                        icms_saida,
-                        pis_entrada,
-                        pis_saida,
-                        cofins_entrada,
-                        cofins_saida,
-                        ativo
-                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-                    """,
-                    (
-                        company_id,
-                        temporary_code,
-                        data["codigo_origem"],
-                        data["descricao"],
-                        data["ncm"],
-                        data["unidade"],
-                        normalized_cst_icms_entrada,
-                        normalized_cst_icms_saida,
-                        data["cst_pis_entrada"],
-                        data["cst_pis_saida"],
-                        data["cst_cofins_entrada"],
-                        data["cst_cofins_saida"],
-                        data["tipo_produto"],
-                        data["icms_entrada"],
-                        data["icms_saida"],
-                        data["pis_entrada"],
-                        data["pis_saida"],
-                        data["cofins_entrada"],
-                        data["cofins_saida"],
-                        int(data.get("ativo", 1)),
-                    ),
-                )
-                saved_id = int(cursor.lastrowid)
-                cursor.execute("UPDATE produtos_empresa SET codigo = %s WHERE id = %s", (str(saved_id), saved_id))
-            connection.commit()
-            return saved_id
-        finally:
-            connection.close()
-
-    def deactivate_product(self, product_id: int) -> None:
-        connection = self.get_connection()
-        try:
-            cursor = connection.cursor()
-            cursor.execute("UPDATE produtos_empresa SET ativo = 0 WHERE id = %s", (product_id,))
-            connection.commit()
-        finally:
-            connection.close()
-
-    def reactivate_product(self, product_id: int) -> None:
-        connection = self.get_connection()
-        try:
-            cursor = connection.cursor()
-            cursor.execute("UPDATE produtos_empresa SET ativo = 1 WHERE id = %s", (product_id,))
-            connection.commit()
         finally:
             connection.close()
 

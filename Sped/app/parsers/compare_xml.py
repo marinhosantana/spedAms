@@ -186,9 +186,12 @@ def parse_compare_nfse_file(root: ET.Element, file_path: Path) -> CompareXmlInvo
     item = CompareXmlItem(
         item_no="1",
         code="32156",
+        ean="",
         description="PRESTACAO DE SERVICOS ADMINISTRATIVOS",
         unit="UN",
         ncm="39181000",
+        cest="",
+        c_classtrib="",
         cfop="1933",
         quantity=1.0,
         value=total_doc,
@@ -221,6 +224,7 @@ def parse_compare_nfse_file(root: ET.Element, file_path: Path) -> CompareXmlInvo
         issuer_city_code=compare_nfse_text(root, ".//nfse:infDPS/nfse:cLocEmi"),
         recipient_cnpj=taker_cnpj,
         recipient_name=taker_name,
+        recipient_ie="",
         total_value=compare_format_float(total_doc),
         date_doc=compare_date_to_sped(issue_datetime),
         date_entry=compare_date_to_sped(issue_datetime),
@@ -278,9 +282,15 @@ def parse_compare_xml_file(file_path: Path) -> CompareXmlInvoice | None:
             CompareXmlItem(
                 item_no=compare_clean(det.attrib.get("nItem", "")),
                 code=compare_sanitize(compare_xml_text(det, "./nfe:prod/nfe:cProd")),
+                ean=compare_sanitize(compare_xml_text(det, "./nfe:prod/nfe:cEAN")),
                 description=compare_sanitize(compare_xml_text(det, "./nfe:prod/nfe:xProd")),
                 unit=compare_sanitize(compare_xml_text(det, "./nfe:prod/nfe:uCom")),
                 ncm=compare_sanitize(compare_xml_text(det, "./nfe:prod/nfe:NCM")),
+                cest=compare_sanitize(compare_xml_text(det, "./nfe:prod/nfe:CEST")),
+                c_classtrib=compare_sanitize(
+                    compare_xml_text(det, "./nfe:prod/nfe:cClassTrib")
+                    or compare_xml_text(det, "./nfe:imposto/nfe:IBSCBS/nfe:cClassTrib")
+                ),
                 cfop=compare_sanitize(compare_xml_text(det, "./nfe:prod/nfe:CFOP")),
                 quantity=compare_to_float(compare_xml_text(det, "./nfe:prod/nfe:qCom")),
                 value=compare_to_float(compare_xml_text(det, "./nfe:prod/nfe:vProd")),
@@ -319,6 +329,7 @@ def parse_compare_xml_file(file_path: Path) -> CompareXmlInvoice | None:
         issuer_city_code=compare_xml_text(root, ".//nfe:emit/nfe:enderEmit/nfe:cMun"),
         recipient_cnpj=compare_xml_text(root, ".//nfe:dest/nfe:CNPJ") or compare_xml_text(root, ".//nfe:dest/nfe:CPF"),
         recipient_name=compare_xml_text(root, ".//nfe:dest/nfe:xNome"),
+        recipient_ie=compare_xml_text(root, ".//nfe:dest/nfe:IE"),
         total_value=compare_format_float(total_doc),
         date_doc=compare_date_to_sped(issue_datetime),
         date_entry=compare_date_to_sped(entry_datetime) or compare_date_to_sped(issue_datetime),
