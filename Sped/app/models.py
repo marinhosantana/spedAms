@@ -18,9 +18,12 @@ class ProductRecord:
 class CompareXmlItem:
     item_no: str
     code: str
+    ean: str
     description: str
     unit: str
     ncm: str
+    cest: str
+    c_classtrib: str
     cfop: str
     quantity: float
     value: float
@@ -55,6 +58,7 @@ class CompareXmlInvoice:
     issuer_city_code: str
     recipient_cnpj: str
     recipient_name: str
+    recipient_ie: str
     total_value: str
     date_doc: str
     date_entry: str
