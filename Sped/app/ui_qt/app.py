@@ -4808,6 +4808,8 @@ class QtSpedApp(QMainWindow):
         total_row[label_index] = "Total"
         has_total = False
         for column_index, header in enumerate(headers):
+            if not self.popup_header_should_totalize(header):
+                continue
             if not self.popup_header_is_decimal(header) and not self.popup_header_is_integer(header):
                 continue
             values = [row[column_index] for row in rows if column_index < len(row)]
@@ -4819,6 +4821,13 @@ class QtSpedApp(QMainWindow):
                 total_row[column_index] = sum((self.decimal_value(value) for value in values), Decimal("0"))
             has_total = True
         return total_row if has_total else []
+
+    def popup_header_should_totalize(self, header: str) -> bool:
+        normalized = self.normalize_search_text(header)
+        # Aliquotas e percentuais nao devem ser somados na linha de total.
+        if "aliq" in normalized or "aliquota" in normalized or "%" in str(header):
+            return False
+        return True
 
     def slugify_filename(self, value: str) -> str:
         normalized = self.normalize_search_text(value).replace(" ", "_")
@@ -6641,6 +6650,29 @@ class QtSpedApp(QMainWindow):
             lambda item: self.open_invoice_mirror_from_documents_popup_selection(item.row(), table, grouped_launch_details, operation_type)
         )
         layout.addWidget(table, 1)
+
+        total_docs = len(rows)
+        total_items = sum(int(row[8] or 0) for row in rows)
+        total_operation = sum((self.decimal_value(row[9]) for row in rows), Decimal("0"))
+        total_base = sum((self.decimal_value(row[10]) for row in rows), Decimal("0"))
+        total_icms = sum((self.decimal_value(row[11]) for row in rows), Decimal("0"))
+        ratio = (total_base * Decimal("100") / total_operation).quantize(Decimal("0.01")) if total_operation > 0 else Decimal("0.00")
+
+        cards_grid = QGridLayout()
+        cards_grid.setHorizontalSpacing(8)
+        cards = (
+            ("Documentos", str(total_docs)),
+            ("Itens", str(total_items)),
+            ("Valor Operacao", self.format_number(total_operation)),
+            ("Base ICMS", self.format_number(total_base)),
+            ("% Base/Oper", self.format_number(ratio)),
+            ("Valor ICMS", self.format_number(total_icms)),
+        )
+        for index, (label, value) in enumerate(cards):
+            card, value_label = self.create_metric_card_with_label(label, value)
+            value_label.setText(value)
+            cards_grid.addWidget(card, 0, index)
+        layout.addLayout(cards_grid)
 
         actions = QHBoxLayout()
         actions.addWidget(
