@@ -4938,9 +4938,24 @@ class QtSpedApp(QMainWindow):
             self.enable_table_sorting(table)
             layout.addWidget(table, 1)
         if footer_text:
-            footer = QLabel(footer_text)
-            footer.setObjectName("popupFooter")
-            layout.addWidget(footer)
+            metric_pairs: list[tuple[str, str]] = []
+            for raw_part in [part.strip() for part in footer_text.split("    ") if part.strip()]:
+                if ":" not in raw_part:
+                    continue
+                label, value = raw_part.split(":", 1)
+                metric_pairs.append((label.strip(), value.strip()))
+            if metric_pairs:
+                cards_grid = QGridLayout()
+                cards_grid.setHorizontalSpacing(8)
+                for index, (label, value) in enumerate(metric_pairs):
+                    card, value_label = self.create_metric_card_with_label(label, value)
+                    value_label.setText(value)
+                    cards_grid.addWidget(card, 0, index)
+                layout.addLayout(cards_grid)
+            else:
+                footer = QLabel(footer_text)
+                footer.setObjectName("popupFooter")
+                layout.addWidget(footer)
         actions = QHBoxLayout()
         actions.addWidget(self.create_button("Exportar Excel", lambda: self.export_multi_popup_dataset(title, non_empty_sections, "xlsx")))
         actions.addWidget(self.create_button("Exportar CSV", lambda: self.export_multi_popup_dataset(title, non_empty_sections, "csv")))
@@ -5376,58 +5391,7 @@ class QtSpedApp(QMainWindow):
         dialog.exec()
 
     def open_entry_docs_popup(self) -> None:
-        grouped: dict[tuple[str, str, str], dict[str, object]] = {}
-        for detail in self.get_filtered_launch_details():
-            key = (
-                str(detail.get("period", "")),
-                str(detail.get("document_number", "")),
-                str(detail.get("document_key", "")),
-            )
-            bucket = grouped.setdefault(
-                key,
-                {
-                    "period": detail.get("period", ""),
-                    "document_date": detail.get("document_date", detail.get("date", "")),
-                    "document_number": detail.get("document_number", ""),
-                    "document_series": detail.get("document_series", ""),
-                    "document_model": detail.get("document_model", ""),
-                    "participant_name": detail.get("participant_name", ""),
-                    "participant_tax_id": detail.get("participant_tax_id", ""),
-                    "document_key": detail.get("document_key", ""),
-                    "items": 0,
-                    "sale_value": Decimal("0"),
-                    "base_icms": Decimal("0"),
-                    "icms_value": Decimal("0"),
-                },
-            )
-            bucket["items"] = int(bucket["items"]) + 1
-            bucket["sale_value"] = Decimal(bucket["sale_value"]) + self.decimal_value(self.first_row_value(detail, "sale_value", "total_operation_value", "operation_value"))
-            bucket["base_icms"] = Decimal(bucket["base_icms"]) + self.decimal_value(detail.get("base_icms"))
-            bucket["icms_value"] = Decimal(bucket["icms_value"]) + self.decimal_value(detail.get("icms_value"))
-        rows = [
-            (
-                row["period"],
-                row["document_date"],
-                row["document_number"],
-                row["document_series"],
-                row["document_model"],
-                row["participant_name"],
-                row["participant_tax_id"],
-                row["document_key"],
-                row["items"],
-                row["sale_value"],
-                row["base_icms"],
-                row["icms_value"],
-            )
-            for row in sorted(grouped.values(), key=lambda item: (str(item["period"]), str(item["document_date"]), str(item["document_number"])))
-        ]
-        self.open_table_popup(
-            "Espelho de Documentos Fiscais - Entradas",
-            ["Periodo", "Data", "Documento", "Serie", "Modelo", "Fornecedor", "CPF/CNPJ", "Chave", "Itens", "Valor Operacao", "Base ICMS", "Valor ICMS"],
-            rows,
-            1380,
-            720,
-        )
+        self.open_documents_popup_for_details(self.get_filtered_launch_details(), "Entradas")
 
     def open_sale_operation_summary_popup(self) -> None:
         self.open_operation_summary_for_rows(self.filtered_sale_rows, "Saida", "Resumo Saidas")
@@ -6668,13 +6632,27 @@ class QtSpedApp(QMainWindow):
                 table.setItem(row_index, column_index, item)
         self.apply_popup_column_widths(table, headers)
         self.enable_table_sorting(table)
+        sort_state = {"column": -1, "order": Qt.AscendingOrder}
+        table.horizontalHeader().sectionClicked.connect(
+            lambda column: self.sort_table_by_column(table, column, sort_state)
+        )
         operation_type = "Entrada" if "Entrada" in caption else "Saida"
+        table.cellDoubleClicked.connect(
+            lambda row, _column: self.open_invoice_mirror_from_documents_popup_selection(row, table, grouped_launch_details, operation_type)
+        )
         table.itemDoubleClicked.connect(
-            lambda item: self.open_invoice_mirror_from_documents_popup_row(item, table, grouped_launch_details, operation_type)
+            lambda item: self.open_invoice_mirror_from_documents_popup_selection(item.row(), table, grouped_launch_details, operation_type)
         )
         layout.addWidget(table, 1)
 
         actions = QHBoxLayout()
+        actions.addWidget(
+            self.create_button(
+                "Abrir Espelho",
+                lambda: self.open_invoice_mirror_from_documents_popup_selected_row(table, grouped_launch_details, operation_type),
+                primary=True,
+            )
+        )
         actions.addWidget(self.create_button("Exportar Excel", lambda: self.export_popup_dataset(f"Espelho de Documentos Fiscais - {caption}", headers, [list(row) for row in rows], "xlsx")))
         actions.addWidget(self.create_button("Exportar CSV", lambda: self.export_popup_dataset(f"Espelho de Documentos Fiscais - {caption}", headers, [list(row) for row in rows], "csv")))
         actions.addStretch()
@@ -6682,14 +6660,26 @@ class QtSpedApp(QMainWindow):
         layout.addLayout(actions)
         dialog.exec()
 
-    def open_invoice_mirror_from_documents_popup_row(
+    def sort_table_by_column(self, table: QTableWidget, column: int, sort_state: dict[str, object]) -> None:
+        previous_column = int(sort_state.get("column", -1))
+        previous_order = sort_state.get("order", Qt.AscendingOrder)
+        if column == previous_column:
+            order = Qt.DescendingOrder if previous_order == Qt.AscendingOrder else Qt.AscendingOrder
+        else:
+            order = Qt.AscendingOrder
+        table.sortItems(column, order)
+        sort_state["column"] = column
+        sort_state["order"] = order
+
+    def open_invoice_mirror_from_documents_popup_selection(
         self,
-        item: QTableWidgetItem,
+        row_index: int,
         table: QTableWidget,
         grouped_launch_details: dict[tuple[str, str, str], list[dict[str, object]]],
         operation_type: str,
     ) -> None:
-        row_index = item.row()
+        if row_index < 0 or row_index >= table.rowCount():
+            return
         document_item = table.item(row_index, 2)
         key_item = table.item(row_index, 7)
         selected_document = str(document_item.text()).strip() if document_item else ""
@@ -6702,5 +6692,99 @@ class QtSpedApp(QMainWindow):
                 selected_details = [detail for detail in detail_rows if isinstance(detail, dict)]
                 break
         if not selected_details:
+            QMessageBox.warning(self, "Espelho da Nota", "Nao foi possivel localizar os itens desta nota para abrir o espelho.")
             return
-        self.open_invoice_mirror_from_detail_row(item, selected_details[:1], operation_type)
+        self.open_invoice_mirror_from_note_details(selected_details, operation_type)
+
+    def open_invoice_mirror_from_documents_popup_selected_row(
+        self,
+        table: QTableWidget,
+        grouped_launch_details: dict[tuple[str, str, str], list[dict[str, object]]],
+        operation_type: str,
+    ) -> None:
+        selected_rows = table.selectionModel().selectedRows() if table.selectionModel() else []
+        if not selected_rows:
+            QMessageBox.warning(self, "Espelho da Nota", "Selecione uma linha para abrir o espelho da nota.")
+            return
+        self.open_invoice_mirror_from_documents_popup_selection(selected_rows[0].row(), table, grouped_launch_details, operation_type)
+
+    def open_invoice_mirror_from_note_details(self, invoice_details: list[dict[str, object]], operation_type: str) -> None:
+        if not invoice_details:
+            return
+        selected = invoice_details[0]
+        selected_document = str(selected.get("document_number", ""))
+        selected_key = str(selected.get("document_key", ""))
+        selected_item = str(selected.get("item_number", "")).strip()
+        selected_code = str(selected.get("code", "")).strip()
+        title = f"Espelho da Nota - {selected_document or selected_key}"
+        headers = ["Item", "Codigo", "Descricao", "NCM", "CEST", "CFOP", "CST", "Aliq ICMS", "Aliq Efetiva"]
+        rows: list[list[object]] = []
+        highlight_rows: set[int] = set()
+        for index, row in enumerate(
+            sorted(
+                invoice_details,
+                key=lambda current: (
+                    str(current.get("item_number", "")),
+                    str(current.get("code", "")),
+                ),
+            )
+        ):
+            operation_value = self.decimal_value(self.first_row_value(row, "sale_value", "total_operation_value", "operation_value"))
+            base_icms = self.decimal_value(row.get("base_icms"))
+            icms_value = self.decimal_value(row.get("icms_value"))
+            rows.append(
+                [
+                    row.get("item_number", ""),
+                    row.get("code", ""),
+                    row.get("description", ""),
+                    row.get("ncm", ""),
+                    row.get("cest", ""),
+                    row.get("cfop", ""),
+                    self.first_row_value(row, "cst_icms", "cst"),
+                    self.decimal_value(row.get("icms_rate")),
+                    compute_display_icms_rate(self.decimal_value(row.get("icms_rate")), operation_value, base_icms, icms_value),
+                ]
+            )
+            current_item = str(row.get("item_number", "")).strip()
+            current_code = str(row.get("code", "")).strip()
+            if (selected_item and current_item == selected_item) or (selected_code and current_code == selected_code):
+                highlight_rows.add(index)
+
+        total_quantity = Decimal("0")
+        total_operation = Decimal("0")
+        total_base = Decimal("0")
+        total_icms = Decimal("0")
+        for row in invoice_details:
+            total_quantity += self.decimal_value(row.get("quantity"))
+            total_operation += self.decimal_value(self.first_row_value(row, "sale_value", "total_operation_value", "operation_value"))
+            total_base += self.decimal_value(row.get("base_icms"))
+            total_icms += self.decimal_value(row.get("icms_value"))
+
+        note_header = {
+            "document_number": selected_document,
+            "document_key": selected_key,
+            "document_date": str(invoice_details[0].get("document_date", "")),
+            "document_series": str(invoice_details[0].get("document_series", "")),
+            "document_model": str(invoice_details[0].get("document_model", "")),
+            "participant_name": str(invoice_details[0].get("participant_name", "")),
+            "participant_tax_id": str(invoice_details[0].get("participant_tax_id", "")),
+            "participant_code": str(invoice_details[0].get("participant_code", "")),
+            "effective_rate": compute_display_icms_rate(
+                self.decimal_value(invoice_details[0].get("icms_rate")),
+                total_operation,
+                total_base,
+                total_icms,
+            ),
+            "items_count": len(rows),
+        }
+        self.open_invoice_mirror_popup_with_cards(
+            title,
+            headers,
+            rows,
+            total_quantity,
+            total_operation,
+            total_base,
+            total_icms,
+            note_header,
+            highlight_rows,
+        )
