@@ -6,6 +6,7 @@ from pathlib import Path
 
 
 VALID_APPLICATION_ENVIRONMENTS = {"dev", "prod"}
+DEFAULT_APPLICATION_ENVIRONMENT = "prod"
 ENVIRONMENT_ALIASES = {
     "dev": "dev",
     "desenvolvimento": "dev",
@@ -18,12 +19,8 @@ ENVIRONMENT_ALIASES = {
 
 
 def get_application_environment() -> str:
-    raw_environment = os.environ.get("SPED_ENV", "").strip().lower()
-    if raw_environment:
-        return ENVIRONMENT_ALIASES.get(raw_environment, "dev")
-    if getattr(sys, "frozen", False):
-        return "prod"
-    return "dev"
+    # Ambiente unificado: a aplicacao opera sempre em producao.
+    return DEFAULT_APPLICATION_ENVIRONMENT
 
 
 def get_application_base_dir(source_file: str) -> Path:
@@ -41,7 +38,7 @@ def get_project_root_dir(base_dir: Path) -> Path:
 def get_environment_config_path(base_dir: Path, filename_prefix: str, environment: str | None = None) -> Path:
     selected_environment = environment or get_application_environment()
     if selected_environment not in VALID_APPLICATION_ENVIRONMENTS:
-        selected_environment = "dev"
+        selected_environment = DEFAULT_APPLICATION_ENVIRONMENT
     return base_dir / f"{filename_prefix}.{selected_environment}.json"
 
 

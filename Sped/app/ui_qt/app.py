@@ -155,17 +155,14 @@ class QtSpedApp(QMainWindow):
         self.archive_profile_rows: dict[int, dict[str, object]] = {}
         self.archive_file_rows: dict[int, dict[str, object]] = {}
 
-        self.setWindowTitle(f"Revisor de SPED Qt [{self.environment.upper()}]")
+        self.setWindowTitle("Revisor de SPED Qt")
         self.resize(1360, 820)
         self.apply_styles()
         self.build_shell()
         self.show_page(0, "Dashboard")
 
     def get_mysql_default_config(self) -> dict[str, str]:
-        config = dict(MYSQL_DEFAULT_CONFIG)
-        if self.environment == "dev":
-            config["database"] = "sped_icms_dev"
-        return config
+        return dict(MYSQL_DEFAULT_CONFIG)
 
     def apply_styles(self) -> None:
         self.setStyleSheet(
@@ -474,11 +471,8 @@ class QtSpedApp(QMainWindow):
         header = QHBoxLayout()
         self.page_title = QLabel("")
         self.page_title.setObjectName("pageTitle")
-        env_label = QLabel(f"Ambiente: {self.environment.upper()}")
-        env_label.setObjectName("muted")
         header.addWidget(self.page_title)
         header.addStretch()
-        header.addWidget(env_label)
         content_layout.addLayout(header)
 
         self.stack = QStackedWidget()
