@@ -599,10 +599,26 @@ class QtSpedApp(QMainWindow):
                 self.refresh_current_catalog_page()
             if title == "Limpeza Duplicados":
                 self.refresh_duplicates_cleanup_page()
+            if title == "Consulta Saidas":
+                self.sync_sale_page_with_entry_cache()
             self.statusBar().showMessage(f"{title} carregada.")
         finally:
             QApplication.restoreOverrideCursor()
             self.setEnabled(True)
+
+    def sync_sale_page_with_entry_cache(self) -> None:
+        entry_sped = self.sped_input.text().strip() if hasattr(self, "sped_input") else ""
+        entry_xml = self.xml_input.text().strip() if hasattr(self, "xml_input") else ""
+        sale_sped = self.sale_sped_input.text().strip() if hasattr(self, "sale_sped_input") else ""
+        sale_xml = self.sale_xml_input.text().strip() if hasattr(self, "sale_xml_input") else ""
+
+        if entry_sped and not sale_sped:
+            self.sale_sped_input.setText(entry_sped)
+        if entry_xml and not sale_xml:
+            self.sale_xml_input.setText(entry_xml)
+
+        if self.sale_rows:
+            self.refresh_sale_table()
 
     def toggle_sidebar(self) -> None:
         self.set_sidebar_collapsed(self.sidebar_content.isVisible())
@@ -3377,8 +3393,11 @@ class QtSpedApp(QMainWindow):
             # para permitir apuracao completa (credito + debito) na mesma tela.
             self.sale_rows = list(sale_rows)
             self.rebuild_period_checks(list(period_labels))
-            if not getattr(self, "filtered_sale_rows", []):
-                self.rebuild_sale_period_checks(list(sale_period_labels))
+            self.rebuild_sale_period_checks(list(sale_period_labels))
+            if hasattr(self, "sale_sped_input"):
+                self.sale_sped_input.setText(self.sped_input.text())
+            if hasattr(self, "sale_xml_input"):
+                self.sale_xml_input.setText(self.xml_input.text())
             self.refresh_entry_table()
             self.statusBar().showMessage(
                 f"Entradas processadas: {len(rows)} linha(s), {len(period_labels)} periodo(s). "
@@ -3395,11 +3414,21 @@ class QtSpedApp(QMainWindow):
             QApplication.setOverrideCursor(Qt.WaitCursor)
             sped_paths = parse_selected_paths(self.sale_sped_input.text())
             xml_sources = parse_selected_paths(self.sale_xml_input.text())
+            entry_period_labels, entry_rows = build_entry_period_comparison_rows(sped_paths, xml_sources)
             period_labels, rows = build_sale_period_comparison_rows(sped_paths, xml_sources)
+            self.entry_rows = list(entry_rows)
             self.sale_rows = list(rows)
+            self.rebuild_period_checks(list(entry_period_labels))
             self.rebuild_sale_period_checks(list(period_labels))
+            if hasattr(self, "sped_input"):
+                self.sped_input.setText(self.sale_sped_input.text())
+            if hasattr(self, "xml_input"):
+                self.xml_input.setText(self.sale_xml_input.text())
             self.refresh_sale_table()
-            self.statusBar().showMessage(f"Saidas processadas: {len(rows)} linha(s), {len(period_labels)} periodo(s). {dt.datetime.now().strftime('%H:%M:%S')}")
+            self.statusBar().showMessage(
+                f"Saidas processadas: {len(rows)} linha(s), {len(period_labels)} periodo(s). "
+                f"Entradas sincronizadas: {len(entry_rows)} linha(s). {dt.datetime.now().strftime('%H:%M:%S')}"
+            )
         except Exception as exc:
             QMessageBox.critical(self, "SPED Qt", str(exc))
             self.statusBar().showMessage(f"Falha no processamento: {exc}")
@@ -5358,8 +5387,9 @@ class QtSpedApp(QMainWindow):
         table.setVerticalScrollMode(QAbstractItemView.ScrollPerPixel)
         table.setWordWrap(False)
         table.verticalHeader().setVisible(False)
-        table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
-        table.horizontalHeader().setStretchLastSection(True)
+        table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeToContents)
+        table.horizontalHeader().setStretchLastSection(False)
+        table.horizontalHeader().setMinimumSectionSize(70)
         for row_index, row in enumerate(rows):
             for column_index, value in enumerate(row):
                 item = QTableWidgetItem(str(value))
@@ -6139,6 +6169,7 @@ class QtSpedApp(QMainWindow):
                     item.setForeground(QColor(COLORS["text"]))
                     item.setTextAlignment(Qt.AlignCenter)
                     table.setItem(row_index, column_index, item)
+            table.resizeColumnsToContents()
 
             if detail_rows_by_index:
                 mapped_details: dict[int, list[dict[str, object]]] = {}
