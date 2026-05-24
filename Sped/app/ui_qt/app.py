@@ -37,11 +37,13 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from app.config import MYSQL_DEFAULT_CONFIG
+from app.config import APP_DEFAULT_CONFIG, MYSQL_DEFAULT_CONFIG
 from app.exporters.workbook_exporter import write_simple_csv_file, write_simple_excel_workbook
 from app.repositories.mysql_cadastro import MysqlCadastroRepository
 from app.parsers.sped_fiscal_parser import read_sped_file
+from app.parsers.sped_parser import get_field, normalize_document_key, normalize_sped_line
 from app.services.app_paths import get_application_base_dir, get_application_environment, get_environment_config_path, get_project_root_dir
+from app.services.app_config_service import load_app_config
 from app.services.catalog_xml_import import (
     CatalogImportPreviewRow,
     UPDATABLE_PRODUCT_FIELDS,
@@ -121,12 +123,87 @@ class CompareWorker(QObject):
             self.failed.emit(str(exc))
 
 
+class NFeKeyExtractWorker(QObject):
+    finished = Signal(list)
+    failed = Signal(str)
+    progress = Signal(int, int, str)
+
+    def __init__(self, sped_paths: list[Path]) -> None:
+        super().__init__()
+        self.sped_paths = sped_paths
+
+    def run(self) -> None:
+        try:
+            rows: list[dict[str, object]] = []
+            total_files = len(self.sped_paths)
+            for index, sped_path in enumerate(self.sped_paths, start=1):
+                self.progress.emit(index - 1, total_files, f"Lendo {sped_path.name}...")
+                rows.extend(extract_nfe_keys_from_sped_file(sped_path))
+            rows.sort(
+                key=lambda item: (
+                    str(item.get("file_name", "")).lower(),
+                    str(item.get("operation_type", "")),
+                    str(item.get("document_date", "")),
+                    str(item.get("document_number", "")),
+                    str(item.get("document_key", "")),
+                )
+            )
+            self.progress.emit(total_files, total_files, "Finalizando carga...")
+            self.finished.emit(rows)
+        except Exception as exc:
+            self.failed.emit(str(exc))
+
+
+def extract_nfe_keys_from_sped_file(sped_path: Path) -> list[dict[str, object]]:
+    rows: list[dict[str, object]] = []
+    participants: dict[str, dict[str, str]] = {}
+    with sped_path.open("r", encoding="latin-1") as sped_file:
+        for raw_line in sped_file:
+            if not raw_line.startswith("|"):
+                continue
+            fields = normalize_sped_line(raw_line)
+            register = get_field(fields, 1)
+            if register == "0150":
+                participant_code = get_field(fields, 2)
+                participants[participant_code] = {
+                    "name": get_field(fields, 3),
+                    "tax_id": get_field(fields, 5) or get_field(fields, 4),
+                }
+                continue
+            if register != "C100":
+                continue
+            ind_oper = get_field(fields, 2)
+            operation_type = "Entrada" if ind_oper == "0" else "Saida" if ind_oper == "1" else ""
+            document_key = normalize_document_key(get_field(fields, 9))
+            if len(document_key) != 44:
+                continue
+            participant_code = get_field(fields, 4)
+            participant_data = participants.get(participant_code, {})
+            rows.append(
+                {
+                    "file_name": sped_path.name,
+                    "operation_type": operation_type,
+                    "document_key": document_key,
+                    "document_number": get_field(fields, 8),
+                    "document_series": get_field(fields, 7),
+                    "document_date": get_field(fields, 10),
+                    "participant_name": participant_data.get("name", ""),
+                    "participant_tax_id": participant_data.get("tax_id", ""),
+                }
+            )
+    return rows
+
+
 class QtSpedApp(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
         self.environment = get_application_environment()
         self.base_dir = get_application_base_dir(__file__)
         self.project_root_dir = get_project_root_dir(self.base_dir)
+        self.app_config_path = get_environment_config_path(self.project_root_dir / "app" / "ui", "app_config", self.environment)
+        self.app_config = load_app_config(self.app_config_path, self.get_app_default_config())
+        self.app_window_title = str(self.app_config.get("window_title", self.get_app_default_config()["window_title"])).strip() or self.get_app_default_config()["window_title"]
+        self.app_home_title = str(self.app_config.get("home_title", self.get_app_default_config()["home_title"])).strip() or self.get_app_default_config()["home_title"]
         self.mysql_config_path = get_environment_config_path(self.project_root_dir / "app" / "ui", "mysql_config", self.environment)
         self.mysql_repo = MysqlCadastroRepository(
             self.mysql_config_path,
@@ -154,12 +231,17 @@ class QtSpedApp(QMainWindow):
         self.compare_stats: dict[str, object] = {}
         self.archive_profile_rows: dict[int, dict[str, object]] = {}
         self.archive_file_rows: dict[int, dict[str, object]] = {}
+        self.nfe_extract_rows: list[dict[str, object]] = []
+        self.nfe_extract_all_rows: list[dict[str, object]] = []
 
-        self.setWindowTitle("Revisor de SPED Qt")
+        self.setWindowTitle(self.app_window_title)
         self.resize(1360, 820)
         self.apply_styles()
         self.build_shell()
         self.show_page(0, "Dashboard")
+
+    def get_app_default_config(self) -> dict[str, str]:
+        return dict(APP_DEFAULT_CONFIG)
 
     def get_mysql_default_config(self) -> dict[str, str]:
         return dict(MYSQL_DEFAULT_CONFIG)
@@ -391,7 +473,7 @@ class QtSpedApp(QMainWindow):
         sidebar_content_layout = QVBoxLayout(self.sidebar_content)
         sidebar_content_layout.setContentsMargins(4, 8, 4, 8)
         sidebar_content_layout.setSpacing(4)
-        brand = QLabel("SPED Next")
+        brand = QLabel(self.app_home_title)
         brand.setObjectName("brand")
         sidebar_content_layout.addWidget(brand)
         sidebar_content_layout.addSpacing(12)
@@ -430,6 +512,7 @@ class QtSpedApp(QMainWindow):
                     ("SPEDs Arquivados", 8),
                     ("Importacao XML Cadastros", 13),
                     ("Configuracoes", 14),
+                    ("Extrair chave NFe", 16),
                 ),
             ),
         )
@@ -492,6 +575,7 @@ class QtSpedApp(QMainWindow):
         self.stack.addWidget(self.build_catalog_import_page())
         self.stack.addWidget(self.build_settings_page())
         self.stack.addWidget(self.build_duplicates_cleanup_page())
+        self.stack.addWidget(self.build_nfe_key_extract_page())
         content_layout.addWidget(self.stack, 1)
         shell.addWidget(content, 1)
         self.setCentralWidget(root)
@@ -1288,7 +1372,14 @@ class QtSpedApp(QMainWindow):
         table.setWordWrap(False)
         table.verticalHeader().setVisible(False)
         self.apply_table_column_policy(table)
+        self.enable_table_sorting(table)
         return table
+
+    def enable_table_sorting(self, table: QTableWidget) -> None:
+        table.setSortingEnabled(True)
+        header = table.horizontalHeader()
+        header.setSortIndicatorShown(True)
+        header.setSectionsClickable(True)
 
     def apply_table_column_policy(self, table: QTableWidget) -> None:
         short_labels = (
@@ -1415,6 +1506,7 @@ class QtSpedApp(QMainWindow):
                 ("operation", "Operacao"),
                 ("base", "Base ICMS"),
                 ("icms", "ICMS"),
+                ("base_ratio", "% Base/Oper"),
             )
         ):
             card, value_label = self.create_metric_card_with_label(label, "0")
@@ -1446,7 +1538,8 @@ class QtSpedApp(QMainWindow):
         self.entry_table.setColumnWidth(10, 105)
         self.entry_table.setColumnWidth(11, 65)
         self.entry_table.setColumnWidth(12, 75)
-        self.entry_table.itemDoubleClicked.connect(lambda _item: self.open_entry_docs_popup())
+        self.entry_table.itemDoubleClicked.connect(self.handle_entry_table_double_click)
+        self.enable_table_sorting(self.entry_table)
         layout.addWidget(self.entry_table, 1)
         self.bind_entry_live_filters()
         return page
@@ -1553,7 +1646,8 @@ class QtSpedApp(QMainWindow):
         self.sale_table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
         for column, width in enumerate((88, 72, 105, 330, 260, 90, 90, 85, 80, 85, 105, 65, 75)):
             self.sale_table.setColumnWidth(column, width)
-        self.sale_table.itemDoubleClicked.connect(lambda _item: self.open_sale_docs_popup())
+        self.sale_table.itemDoubleClicked.connect(self.handle_sale_table_double_click)
+        self.enable_table_sorting(self.sale_table)
         layout.addWidget(self.sale_table, 1)
         self.bind_sale_live_filters()
         return page
@@ -1701,6 +1795,7 @@ class QtSpedApp(QMainWindow):
         for column, width in enumerate((88, 72, 105, 330, 260, 90, 90, 85, 85, 105, 90, 105, 65, 75)):
             table.setColumnWidth(column, width)
         table.itemDoubleClicked.connect(lambda _item, op=operation_type: self.open_contrib_docs_popup(op))
+        self.enable_table_sorting(table)
         setattr(self, f"{prefix}_table", table)
         layout.addWidget(table, 1)
         self.bind_contrib_live_filters(operation_type)
@@ -1928,6 +2023,9 @@ class QtSpedApp(QMainWindow):
         layout.addWidget(box, row, column)
 
     def set_table_rows(self, table: QTableWidget, rows: list[list[object]]) -> None:
+        was_sorting_enabled = table.isSortingEnabled()
+        if was_sorting_enabled:
+            table.setSortingEnabled(False)
         header_labels = [
             (table.horizontalHeaderItem(index).text().strip().lower() if table.horizontalHeaderItem(index) else "")
             for index in range(table.columnCount())
@@ -1946,6 +2044,8 @@ class QtSpedApp(QMainWindow):
                 item.setTextAlignment(Qt.AlignCenter)
                 table.setItem(row_index, column_index, item)
         self.apply_table_column_policy(table)
+        if was_sorting_enabled:
+            table.setSortingEnabled(True)
 
     def format_cnpj(self, value: object) -> str:
         digits = self.digits_only(str(value or ""))
@@ -2598,6 +2698,65 @@ class QtSpedApp(QMainWindow):
         layout.addWidget(self.duplicates_table, 1)
         return page
 
+    def build_nfe_key_extract_page(self) -> QWidget:
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(12)
+
+        toolbar = self.create_panel()
+        toolbar_layout = QHBoxLayout(toolbar)
+        toolbar_layout.setContentsMargins(12, 10, 12, 10)
+        title = QLabel("Extrair chave NFe")
+        title.setObjectName("sectionTitle")
+        toolbar_layout.addWidget(title)
+        toolbar_layout.addStretch()
+        toolbar_layout.addWidget(self.create_button("Limpar", self.clear_nfe_key_extract_page))
+        toolbar_layout.addWidget(self.create_button("Exportar", self.export_nfe_key_extract_rows))
+        toolbar_layout.addWidget(self.create_button("Carregar", self.process_nfe_key_extract, primary=True))
+        layout.addWidget(toolbar)
+
+        setup = self.create_panel()
+        setup_layout = QGridLayout(setup)
+        setup_layout.setContentsMargins(12, 12, 12, 12)
+        setup_layout.setHorizontalSpacing(8)
+        setup_layout.setVerticalSpacing(8)
+        self.nfe_extract_sped_input = QLineEdit()
+        self.nfe_extract_sped_input.setPlaceholderText("Selecione um ou mais arquivos SPED (.txt, .sped, .efd)")
+        setup_layout.addWidget(QLabel("SPEDs"), 0, 0)
+        setup_layout.addWidget(self.nfe_extract_sped_input, 0, 1, 1, 5)
+        setup_layout.addWidget(self.create_button("Selecionar SPEDs", self.select_nfe_extract_sped_files), 1, 1)
+        setup_layout.addWidget(self.create_button("Selecionar Pasta", self.select_nfe_extract_sped_folder), 1, 2)
+        setup_layout.addWidget(self.create_button("Limpar SPEDs", lambda: self.nfe_extract_sped_input.clear()), 1, 3)
+        self.nfe_extract_scope_combo = QComboBox()
+        self.nfe_extract_scope_combo.addItems(["Todos", "Entrada", "Saida"])
+        self.nfe_extract_scope_combo.currentTextChanged.connect(self.apply_nfe_key_filter)
+        setup_layout.addWidget(QLabel("Tipo de documento"), 1, 4)
+        setup_layout.addWidget(self.nfe_extract_scope_combo, 1, 5)
+        setup_layout.addWidget(self.create_button("Carregar", self.process_nfe_key_extract, primary=True), 1, 6)
+        setup_layout.setColumnStretch(1, 1)
+        self.nfe_extract_status = QLabel("Selecione os SPEDs, escolha o tipo e clique em Carregar.")
+        self.nfe_extract_status.setObjectName("muted")
+        setup_layout.addWidget(self.nfe_extract_status, 2, 0, 1, 6)
+        self.nfe_extract_progress = QProgressBar()
+        self.nfe_extract_progress.setMinimum(0)
+        self.nfe_extract_progress.setMaximum(100)
+        self.nfe_extract_progress.setValue(0)
+        setup_layout.addWidget(self.nfe_extract_progress, 3, 0, 1, 6)
+        layout.addWidget(setup)
+
+        table_panel = self.create_panel()
+        table_layout = QVBoxLayout(table_panel)
+        table_layout.setContentsMargins(12, 12, 12, 12)
+        table_layout.setSpacing(8)
+        table_layout.addWidget(QLabel("Chaves carregadas"))
+        self.nfe_extract_table = self.create_data_table(
+            ["Operacao", "Chave NFe", "Documento", "Serie", "Data", "Participante", "CNPJ/CPF", "Arquivo SPED"]
+        )
+        table_layout.addWidget(self.nfe_extract_table, 1)
+        layout.addWidget(table_panel, 1)
+        return page
+
     def refresh_duplicates_cleanup_page(self) -> None:
         rows = self.mysql_repo.list_supplier_product_duplicates_catalog(self.environment)
         unique: dict[int, dict[str, object]] = {}
@@ -2660,6 +2819,34 @@ class QtSpedApp(QMainWindow):
         self.sped_input.setText(format_selected_paths(paths))
         if limit_exceeded:
             QMessageBox.warning(self, "SPED Qt", "A consulta aceita no maximo 12 SPEDs.")
+
+    def select_nfe_extract_sped_files(self) -> None:
+        files, _ = QFileDialog.getOpenFileNames(self, "Selecionar SPEDs Fiscais", "", "Arquivos SPED (*.txt *.sped *.efd);;Todos os arquivos (*.*)")
+        if not files:
+            return
+        current_paths = parse_selected_paths(self.nfe_extract_sped_input.text())
+        paths = append_unique_paths(current_paths, files)
+        self.nfe_extract_sped_input.setText(format_selected_paths(paths))
+
+    def select_nfe_extract_sped_folder(self) -> None:
+        directory = QFileDialog.getExistingDirectory(self, "Selecionar pasta com SPEDs")
+        if not directory:
+            return
+        folder_path = Path(directory)
+        files = sorted(
+            [
+                file_path
+                for file_path in folder_path.iterdir()
+                if file_path.is_file() and file_path.suffix.lower() in {".txt", ".sped", ".efd"}
+            ],
+            key=lambda path: path.name.lower(),
+        )
+        if not files:
+            QMessageBox.information(self, "Extrair chave NFe", "Nenhum arquivo SPED (.txt/.sped/.efd) foi encontrado na pasta selecionada.")
+            return
+        current_paths = parse_selected_paths(self.nfe_extract_sped_input.text())
+        paths = append_unique_paths(current_paths, files)
+        self.nfe_extract_sped_input.setText(format_selected_paths(paths))
 
     def select_xml_sources(self) -> None:
         files, _ = QFileDialog.getOpenFileNames(self, "Selecionar XMLs 55/65", "", "Arquivos XML (*.xml);;Todos os arquivos (*.*)")
@@ -3184,10 +3371,19 @@ class QtSpedApp(QMainWindow):
             sped_paths = parse_selected_paths(self.sped_input.text())
             xml_sources = parse_selected_paths(self.xml_input.text())
             period_labels, rows = build_entry_period_comparison_rows(sped_paths, xml_sources)
+            sale_period_labels, sale_rows = build_sale_period_comparison_rows(sped_paths, xml_sources)
             self.entry_rows = list(rows)
+            # Mantem os dados de saida sincronizados com o mesmo processamento de entradas,
+            # para permitir apuracao completa (credito + debito) na mesma tela.
+            self.sale_rows = list(sale_rows)
             self.rebuild_period_checks(list(period_labels))
+            if not getattr(self, "filtered_sale_rows", []):
+                self.rebuild_sale_period_checks(list(sale_period_labels))
             self.refresh_entry_table()
-            self.statusBar().showMessage(f"Entradas processadas: {len(rows)} linha(s), {len(period_labels)} periodo(s). {dt.datetime.now().strftime('%H:%M:%S')}")
+            self.statusBar().showMessage(
+                f"Entradas processadas: {len(rows)} linha(s), {len(period_labels)} periodo(s). "
+                f"Saidas sincronizadas: {len(sale_rows)} linha(s). {dt.datetime.now().strftime('%H:%M:%S')}"
+            )
         except Exception as exc:
             QMessageBox.critical(self, "SPED Qt", str(exc))
             self.statusBar().showMessage(f"Falha no processamento: {exc}")
@@ -3622,6 +3818,8 @@ class QtSpedApp(QMainWindow):
         self.metric_labels["operation"].setText(self.format_number(total_operation))
         self.metric_labels["base"].setText(self.format_number(total_base))
         self.metric_labels["icms"].setText(self.format_number(total_icms))
+        base_ratio = (total_base / total_operation * Decimal("100")) if total_operation > 0 else Decimal("0")
+        self.metric_labels["base_ratio"].setText(self.format_number(base_ratio))
 
     def refresh_sale_table(self) -> None:
         self.filtered_sale_rows = self.filtered_sale_table_rows()
@@ -3894,6 +4092,155 @@ class QtSpedApp(QMainWindow):
         self.compare_status_label.setText("Selecione SPED + pasta XML ou planilha e clique em Comparar notas.")
         self.statusBar().showMessage("Tela SPED x XML limpa.")
 
+    def clear_nfe_key_extract_page(self) -> None:
+        self.statusBar().showMessage("Limpando tela Extrair chave NFe... aguarde.")
+        self.nfe_extract_status.setText("Limpando dados... aguarde.")
+        QApplication.setOverrideCursor(Qt.WaitCursor)
+        QApplication.processEvents()
+        try:
+            self.nfe_extract_sped_input.clear()
+            self.nfe_extract_scope_combo.setCurrentText("Todos")
+            self.nfe_extract_all_rows = []
+            self.nfe_extract_rows = []
+            self.nfe_extract_table.setUpdatesEnabled(False)
+            self.nfe_extract_table.setRowCount(0)
+            self.nfe_extract_table.clearContents()
+            self.nfe_extract_table.setUpdatesEnabled(True)
+            self.nfe_extract_progress.setValue(0)
+            self.nfe_extract_status.setText("Tela limpa. Selecione os SPEDs, escolha o tipo e clique em Carregar.")
+            self.statusBar().showMessage("Tela Extrair chave NFe limpa.")
+        finally:
+            QApplication.restoreOverrideCursor()
+
+    def process_nfe_key_extract(self) -> None:
+        sped_paths = [path for path in parse_selected_paths(self.nfe_extract_sped_input.text()) if path.exists() and path.is_file()]
+        if not sped_paths:
+            QMessageBox.warning(self, "Extrair chave NFe", "Selecione pelo menos um arquivo SPED valido.")
+            return
+        self.nfe_extract_all_rows = []
+        self.nfe_extract_rows = []
+        self.nfe_extract_table.setRowCount(0)
+        self.nfe_extract_progress.setValue(0)
+        self.nfe_extract_status.setText("Iniciando leitura dos SPEDs... aguarde.")
+        self.statusBar().showMessage("Extraindo chaves NFe...")
+        self.set_nfe_extract_busy(True)
+
+        self.nfe_extract_thread = QThread(self)
+        self.nfe_extract_worker = NFeKeyExtractWorker(sped_paths)
+        self.nfe_extract_worker.moveToThread(self.nfe_extract_thread)
+        self.nfe_extract_thread.started.connect(self.nfe_extract_worker.run)
+        self.nfe_extract_worker.progress.connect(self.update_nfe_extract_progress)
+        self.nfe_extract_worker.finished.connect(self.handle_nfe_extract_finished)
+        self.nfe_extract_worker.failed.connect(self.handle_nfe_extract_error)
+        self.nfe_extract_worker.finished.connect(self.nfe_extract_thread.quit)
+        self.nfe_extract_worker.failed.connect(self.nfe_extract_thread.quit)
+        self.nfe_extract_thread.finished.connect(self.nfe_extract_worker.deleteLater)
+        self.nfe_extract_thread.finished.connect(self.nfe_extract_thread.deleteLater)
+        self.nfe_extract_thread.finished.connect(lambda: setattr(self, "nfe_extract_worker", None))
+        self.nfe_extract_thread.finished.connect(lambda: setattr(self, "nfe_extract_thread", None))
+        self.nfe_extract_thread.start()
+
+    def set_nfe_extract_busy(self, busy: bool) -> None:
+        self.nfe_extract_scope_combo.setEnabled(not busy)
+        self.nfe_extract_table.setEnabled(not busy)
+        QApplication.setOverrideCursor(Qt.WaitCursor) if busy else QApplication.restoreOverrideCursor()
+
+    def update_nfe_extract_progress(self, current: int, total: int, message: str) -> None:
+        percent = int(100 * current / max(total, 1))
+        self.nfe_extract_progress.setValue(percent)
+        self.nfe_extract_status.setText(f"{message} ({percent}%)")
+
+    def handle_nfe_extract_finished(self, rows: list[dict[str, object]]) -> None:
+        self.nfe_extract_all_rows = rows
+        self.apply_nfe_key_filter()
+        self.nfe_extract_progress.setValue(100)
+        self.set_nfe_extract_busy(False)
+        if not self.nfe_extract_all_rows:
+            QMessageBox.information(self, "Extrair chave NFe", "Nenhuma chave NFe valida foi encontrada nos arquivos selecionados.")
+
+    def handle_nfe_extract_error(self, message: str) -> None:
+        self.set_nfe_extract_busy(False)
+        self.nfe_extract_progress.setValue(0)
+        self.nfe_extract_status.setText(f"Falha na extracao: {message}")
+        self.statusBar().showMessage("Falha ao extrair chaves NFe.")
+        QMessageBox.critical(self, "Extrair chave NFe", f"Falha ao extrair chaves NFe.\n\n{message}")
+
+    def apply_nfe_key_filter(self) -> None:
+        selected_scope = self.nfe_extract_scope_combo.currentText().strip()
+        QApplication.setOverrideCursor(Qt.WaitCursor)
+        self.nfe_extract_status.setText("Aplicando filtro... aguarde.")
+        QApplication.processEvents()
+        try:
+            if selected_scope == "Todos":
+                self.nfe_extract_rows = list(self.nfe_extract_all_rows)
+            else:
+                self.nfe_extract_rows = [row for row in self.nfe_extract_all_rows if str(row.get("operation_type", "")) == selected_scope]
+            self.refresh_nfe_key_extract_table()
+            total_documents = len(self.nfe_extract_rows)
+            total_all = len(self.nfe_extract_all_rows)
+            self.nfe_extract_status.setText(
+                f"{total_documents} documento(s) com chave NFe exibido(s) de {total_all} carregado(s)."
+            )
+            self.statusBar().showMessage(f"Filtro aplicado ({selected_scope}): {total_documents} registro(s).")
+        finally:
+            QApplication.restoreOverrideCursor()
+
+    def refresh_nfe_key_extract_table(self) -> None:
+        rows = [
+            [
+                row.get("operation_type", ""),
+                row.get("document_key", ""),
+                row.get("document_number", ""),
+                row.get("document_series", ""),
+                row.get("document_date", ""),
+                row.get("participant_name", ""),
+                row.get("participant_tax_id", ""),
+                row.get("file_name", ""),
+            ]
+            for row in self.nfe_extract_rows
+        ]
+        self.set_table_rows(self.nfe_extract_table, rows)
+
+    def export_nfe_key_extract_rows(self) -> None:
+        if not self.nfe_extract_rows:
+            QMessageBox.warning(self, "Extrair chave NFe", "Nao ha dados para exportar.")
+            return
+        output, selected_filter = QFileDialog.getSaveFileName(
+            self,
+            "Exportar chaves NFe",
+            "chaves_nfe_extraidas.xlsx",
+            "Arquivo Excel (*.xlsx);;Arquivo CSV (*.csv)",
+        )
+        if not output:
+            return
+        headers = ["Arquivo SPED", "Operacao", "Chave NFe", "Documento", "Serie", "Data", "Participante", "CNPJ/CPF"]
+        rows = [
+            [
+                row.get("file_name", ""),
+                row.get("operation_type", ""),
+                row.get("document_key", ""),
+                row.get("document_number", ""),
+                row.get("document_series", ""),
+                row.get("document_date", ""),
+                row.get("participant_name", ""),
+                row.get("participant_tax_id", ""),
+            ]
+            for row in self.nfe_extract_rows
+        ]
+        output_path = Path(output)
+        try:
+            if selected_filter.startswith("Arquivo CSV") or output_path.suffix.lower() == ".csv":
+                if output_path.suffix.lower() != ".csv":
+                    output_path = output_path.with_suffix(".csv")
+                write_simple_csv_file(output_path, headers, rows)
+            else:
+                if output_path.suffix.lower() != ".xlsx":
+                    output_path = output_path.with_suffix(".xlsx")
+                write_simple_excel_workbook(output_path, [("Chaves NFe", headers, rows, {"include_total": False})])
+            self.handle_export_success("Exportar chaves NFe", output_path, "Chaves NFe exportadas")
+        except Exception as exc:
+            self.handle_export_failure("Exportar chaves NFe", "chaves NFe", exc)
+
     def export_entry_filter(self) -> None:
         if not self.filtered_entry_rows:
             QMessageBox.warning(self, "Exportar consulta", "Nao ha dados filtrados para exportar.")
@@ -3932,15 +4279,18 @@ class QtSpedApp(QMainWindow):
         total_row = self.build_popup_total_row(headers, rows)
         rows_to_write = rows + ([total_row] if total_row else [])
         output_path = Path(output)
-        if selected_filter.startswith("Arquivo CSV") or output_path.suffix.lower() == ".csv":
-            if output_path.suffix.lower() != ".csv":
-                output_path = output_path.with_suffix(".csv")
-            write_simple_csv_file(output_path, headers, rows_to_write)
-        else:
-            if output_path.suffix.lower() != ".xlsx":
-                output_path = output_path.with_suffix(".xlsx")
-            write_simple_excel_workbook(output_path, [("Consulta Entradas", headers, rows_to_write, {"include_total": False})])
-        self.statusBar().showMessage(f"Consulta exportada: {output_path}")
+        try:
+            if selected_filter.startswith("Arquivo CSV") or output_path.suffix.lower() == ".csv":
+                if output_path.suffix.lower() != ".csv":
+                    output_path = output_path.with_suffix(".csv")
+                write_simple_csv_file(output_path, headers, rows_to_write)
+            else:
+                if output_path.suffix.lower() != ".xlsx":
+                    output_path = output_path.with_suffix(".xlsx")
+                write_simple_excel_workbook(output_path, [("Consulta Entradas", headers, rows_to_write, {"include_total": False})])
+            self.handle_export_success("Exportar consulta", output_path, "Consulta exportada")
+        except Exception as exc:
+            self.handle_export_failure("Exportar consulta", "consulta", exc)
 
     def export_catalog_table_filtered(self, table: QTableWidget, context_name: str = "cadastros") -> None:
         headers = [
@@ -3970,15 +4320,18 @@ class QtSpedApp(QMainWindow):
             return
         rows_to_write = rows
         output_path = Path(output)
-        if selected_filter.startswith("Arquivo CSV") or output_path.suffix.lower() == ".csv":
-            if output_path.suffix.lower() != ".csv":
-                output_path = output_path.with_suffix(".csv")
-            write_simple_csv_file(output_path, headers, rows_to_write)
-        else:
-            if output_path.suffix.lower() != ".xlsx":
-                output_path = output_path.with_suffix(".xlsx")
-            write_simple_excel_workbook(output_path, [("Consulta Cadastros", headers, rows_to_write, {"include_total": False})])
-        self.statusBar().showMessage(f"Consulta exportada: {output_path}")
+        try:
+            if selected_filter.startswith("Arquivo CSV") or output_path.suffix.lower() == ".csv":
+                if output_path.suffix.lower() != ".csv":
+                    output_path = output_path.with_suffix(".csv")
+                write_simple_csv_file(output_path, headers, rows_to_write)
+            else:
+                if output_path.suffix.lower() != ".xlsx":
+                    output_path = output_path.with_suffix(".xlsx")
+                write_simple_excel_workbook(output_path, [("Consulta Cadastros", headers, rows_to_write, {"include_total": False})])
+            self.handle_export_success("Exportar consulta", output_path, "Consulta exportada")
+        except Exception as exc:
+            self.handle_export_failure("Exportar consulta", "consulta", exc)
 
     def export_product_page_filtered(self) -> None:
         table = self.product_page_table
@@ -4027,16 +4380,9 @@ class QtSpedApp(QMainWindow):
                     sheets.append((sheet_name, headers, supplier_rows, {"include_total": False}))
                 sheets.insert(0, ("RESUMO_GERAL", headers, rows, {"include_total": False}))
                 write_simple_excel_workbook(output_path, sheets)
-            self.statusBar().showMessage(f"Exportacao concluida: {output_path}")
-            if QMessageBox.question(
-                self,
-                "Exportacao Produtos",
-                f"Exportacao concluida com sucesso.\n\nDeseja abrir o arquivo?\n{output_path}",
-            ) == QMessageBox.Yes:
-                os.startfile(str(output_path))
+            self.handle_export_success("Exportacao Produtos", output_path, "Exportacao concluida")
         except Exception as exc:
-            self.statusBar().showMessage("Falha na exportacao de produtos.")
-            QMessageBox.critical(self, "Exportacao Produtos", f"Falha ao exportar arquivo de produtos.\n\n{exc}")
+            self.handle_export_failure("Exportacao Produtos", "produtos", exc)
 
     def export_sale_filter(self) -> None:
         self.export_consultation_rows(self.filtered_sale_rows, "consulta_saidas_filtrada.xlsx", "Consulta Saidas")
@@ -4109,15 +4455,18 @@ class QtSpedApp(QMainWindow):
         total_row = self.build_popup_total_row(headers, export_rows)
         rows_to_write = export_rows + ([total_row] if total_row else [])
         output_path = Path(output)
-        if selected_filter.startswith("Arquivo CSV") or output_path.suffix.lower() == ".csv":
-            if output_path.suffix.lower() != ".csv":
-                output_path = output_path.with_suffix(".csv")
-            write_simple_csv_file(output_path, headers, rows_to_write)
-        else:
-            if output_path.suffix.lower() != ".xlsx":
-                output_path = output_path.with_suffix(".xlsx")
-            write_simple_excel_workbook(output_path, [(f"Consulta {operation_type}"[:31], headers, rows_to_write, {"include_total": False})])
-        self.statusBar().showMessage(f"Consulta PIS/COFINS exportada: {output_path}")
+        try:
+            if selected_filter.startswith("Arquivo CSV") or output_path.suffix.lower() == ".csv":
+                if output_path.suffix.lower() != ".csv":
+                    output_path = output_path.with_suffix(".csv")
+                write_simple_csv_file(output_path, headers, rows_to_write)
+            else:
+                if output_path.suffix.lower() != ".xlsx":
+                    output_path = output_path.with_suffix(".xlsx")
+                write_simple_excel_workbook(output_path, [(f"Consulta {operation_type}"[:31], headers, rows_to_write, {"include_total": False})])
+            self.handle_export_success("Exportar consulta", output_path, "Consulta PIS/COFINS exportada")
+        except Exception as exc:
+            self.handle_export_failure("Exportar consulta", "consulta PIS/COFINS", exc)
 
     def export_xml_summary(self, output_type: str) -> None:
         if not self.xml_summary_rows:
@@ -4151,13 +4500,16 @@ class QtSpedApp(QMainWindow):
         total_row = self.build_popup_total_row(headers, rows)
         output_path = Path(output)
         rows_to_write = rows + ([total_row] if total_row else [])
-        if output_path.suffix.lower() == ".csv":
-            write_simple_csv_file(output_path, headers, rows_to_write)
-        else:
-            if output_path.suffix.lower() != ".xlsx":
-                output_path = output_path.with_suffix(".xlsx")
-            write_simple_excel_workbook(output_path, [("Resumo XML", headers, rows_to_write, {"include_total": False})])
-        self.statusBar().showMessage(f"Resumo XML exportado: {output_path}")
+        try:
+            if output_path.suffix.lower() == ".csv":
+                write_simple_csv_file(output_path, headers, rows_to_write)
+            else:
+                if output_path.suffix.lower() != ".xlsx":
+                    output_path = output_path.with_suffix(".xlsx")
+                write_simple_excel_workbook(output_path, [("Resumo XML", headers, rows_to_write, {"include_total": False})])
+            self.handle_export_success("Exportar XML", output_path, "Resumo XML exportado")
+        except Exception as exc:
+            self.handle_export_failure("Exportar XML", "resumo XML", exc)
 
     def export_xml_credits(self, output_type: str) -> None:
         if not self.xml_credit_invoice_rows:
@@ -4189,13 +4541,16 @@ class QtSpedApp(QMainWindow):
         total_row = self.build_popup_total_row(headers, rows)
         output_path = Path(output)
         rows_to_write = rows + ([total_row] if total_row else [])
-        if output_path.suffix.lower() == ".csv":
-            write_simple_csv_file(output_path, headers, rows_to_write)
-        else:
-            if output_path.suffix.lower() != ".xlsx":
-                output_path = output_path.with_suffix(".xlsx")
-            write_simple_excel_workbook(output_path, [("Creditos XML", headers, rows_to_write, {"include_total": False})])
-        self.statusBar().showMessage(f"Creditos XML exportados: {output_path}")
+        try:
+            if output_path.suffix.lower() == ".csv":
+                write_simple_csv_file(output_path, headers, rows_to_write)
+            else:
+                if output_path.suffix.lower() != ".xlsx":
+                    output_path = output_path.with_suffix(".xlsx")
+                write_simple_excel_workbook(output_path, [("Creditos XML", headers, rows_to_write, {"include_total": False})])
+            self.handle_export_success("Exportar XML", output_path, "Creditos XML exportados")
+        except Exception as exc:
+            self.handle_export_failure("Exportar XML", "creditos XML", exc)
 
     def export_compare_rows(self, output_type: str) -> None:
         if not self.compare_rows:
@@ -4211,13 +4566,16 @@ class QtSpedApp(QMainWindow):
             for row in self.compare_rows
         ]
         output_path = Path(output)
-        if output_path.suffix.lower() == ".csv":
-            write_simple_csv_file(output_path, headers, rows)
-        else:
-            if output_path.suffix.lower() != ".xlsx":
-                output_path = output_path.with_suffix(".xlsx")
-            write_simple_excel_workbook(output_path, [("Comparacao", headers, rows, {"include_total": False})])
-        self.statusBar().showMessage(f"Comparacao exportada: {output_path}")
+        try:
+            if output_path.suffix.lower() == ".csv":
+                write_simple_csv_file(output_path, headers, rows)
+            else:
+                if output_path.suffix.lower() != ".xlsx":
+                    output_path = output_path.with_suffix(".xlsx")
+                write_simple_excel_workbook(output_path, [("Comparacao", headers, rows, {"include_total": False})])
+            self.handle_export_success("Exportar comparacao", output_path, "Comparacao exportada")
+        except Exception as exc:
+            self.handle_export_failure("Exportar comparacao", "comparacao", exc)
 
     def export_consultation_rows(self, source_rows: list[dict[str, object]], default_name: str, sheet_name: str) -> None:
         if not source_rows:
@@ -4257,15 +4615,18 @@ class QtSpedApp(QMainWindow):
         total_row = self.build_popup_total_row(headers, rows)
         rows_to_write = rows + ([total_row] if total_row else [])
         output_path = Path(output)
-        if selected_filter.startswith("Arquivo CSV") or output_path.suffix.lower() == ".csv":
-            if output_path.suffix.lower() != ".csv":
-                output_path = output_path.with_suffix(".csv")
-            write_simple_csv_file(output_path, headers, rows_to_write)
-        else:
-            if output_path.suffix.lower() != ".xlsx":
-                output_path = output_path.with_suffix(".xlsx")
-            write_simple_excel_workbook(output_path, [(sheet_name, headers, rows_to_write, {"include_total": False})])
-        self.statusBar().showMessage(f"Consulta exportada: {output_path}")
+        try:
+            if selected_filter.startswith("Arquivo CSV") or output_path.suffix.lower() == ".csv":
+                if output_path.suffix.lower() != ".csv":
+                    output_path = output_path.with_suffix(".csv")
+                write_simple_csv_file(output_path, headers, rows_to_write)
+            else:
+                if output_path.suffix.lower() != ".xlsx":
+                    output_path = output_path.with_suffix(".xlsx")
+                write_simple_excel_workbook(output_path, [(sheet_name, headers, rows_to_write, {"include_total": False})])
+            self.handle_export_success("Exportar consulta", output_path, "Consulta exportada")
+        except Exception as exc:
+            self.handle_export_failure("Exportar consulta", "consulta", exc)
 
     def open_table_popup(
         self,
@@ -4374,10 +4735,9 @@ class QtSpedApp(QMainWindow):
                 write_simple_csv_file(output_path, headers, rows_to_write)
             else:
                 write_simple_excel_workbook(output_path, [(title[:31] or "Popup", headers, rows_to_write, {"include_total": False})])
-            self.statusBar().showMessage(f"Popup exportado: {output_path}")
-            QMessageBox.information(self, "Exportar popup", f"Arquivo gerado com sucesso:\n{output_path}")
+            self.handle_export_success("Exportar popup", output_path, "Popup exportado")
         except Exception as exc:
-            QMessageBox.critical(self, "Exportar popup", str(exc))
+            self.handle_export_failure("Exportar popup", "popup", exc)
 
     def prepare_popup_export_rows(self, headers: list[str], rows: list[list[object]]) -> list[list[object]]:
         return [
@@ -4575,6 +4935,7 @@ class QtSpedApp(QMainWindow):
                         item.setTextAlignment(Qt.AlignCenter)
                     table.setItem(row_index, column_index, item)
             self.apply_popup_column_widths(table, headers)
+            self.enable_table_sorting(table)
             layout.addWidget(table, 1)
         if footer_text:
             footer = QLabel(footer_text)
@@ -4618,10 +4979,25 @@ class QtSpedApp(QMainWindow):
                         csv_rows.append(["", *row])
                     csv_rows.append([])
                 write_simple_csv_file(output_path, csv_headers, csv_rows)
-            self.statusBar().showMessage(f"Popup exportado: {output_path}")
-            QMessageBox.information(self, "Exportar popup", f"Arquivo gerado com sucesso:\n{output_path}")
+            self.handle_export_success("Exportar popup", output_path, "Popup exportado")
         except Exception as exc:
-            QMessageBox.critical(self, "Exportar popup", str(exc))
+            self.handle_export_failure("Exportar popup", "popup", exc)
+
+    def handle_export_success(self, title: str, output_path: Path, status_message: str) -> None:
+        self.statusBar().showMessage(f"{status_message}: {output_path}")
+        message_box = QMessageBox(self)
+        message_box.setIcon(QMessageBox.Information)
+        message_box.setWindowTitle(title)
+        message_box.setText(f"Exportacao concluida com sucesso.\n\nDeseja abrir o arquivo?\n{output_path}")
+        sim_button = message_box.addButton("Sim", QMessageBox.YesRole)
+        message_box.addButton("Nao", QMessageBox.NoRole)
+        message_box.exec()
+        if message_box.clickedButton() == sim_button:
+            os.startfile(str(output_path))
+
+    def handle_export_failure(self, title: str, export_name: str, error: Exception) -> None:
+        self.statusBar().showMessage(f"Falha na exportacao de {export_name}.")
+        QMessageBox.critical(self, title, f"Falha ao exportar {export_name}.\n\n{error}")
 
     def open_entry_products_popup(self) -> None:
         rows = [
@@ -4648,108 +5024,11 @@ class QtSpedApp(QMainWindow):
         )
 
     def open_entry_operation_summary_popup(self) -> None:
-        grouped: dict[tuple[str, str, Decimal], dict[str, object]] = {}
-        for row in self.filtered_entry_rows:
-            details = row.get("launch_details")
-            source_details = details if isinstance(details, list) and details else [row]
-            for detail in source_details:
-                if not isinstance(detail, dict):
-                    continue
-                cst = str(self.first_row_value(detail, "cst_icms", "cst")).strip()
-                cfop = str(detail.get("cfop", "")).strip()
-                rate = self.decimal_value(detail.get("icms_rate")).quantize(Decimal("0.01"))
-                key = (cst, cfop, rate)
-                bucket = grouped.setdefault(
-                    key,
-                    {
-                        "sale_value": Decimal("0"),
-                        "base_icms": Decimal("0"),
-                        "icms_value": Decimal("0"),
-                        "base_icms_st": Decimal("0"),
-                        "icms_st_value": Decimal("0"),
-                        "ipi_value": Decimal("0"),
-                        "document_keys": set(),
-                        "launch_count": 0,
-                    },
-                )
-                sale_value = self.decimal_value(self.first_row_value(detail, "sale_value", "total_operation_value", "operation_value"))
-                base_icms = self.decimal_value(detail.get("base_icms"))
-                icms_value = self.decimal_value(detail.get("icms_value"))
-                bucket["sale_value"] = Decimal(bucket["sale_value"]) + sale_value
-                bucket["base_icms"] = Decimal(bucket["base_icms"]) + base_icms
-                bucket["icms_value"] = Decimal(bucket["icms_value"]) + icms_value
-                bucket["base_icms_st"] = Decimal(bucket["base_icms_st"]) + self.decimal_value(detail.get("base_icms_st"))
-                bucket["icms_st_value"] = Decimal(bucket["icms_st_value"]) + self.decimal_value(detail.get("icms_st_value"))
-                bucket["ipi_value"] = Decimal(bucket["ipi_value"]) + self.decimal_value(detail.get("ipi_value"))
-                document_key = str(detail.get("document_key", "") or detail.get("document_number", "")).strip()
-                if document_key:
-                    bucket["document_keys"].add(document_key)
-                bucket["launch_count"] = int(bucket["launch_count"]) + int(self.first_row_value(detail, "launch_count", default=1) or 1)
-
-        rows: list[tuple[object, ...]] = []
-        total_sale = Decimal("0")
-        total_base = Decimal("0")
-        total_icms = Decimal("0")
-        for (cst, cfop, rate), values in sorted(grouped.items(), key=lambda item: (item[0][0], item[0][1], item[0][2])):
-            sale_value = Decimal(values["sale_value"])
-            base_icms = Decimal(values["base_icms"])
-            icms_value = Decimal(values["icms_value"])
-            effective_rate = compute_display_icms_rate(rate, sale_value, base_icms, icms_value)
-            rows.append(
-                (
-                    cst,
-                    cfop,
-                    self.format_number(rate),
-                    self.format_number(effective_rate),
-                    self.format_number(Decimal(values["ipi_value"])),
-                    self.format_number(icms_value),
-                    self.format_number(Decimal(values["base_icms_st"])),
-                    self.format_number(Decimal(values["icms_st_value"])),
-                    self.format_number(sale_value),
-                    self.format_number(base_icms),
-                    self.format_number((sale_value - base_icms).quantize(Decimal("0.01"))),
-                    self.format_number((sale_value - base_icms).quantize(Decimal("0.01"))),
-                    len(values["document_keys"]),
-                    values["launch_count"],
-                )
-            )
-            total_sale += sale_value
-            total_base += base_icms
-            total_icms += icms_value
-
-        ratio = (total_base * Decimal("100") / total_sale).quantize(Decimal("0.01")) if total_sale else Decimal("0.00")
-        footer = (
-            f"Linhas: {len(rows)}    Total Operacao: {self.format_number(total_sale)}    "
-            f"Base ICMS: {self.format_number(total_base)}    % Base/Oper: {self.format_number(ratio)}    "
-            f"Valor ICMS: {self.format_number(total_icms)}"
-        )
-        self.open_table_popup(
-            "Resumo Entradas",
-            [
-                "CST",
-                "CFOP",
-                "Aliq ICMS",
-                "Aliq Efetiva",
-                "Valor IPI",
-                "Valor ICMS",
-                "Base ICMS ST",
-                "Valor ICMS ST",
-                "Total Operacao",
-                "Base ICMS",
-                "Dif. Oper/Base",
-                "Reducao BC",
-                "Docs",
-                "Lanc.",
-            ],
-            rows,
-            1220,
-            560,
-            footer,
-        )
+        self.open_operation_summary_for_rows(self.filtered_entry_rows, "Entrada", "Resumo Entradas")
 
     def open_entry_abc_popup(self) -> None:
         _periods, headers, _display_rows, export_rows = build_product_monthly_linear_dataset(self.filtered_entry_rows, "Entrada")
-        self.open_table_popup("Levantamento por Produto - Entrada", headers, export_rows, 1360, 620)
+        self.open_product_survey_popup_with_cards("Levantamento por Produto - Entrada", headers, export_rows)
 
     def open_entry_reduction_popup(self) -> None:
         reduction_rows = build_reduction_launch_rows(self.get_filtered_launch_details())
@@ -4787,7 +5066,15 @@ class QtSpedApp(QMainWindow):
         entry_totals = {
             "icms_value": sum((self.decimal_value(row.get("icms_value")) for row in self.filtered_entry_rows), Decimal("0")),
         }
-        exit_totals = {"icms_value": Decimal("0")}
+        selected_periods = {label for label, check in self.period_checks.items() if check.isChecked()}
+        sale_rows_for_apuracao = [
+            row
+            for row in self.sale_rows
+            if not selected_periods or str(self.first_row_value(row, "period", "period_label")) in selected_periods
+        ]
+        exit_totals = {
+            "icms_value": sum((self.decimal_value(row.get("icms_value")) for row in sale_rows_for_apuracao), Decimal("0")),
+        }
         original_summary = {
             "debitos": Decimal("0"),
             "ajustes_debito_doc": Decimal("0"),
@@ -4805,7 +5092,7 @@ class QtSpedApp(QMainWindow):
             "extra_apuracao": Decimal("0"),
         }
         rows = build_filtered_apuracao_rows(entry_totals, exit_totals, original_summary, False)
-        self.open_table_popup("Apuracao do ICMS", ["Descricao", "Valor R$"], rows, 1020, 520)
+        self.open_apuracao_popup_with_cards("Apuracao do ICMS", rows, entry_totals["icms_value"], exit_totals["icms_value"])
 
     def open_entry_credit_diagnostic_popup(self) -> None:
         summary_rows, detail_rows, totals = build_credit_diagnostic_datasets(
@@ -4867,6 +5154,227 @@ class QtSpedApp(QMainWindow):
         rows = export_rows or [list(row.get("values", [])) for row in display_rows]
         self.open_table_popup("Comparacao Diagnostico de Credito", headers, rows, 1560, 760)
 
+    def handle_entry_table_double_click(self, item: QTableWidgetItem) -> None:
+        row_index = item.row()
+        column_index = item.column()
+        if row_index < 0 or row_index >= len(self.filtered_entry_rows):
+            return
+        selected_row = self.filtered_entry_rows[row_index]
+        if column_index == 4 and int(self.first_row_value(selected_row, "supplier_count", default=0) or 0) > 1:
+            self.open_consultation_supplier_popup(selected_row)
+            return
+        self.open_row_detail_popup(selected_row, "Entrada")
+
+    def handle_sale_table_double_click(self, item: QTableWidgetItem) -> None:
+        row_index = item.row()
+        column_index = item.column()
+        if row_index < 0 or row_index >= len(self.filtered_sale_rows):
+            return
+        selected_row = self.filtered_sale_rows[row_index]
+        if column_index == 4 and int(self.first_row_value(selected_row, "supplier_count", default=0) or 0) > 1:
+            self.open_consultation_supplier_popup(selected_row)
+            return
+        self.open_row_detail_popup(selected_row, "Saida")
+
+    def open_consultation_supplier_popup(self, summary_row: dict[str, object]) -> None:
+        supplier_details = summary_row.get("supplier_details")
+        if (not isinstance(supplier_details, list) or not supplier_details) and isinstance(summary_row.get("launch_details"), list):
+            supplier_details = self.build_supplier_details_from_launch_details(summary_row)
+        if not isinstance(supplier_details, list) or not supplier_details:
+            QMessageBox.warning(self, "Fornecedores", "Nao ha fornecedores disponiveis para este produto.")
+            return
+        code = str(summary_row.get("code", "")).strip() or "produto"
+        description = str(summary_row.get("description", "")).strip()
+        headers = ["Fornecedor", "CPF/CNPJ", "Periodos", "Docs", "Lanc.", "Valor Operacao", "Base ICMS", "Valor ICMS"]
+        rows: list[list[object]] = []
+        for supplier in supplier_details:
+            if not isinstance(supplier, dict):
+                continue
+            periods = supplier.get("periods")
+            document_keys = supplier.get("document_keys")
+            rows.append(
+                [
+                    supplier.get("name", ""),
+                    supplier.get("tax_id", ""),
+                    len(periods) if isinstance(periods, (set, list, tuple)) else 0,
+                    len(document_keys) if isinstance(document_keys, (set, list, tuple)) else 0,
+                    int(supplier.get("launch_count", 0) or 0),
+                    self.decimal_value(supplier.get("sale_value")),
+                    self.decimal_value(supplier.get("base_icms")),
+                    self.decimal_value(supplier.get("icms_value")),
+                ]
+            )
+        rows.sort(key=lambda row: str(row[0]).upper())
+        footer = f"Fornecedores: {len(rows)}"
+        if description:
+            footer = f"Produto {code} - {description}\n\n{footer}"
+        self.open_table_popup(f"Fornecedores - {code}", headers, rows, 1180, 640, footer)
+
+    def build_supplier_details_from_launch_details(self, summary_row: dict[str, object]) -> list[dict[str, object]]:
+        launch_details = summary_row.get("launch_details")
+        if not isinstance(launch_details, list):
+            return []
+        supplier_buckets: dict[str, dict[str, object]] = {}
+        for launch_detail in launch_details:
+            if not isinstance(launch_detail, dict):
+                continue
+            supplier_name = str(launch_detail.get("participant_name", "")).strip()
+            supplier_tax_id = str(launch_detail.get("participant_tax_id", "")).strip()
+            supplier_key = supplier_name or supplier_tax_id
+            if not supplier_key:
+                continue
+            bucket = supplier_buckets.setdefault(
+                supplier_key,
+                {
+                    "name": supplier_name,
+                    "tax_id": supplier_tax_id,
+                    "periods": set(),
+                    "document_keys": set(),
+                    "launch_count": 0,
+                    "sale_value": Decimal("0"),
+                    "base_icms": Decimal("0"),
+                    "icms_value": Decimal("0"),
+                },
+            )
+            period_text = str(launch_detail.get("period", "")).strip()
+            if period_text:
+                bucket["periods"].add(period_text)
+            document_identity = str(launch_detail.get("document_key", "") or launch_detail.get("document_number", "")).strip()
+            if document_identity:
+                bucket["document_keys"].add(document_identity)
+            bucket["launch_count"] = int(bucket["launch_count"]) + 1
+            bucket["sale_value"] = Decimal(bucket["sale_value"]) + self.decimal_value(
+                self.first_row_value(launch_detail, "sale_value", "total_operation_value", "operation_value")
+            )
+            bucket["base_icms"] = Decimal(bucket["base_icms"]) + self.decimal_value(launch_detail.get("base_icms"))
+            bucket["icms_value"] = Decimal(bucket["icms_value"]) + self.decimal_value(launch_detail.get("icms_value"))
+        return sorted(supplier_buckets.values(), key=lambda item: str(item.get("name", "")).upper())
+
+    def open_row_detail_popup(self, summary_row: dict[str, object], operation_type: str) -> None:
+        launch_details = summary_row.get("launch_details")
+        details = launch_details if isinstance(launch_details, list) and launch_details else [summary_row]
+        details = [detail for detail in details if isinstance(detail, dict)]
+        if not details:
+            QMessageBox.warning(self, "Detalhamento", "Nao ha detalhes disponiveis para esta linha.")
+            return
+
+        code = str(summary_row.get("code", "")).strip() or str(self.first_row_value(summary_row, "codigo", default="")).strip()
+        period = str(self.first_row_value(summary_row, "period", "period_label")).strip()
+        description = str(summary_row.get("description", "")).strip()
+        title = f"Detalhamento - {code or 'produto'}{f' - {period}' if period else ''}"
+
+        rows: list[list[object]] = []
+        total_quantity = Decimal("0")
+        total_operation = Decimal("0")
+        total_base = Decimal("0")
+        total_icms = Decimal("0")
+        document_keys: set[str] = set()
+        for detail in details:
+            operation_value = self.decimal_value(self.first_row_value(detail, "sale_value", "total_operation_value", "operation_value"))
+            base_icms = self.decimal_value(detail.get("base_icms"))
+            icms_value = self.decimal_value(detail.get("icms_value"))
+            quantity = self.decimal_value(detail.get("quantity"))
+            total_quantity += quantity
+            total_operation += operation_value
+            total_base += base_icms
+            total_icms += icms_value
+            document_key = str(detail.get("document_key", "")).strip()
+            if document_key:
+                document_keys.add(document_key)
+            rows.append(
+                [
+                    detail.get("document_date", detail.get("date", "")),
+                    detail.get("document_number", ""),
+                    detail.get("participant_name", ""),
+                    document_key,
+                    detail.get("item_number", ""),
+                    detail.get("cest", ""),
+                    detail.get("cfop", ""),
+                    self.first_row_value(detail, "cst_icms", "cst"),
+                    self.decimal_value(detail.get("icms_rate")),
+                    compute_display_icms_rate(
+                        self.decimal_value(detail.get("icms_rate")),
+                        operation_value,
+                        base_icms,
+                        icms_value,
+                    ),
+                ]
+            )
+        rows.sort(key=lambda row: (str(row[0]), str(row[1]), str(row[3]), str(row[4])))
+
+        dialog = QDialog(self)
+        dialog.setObjectName("popupDialog")
+        dialog.setWindowTitle(title)
+        dialog.resize(1320, 760)
+        dialog.setStyleSheet(self.styleSheet())
+        layout = QVBoxLayout(dialog)
+        layout.setContentsMargins(12, 12, 12, 12)
+        layout.setSpacing(10)
+
+        title_label = QLabel(title)
+        title_label.setObjectName("popupTitle")
+        layout.addWidget(title_label)
+        subtitle = QLabel(
+            f"Produto {code} - {description}" if description else f"Produto {code}"
+        )
+        subtitle.setObjectName("muted")
+        layout.addWidget(subtitle)
+
+        table = QTableWidget()
+        headers = ["Data", "Documento", "Fornecedor", "Chave", "Item", "CEST", "CFOP", "CST", "Aliq ICMS", "Aliq Efetiva"]
+        table.setColumnCount(len(headers))
+        table.setHorizontalHeaderLabels(headers)
+        table.setRowCount(len(rows))
+        table.setAlternatingRowColors(True)
+        table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        table.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOn)
+        table.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOn)
+        table.setHorizontalScrollMode(QAbstractItemView.ScrollPerPixel)
+        table.setVerticalScrollMode(QAbstractItemView.ScrollPerPixel)
+        table.setWordWrap(False)
+        table.verticalHeader().setVisible(False)
+        table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        table.horizontalHeader().setStretchLastSection(True)
+        for row_index, row in enumerate(rows):
+            for column_index, value in enumerate(row):
+                item = QTableWidgetItem(str(value))
+                item.setForeground(QColor(COLORS["text"]))
+                if column_index not in {2, 3}:
+                    item.setTextAlignment(Qt.AlignCenter)
+                table.setItem(row_index, column_index, item)
+        self.apply_popup_column_widths(table, headers)
+        self.enable_table_sorting(table)
+        layout.addWidget(table, 1)
+
+        ratio = (total_base * Decimal("100") / total_operation).quantize(Decimal("0.01")) if total_operation > 0 else Decimal("0.00")
+        cards_grid = QGridLayout()
+        cards_grid.setHorizontalSpacing(8)
+        cards = (
+            ("Lancamentos", str(len(rows))),
+            ("Quantidade", self.format_number(total_quantity)),
+            ("Valor Operacao", self.format_number(total_operation)),
+            ("Base ICMS", self.format_number(total_base)),
+            ("% Base/Oper", self.format_number(ratio)),
+            ("Valor ICMS", self.format_number(total_icms)),
+        )
+        for index, (label, value) in enumerate(cards):
+            card, value_label = self.create_metric_card_with_label(label, value)
+            value_label.setText(value)
+            cards_grid.addWidget(card, 0, index)
+        layout.addLayout(cards_grid)
+
+        actions = QHBoxLayout()
+        actions.addWidget(self.create_button("Exportar Excel", lambda: self.export_popup_dataset(title, headers, rows, "xlsx")))
+        actions.addWidget(self.create_button("Exportar CSV", lambda: self.export_popup_dataset(title, headers, rows, "csv")))
+        actions.addStretch()
+        footer = QLabel(f"Documentos: {len(document_keys)} | Operacao: {operation_type}")
+        footer.setObjectName("muted")
+        actions.addWidget(footer)
+        actions.addWidget(self.create_button("Fechar", dialog.close))
+        layout.addLayout(actions)
+        dialog.exec()
+
     def open_entry_docs_popup(self) -> None:
         grouped: dict[tuple[str, str, str], dict[str, object]] = {}
         for detail in self.get_filtered_launch_details():
@@ -4926,7 +5434,7 @@ class QtSpedApp(QMainWindow):
 
     def open_sale_abc_popup(self) -> None:
         _periods, headers, _display_rows, export_rows = build_product_monthly_linear_dataset(self.filtered_sale_rows, "Saida")
-        self.open_table_popup("Levantamento por Produto - Saida", headers, export_rows, 1360, 620)
+        self.open_product_survey_popup_with_cards("Levantamento por Produto - Saida", headers, export_rows)
 
     def open_sale_reduction_popup(self) -> None:
         reduction_rows = build_reduction_launch_rows(self.get_filtered_sale_launch_details())
@@ -4982,7 +5490,80 @@ class QtSpedApp(QMainWindow):
             "extra_apuracao": Decimal("0"),
         }
         rows = build_filtered_apuracao_rows(entry_totals, exit_totals, original_summary, False)
-        self.open_table_popup("Apuracao do ICMS - Saidas", ["Descricao", "Valor R$"], rows, 1020, 520)
+        self.open_apuracao_popup_with_cards("Apuracao do ICMS - Saidas", rows, entry_totals["icms_value"], exit_totals["icms_value"])
+
+    def open_apuracao_popup_with_cards(
+        self,
+        title: str,
+        rows: list[list[object]] | list[tuple[object, ...]],
+        entrada_credito: Decimal,
+        saida_debito: Decimal,
+    ) -> None:
+        if not rows:
+            QMessageBox.warning(self, title, "Nao ha dados para os filtros atuais.")
+            return
+        export_rows = [list(row) for row in rows]
+        dialog = QDialog(self)
+        dialog.setObjectName("popupDialog")
+        dialog.setWindowTitle(title)
+        dialog.resize(1180, 700)
+        dialog.setStyleSheet(self.styleSheet())
+        layout = QVBoxLayout(dialog)
+        layout.setContentsMargins(12, 12, 12, 12)
+        layout.setSpacing(10)
+
+        title_label = QLabel(title)
+        title_label.setObjectName("popupTitle")
+        layout.addWidget(title_label)
+
+        table = QTableWidget()
+        table.setColumnCount(2)
+        table.setHorizontalHeaderLabels(["Descricao", "Valor R$"])
+        table.setRowCount(len(export_rows))
+        table.setAlternatingRowColors(True)
+        table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        table.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOn)
+        table.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOn)
+        table.setHorizontalScrollMode(QAbstractItemView.ScrollPerPixel)
+        table.setVerticalScrollMode(QAbstractItemView.ScrollPerPixel)
+        table.setWordWrap(False)
+        table.verticalHeader().setVisible(False)
+        table.horizontalHeader().setSectionResizeMode(0, QHeaderView.Stretch)
+        table.horizontalHeader().setSectionResizeMode(1, QHeaderView.Stretch)
+        for row_index, row in enumerate(export_rows):
+            for column_index, value in enumerate(row[:2]):
+                item = QTableWidgetItem(str(value))
+                item.setForeground(QColor(COLORS["text"]))
+                if column_index == 1:
+                    item.setTextAlignment(Qt.AlignCenter)
+                table.setItem(row_index, column_index, item)
+        self.enable_table_sorting(table)
+        layout.addWidget(table, 1)
+
+        resumo_grid = QGridLayout()
+        resumo_grid.setHorizontalSpacing(8)
+        icms_recolher = max(self.decimal_value(saida_debito) - self.decimal_value(entrada_credito), Decimal("0"))
+        credito_restante = max(self.decimal_value(entrada_credito) - self.decimal_value(saida_debito), Decimal("0"))
+        cards = (
+            ("Entradas (credito)", self.format_number(self.decimal_value(entrada_credito))),
+            ("Saidas (debito)", self.format_number(self.decimal_value(saida_debito))),
+            ("ICMS a Recolher", self.format_number(icms_recolher)),
+            ("Credito Restante", self.format_number(credito_restante)),
+        )
+        for index, (label, value) in enumerate(cards):
+            card, value_label = self.create_metric_card_with_label(label, value)
+            value_label.setText(value)
+            resumo_grid.addWidget(card, 0, index)
+        layout.addLayout(resumo_grid)
+
+        actions = QHBoxLayout()
+        actions.addWidget(self.create_button("Exportar Excel", lambda: self.export_popup_dataset(title, ["Descricao", "Valor R$"], export_rows, "xlsx")))
+        actions.addWidget(self.create_button("Exportar CSV", lambda: self.export_popup_dataset(title, ["Descricao", "Valor R$"], export_rows, "csv")))
+        actions.addStretch()
+        actions.addWidget(self.create_button("Fechar", dialog.close))
+        layout.addLayout(actions)
+        dialog.exec()
 
     def open_sale_debit_diagnostic_popup(self) -> None:
         summary_rows, detail_rows, totals = build_credit_diagnostic_datasets(
@@ -5238,7 +5819,95 @@ class QtSpedApp(QMainWindow):
 
     def open_contrib_abc_popup(self, operation_type: str) -> None:
         _periods, headers, _display_rows, export_rows = build_contrib_product_monthly_linear_dataset(self.get_filtered_contrib_rows(operation_type), operation_type)
-        self.open_table_popup(f"Levantamento por Produto PIS/COFINS - {operation_type}", headers, export_rows, 1460, 700)
+        self.open_product_survey_popup_with_cards(f"Levantamento por Produto PIS/COFINS - {operation_type}", headers, export_rows)
+
+    def open_product_survey_popup_with_cards(self, title: str, headers: list[str], rows: list[list[object]]) -> None:
+        if not rows:
+            QMessageBox.warning(self, title, "Nao ha dados para os filtros atuais.")
+            return
+        dialog = QDialog(self)
+        dialog.setObjectName("popupDialog")
+        dialog.setWindowTitle(title)
+        dialog.resize(1460, 760)
+        dialog.setStyleSheet(self.styleSheet())
+        layout = QVBoxLayout(dialog)
+        layout.setContentsMargins(12, 12, 12, 12)
+        layout.setSpacing(10)
+
+        title_label = QLabel(title)
+        title_label.setObjectName("popupTitle")
+        layout.addWidget(title_label)
+
+        table = QTableWidget()
+        table.setColumnCount(len(headers))
+        table.setHorizontalHeaderLabels(headers)
+        table.setRowCount(len(rows))
+        table.setAlternatingRowColors(True)
+        table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        table.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOn)
+        table.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOn)
+        table.setHorizontalScrollMode(QAbstractItemView.ScrollPerPixel)
+        table.setVerticalScrollMode(QAbstractItemView.ScrollPerPixel)
+        table.setWordWrap(False)
+        table.verticalHeader().setVisible(False)
+        table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        table.horizontalHeader().setStretchLastSection(True)
+        for row_index, row in enumerate(rows):
+            for column_index, value in enumerate(row):
+                item = QTableWidgetItem(str(value))
+                item.setForeground(QColor(COLORS["text"]))
+                if not (column_index < len(headers) and self.normalize_search_text(headers[column_index]) in {"descricao"}):
+                    item.setTextAlignment(Qt.AlignCenter)
+                table.setItem(row_index, column_index, item)
+        self.apply_popup_column_widths(table, headers)
+        self.enable_table_sorting(table)
+        layout.addWidget(table, 1)
+
+        normalized_headers = [self.normalize_search_text(header) for header in headers]
+        curve_index = next((index for index, header in enumerate(normalized_headers) if "curva" in header and "abc" in header), -1)
+        code_index = next((index for index, header in enumerate(normalized_headers) if header == "codigo"), -1)
+        operation_index = next((index for index, header in enumerate(normalized_headers) if "totaloperacao" in header), -1)
+        base_index = next((index for index, header in enumerate(normalized_headers) if "totalbaseicm" in header), -1)
+        icms_index = next((index for index, header in enumerate(normalized_headers) if "totalvlricm" in header), -1)
+        products = {
+            str(row[code_index]).strip()
+            for row in rows
+            if code_index >= 0 and code_index < len(row) and str(row[code_index]).strip()
+        }
+        total_operation = sum((self.decimal_value(row[operation_index]) for row in rows), Decimal("0")) if operation_index >= 0 else Decimal("0")
+        curve_counts = {"A": 0, "B": 0, "C": 0}
+        curve_totals = {"A": Decimal("0"), "B": Decimal("0"), "C": Decimal("0")}
+        if curve_index >= 0:
+            for row in rows:
+                curve = str(row[curve_index]).strip().upper()
+                if curve in curve_counts:
+                    curve_counts[curve] += 1
+                    if operation_index >= 0 and operation_index < len(row):
+                        curve_totals[curve] += self.decimal_value(row[operation_index])
+        a_share = (curve_totals["A"] * Decimal("100") / total_operation).quantize(Decimal("0.01")) if total_operation > 0 else Decimal("0.00")
+
+        cards_grid = QGridLayout()
+        cards = (
+            ("Linhas", str(len(rows))),
+            ("Produtos", str(len(products))),
+            ("Produtos Curva A", str(curve_counts["A"])),
+            ("Produtos Curva B", str(curve_counts["B"])),
+            ("Produtos Curva C", str(curve_counts["C"])),
+        )
+        for index, (label, value) in enumerate(cards):
+            card, value_label = self.create_metric_card_with_label(label, value)
+            value_label.setText(value)
+            cards_grid.addWidget(card, index // 5, index % 5)
+        layout.addLayout(cards_grid)
+
+        actions = QHBoxLayout()
+        actions.addWidget(self.create_button("Exportar Excel", lambda: self.export_popup_dataset(title, headers, rows, "xlsx")))
+        actions.addWidget(self.create_button("Exportar CSV", lambda: self.export_popup_dataset(title, headers, rows, "csv")))
+        actions.addStretch()
+        actions.addWidget(self.create_button("Fechar", dialog.close))
+        layout.addLayout(actions)
+        dialog.exec()
 
     def open_contrib_apuracao_popup(self, operation_type: str) -> None:
         grouped: dict[str, dict[str, Decimal]] = {}
@@ -5333,7 +6002,7 @@ class QtSpedApp(QMainWindow):
                 key = (cst, cfop, rate)
                 bucket = grouped.setdefault(
                     key,
-                    {"sale_value": Decimal("0"), "base_icms": Decimal("0"), "icms_value": Decimal("0"), "base_icms_st": Decimal("0"), "icms_st_value": Decimal("0"), "ipi_value": Decimal("0"), "document_keys": set(), "launch_count": 0},
+                    {"sale_value": Decimal("0"), "base_icms": Decimal("0"), "icms_value": Decimal("0"), "base_icms_st": Decimal("0"), "icms_st_value": Decimal("0"), "ipi_value": Decimal("0"), "document_keys": set(), "launch_count": 0, "details": []},
                 )
                 sale_value = self.decimal_value(self.first_row_value(detail, "sale_value", "total_operation_value", "operation_value"))
                 base_icms = self.decimal_value(detail.get("base_icms"))
@@ -5348,7 +6017,9 @@ class QtSpedApp(QMainWindow):
                 if document_key:
                     bucket["document_keys"].add(document_key)
                 bucket["launch_count"] = int(bucket["launch_count"]) + int(self.first_row_value(detail, "launch_count", default=1) or 1)
+                bucket["details"].append(detail)
         rows = []
+        detail_rows_by_index: dict[int, list[dict[str, object]]] = {}
         total_sale = Decimal("0")
         total_base = Decimal("0")
         total_icms = Decimal("0")
@@ -5357,24 +6028,679 @@ class QtSpedApp(QMainWindow):
             base_icms = Decimal(values["base_icms"])
             icms_value = Decimal(values["icms_value"])
             rows.append((cst, cfop, rate, compute_display_icms_rate(rate, sale_value, base_icms, icms_value), Decimal(values["ipi_value"]), icms_value, Decimal(values["base_icms_st"]), Decimal(values["icms_st_value"]), sale_value, base_icms, (sale_value - base_icms).quantize(Decimal("0.01")), (sale_value - base_icms).quantize(Decimal("0.01")), len(values["document_keys"]), values["launch_count"]))
+            detail_rows_by_index[len(rows) - 1] = [detail for detail in values.get("details", []) if isinstance(detail, dict)]
             total_sale += sale_value
             total_base += base_icms
             total_icms += icms_value
-        ratio = (total_base * Decimal("100") / total_sale).quantize(Decimal("0.01")) if total_sale else Decimal("0.00")
-        footer = f"Linhas: {len(rows)}    Total Operacao: {self.format_number(total_sale)}    Base ICMS: {self.format_number(total_base)}    % Base/Oper: {self.format_number(ratio)}    Valor ICMS: {self.format_number(total_icms)}"
-        self.open_table_popup(title, ["CST", "CFOP", "Aliq ICMS", "Aliq Efetiva", "Valor IPI", "Valor ICMS", "Base ICMS ST", "Valor ICMS ST", "Total Operacao", "Base ICMS", "Dif. Oper/Base", "Reducao BC", "Docs", "Lanc."], rows, 1220, 560, footer)
+        headers = ["CST", "CFOP", "Aliq ICMS", "Aliq Efetiva", "Valor IPI", "Valor ICMS", "Base ICMS ST", "Valor ICMS ST", "Total Operacao", "Base ICMS", "Dif. Oper/Base", "Reducao BC", "Docs", "Lanc."]
+        self.open_operation_summary_popup_with_cards(title, headers, rows, total_sale, total_base, total_icms, detail_rows_by_index, operation_type)
+
+    def open_operation_summary_popup_with_cards(
+        self,
+        title: str,
+        headers: list[str],
+        rows: list[tuple[object, ...]] | list[list[object]],
+        total_sale: Decimal,
+        total_base: Decimal,
+        total_icms: Decimal,
+        detail_rows_by_index: dict[int, list[dict[str, object]]] | None = None,
+        operation_type: str = "",
+    ) -> None:
+        if not rows:
+            QMessageBox.warning(self, title, "Nao ha dados para os filtros atuais.")
+            return
+        export_rows = [list(row) for row in rows]
+        dialog = QDialog(self)
+        dialog.setObjectName("popupDialog")
+        dialog.setWindowTitle(title)
+        dialog.resize(1320, 760)
+        dialog.setStyleSheet(self.styleSheet())
+        layout = QVBoxLayout(dialog)
+        layout.setContentsMargins(12, 12, 12, 12)
+        layout.setSpacing(10)
+
+        title_label = QLabel(title)
+        title_label.setObjectName("popupTitle")
+        layout.addWidget(title_label)
+
+        subtitle = QLabel("Resumo por CST, CFOP e Aliquota")
+        subtitle.setObjectName("muted")
+        layout.addWidget(subtitle)
+        filter_state_label = QLabel("Sem filtros ativos.")
+        filter_state_label.setObjectName("muted")
+        filter_state_label.setStyleSheet(f"color: {COLORS['muted']}; font-weight: 700;")
+        layout.addWidget(filter_state_label)
+
+        filters_grid = QGridLayout()
+        filters_grid.setHorizontalSpacing(10)
+        filters_grid.setVerticalSpacing(6)
+        cst_filter_input = QLineEdit()
+        cfop_filter_input = QLineEdit()
+        aliq_filter_input = QLineEdit()
+        search_filter_input = QLineEdit()
+        cst_filter_input.setPlaceholderText("Ex.: 000, 020")
+        cfop_filter_input.setPlaceholderText("Ex.: 1101, 1403")
+        aliq_filter_input.setPlaceholderText("Ex.: 12, 18")
+        search_filter_input.setPlaceholderText("CST, CFOP ou valores")
+        filters_grid.addWidget(QLabel("Filtro CST"), 0, 0)
+        filters_grid.addWidget(cst_filter_input, 1, 0)
+        filters_grid.addWidget(QLabel("Filtro CFOP"), 0, 1)
+        filters_grid.addWidget(cfop_filter_input, 1, 1)
+        filters_grid.addWidget(QLabel("Filtro Aliquota"), 0, 2)
+        filters_grid.addWidget(aliq_filter_input, 1, 2)
+        filters_grid.addWidget(QLabel("Busca"), 0, 3)
+        filters_grid.addWidget(search_filter_input, 1, 3)
+        clear_filters_button = self.create_button("Limpar filtros", lambda: None)
+        filters_grid.addWidget(clear_filters_button, 0, 4, 2, 1)
+        filters_grid.setColumnStretch(0, 1)
+        filters_grid.setColumnStretch(1, 1)
+        filters_grid.setColumnStretch(2, 1)
+        filters_grid.setColumnStretch(3, 2)
+        layout.addLayout(filters_grid)
+
+        table = QTableWidget()
+        table.setColumnCount(len(headers))
+        table.setHorizontalHeaderLabels(headers)
+        table.setAlternatingRowColors(True)
+        table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        table.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOn)
+        table.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOn)
+        table.setHorizontalScrollMode(QAbstractItemView.ScrollPerPixel)
+        table.setVerticalScrollMode(QAbstractItemView.ScrollPerPixel)
+        table.setWordWrap(False)
+        table.verticalHeader().setVisible(False)
+        table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        table.horizontalHeader().setStretchLastSection(True)
+        if detail_rows_by_index:
+            table.itemDoubleClicked.connect(
+                lambda item: self.handle_operation_summary_double_click(item, detail_rows_by_index, operation_type)
+            )
+        self.apply_popup_column_widths(table, headers)
+        self.enable_table_sorting(table)
+        layout.addWidget(table, 1)
+
+        cards_grid = QGridLayout()
+        cards_grid.setHorizontalSpacing(8)
+        card_labels: dict[str, QLabel] = {}
+        cards = (("Linhas", "rows"), ("Total Operacao", "total_operation"), ("Base ICMS", "base_icms"), ("% Base/Oper", "base_ratio"), ("Valor ICMS", "icms_value"))
+        for index, (label, value) in enumerate(cards):
+            card, value_label = self.create_metric_card_with_label(label, "0")
+            card_labels[value] = value_label
+            cards_grid.addWidget(card, 0, index)
+        layout.addLayout(cards_grid)
+
+        filtered_rows_state: dict[str, list[list[object]]] = {"rows": list(export_rows)}
+
+        def parse_tokens(text: str) -> set[str]:
+            return {part.strip() for part in text.split(",") if part.strip()}
+
+        def apply_filters() -> None:
+            cst_tokens = parse_tokens(cst_filter_input.text())
+            cfop_tokens = parse_tokens(cfop_filter_input.text())
+            aliq_tokens = parse_tokens(aliq_filter_input.text())
+            search_text = self.normalize_search_text(search_filter_input.text())
+            filtered_rows: list[list[object]] = []
+            filtered_indices: list[int] = []
+            for original_index, row in enumerate(export_rows):
+                cst_value = str(row[0]).strip()
+                cfop_value = str(row[1]).strip()
+                aliq_value = str(row[2]).strip().replace(".", ",")
+                if cst_tokens and cst_value not in cst_tokens:
+                    continue
+                if cfop_tokens and cfop_value not in cfop_tokens:
+                    continue
+                if aliq_tokens and all(token not in aliq_value for token in aliq_tokens):
+                    continue
+                if search_text:
+                    searchable = self.normalize_search_text(" ".join(str(value) for value in row))
+                    if search_text not in searchable:
+                        continue
+                filtered_rows.append(list(row))
+                filtered_indices.append(original_index)
+
+            table.setRowCount(len(filtered_rows))
+            for row_index, row in enumerate(filtered_rows):
+                for column_index, value in enumerate(row):
+                    item = QTableWidgetItem(str(value))
+                    item.setForeground(QColor(COLORS["text"]))
+                    item.setTextAlignment(Qt.AlignCenter)
+                    table.setItem(row_index, column_index, item)
+
+            if detail_rows_by_index:
+                mapped_details: dict[int, list[dict[str, object]]] = {}
+                for new_index, original_index in enumerate(filtered_indices):
+                    mapped_details[new_index] = detail_rows_by_index.get(original_index, [])
+                table.itemDoubleClicked.disconnect()
+                table.itemDoubleClicked.connect(
+                    lambda item: self.handle_operation_summary_double_click(item, mapped_details, operation_type)
+                )
+
+            filtered_rows_state["rows"] = filtered_rows
+            active_filters: list[str] = []
+            if cst_tokens:
+                active_filters.append("CST")
+            if cfop_tokens:
+                active_filters.append("CFOP")
+            if aliq_tokens:
+                active_filters.append("Aliquota")
+            if search_text:
+                active_filters.append("Busca")
+            filter_state_label.setText("Sem filtros ativos." if not active_filters else f"Filtros ativos: {', '.join(active_filters)}")
+
+            total_operation_filtered = sum((self.decimal_value(row[8]) for row in filtered_rows), Decimal("0"))
+            total_base_filtered = sum((self.decimal_value(row[9]) for row in filtered_rows), Decimal("0"))
+            total_icms_filtered = sum((self.decimal_value(row[5]) for row in filtered_rows), Decimal("0"))
+            ratio_filtered = (total_base_filtered * Decimal("100") / total_operation_filtered).quantize(Decimal("0.01")) if total_operation_filtered else Decimal("0.00")
+            card_labels["rows"].setText(str(len(filtered_rows)))
+            card_labels["total_operation"].setText(self.format_number(total_operation_filtered))
+            card_labels["base_icms"].setText(self.format_number(total_base_filtered))
+            card_labels["base_ratio"].setText(self.format_number(ratio_filtered))
+            card_labels["icms_value"].setText(self.format_number(total_icms_filtered))
+
+        cst_filter_input.textChanged.connect(lambda _text: apply_filters())
+        cfop_filter_input.textChanged.connect(lambda _text: apply_filters())
+        aliq_filter_input.textChanged.connect(lambda _text: apply_filters())
+        search_filter_input.textChanged.connect(lambda _text: apply_filters())
+        clear_filters_button.clicked.connect(lambda: (cst_filter_input.clear(), cfop_filter_input.clear(), aliq_filter_input.clear(), search_filter_input.clear()))
+        apply_filters()
+
+        actions = QHBoxLayout()
+        actions.addWidget(self.create_button("Exportar Excel", lambda: self.export_popup_dataset(title, headers, filtered_rows_state["rows"], "xlsx")))
+        actions.addWidget(self.create_button("Exportar CSV", lambda: self.export_popup_dataset(title, headers, filtered_rows_state["rows"], "csv")))
+        actions.addStretch()
+        actions.addWidget(self.create_button("Fechar", dialog.close))
+        layout.addLayout(actions)
+        dialog.exec()
+
+    def handle_operation_summary_double_click(
+        self,
+        item: QTableWidgetItem,
+        detail_rows_by_index: dict[int, list[dict[str, object]]],
+        operation_type: str,
+    ) -> None:
+        row_index = item.row()
+        details = detail_rows_by_index.get(row_index, [])
+        if not details:
+            return
+        self.open_operation_summary_detail_popup(details, operation_type)
+
+    def open_operation_summary_detail_popup(self, details: list[dict[str, object]], operation_type: str) -> None:
+        rows: list[list[object]] = []
+        detail_payloads: list[dict[str, object]] = []
+        total_quantity = Decimal("0")
+        total_operation = Decimal("0")
+        total_base = Decimal("0")
+        total_icms = Decimal("0")
+        for detail in details:
+            operation_value = self.decimal_value(self.first_row_value(detail, "sale_value", "total_operation_value", "operation_value"))
+            base_icms = self.decimal_value(detail.get("base_icms"))
+            icms_value = self.decimal_value(detail.get("icms_value"))
+            quantity = self.decimal_value(detail.get("quantity"))
+            total_quantity += quantity
+            total_operation += operation_value
+            total_base += base_icms
+            total_icms += icms_value
+            detail_payloads.append(
+                {
+                    "document_date": detail.get("document_date", detail.get("date", "")),
+                    "document_number": detail.get("document_number", ""),
+                    "participant_name": detail.get("participant_name", ""),
+                    "document_key": detail.get("document_key", ""),
+                    "item_number": detail.get("item_number", ""),
+                    "cest": detail.get("cest", ""),
+                    "cfop": detail.get("cfop", ""),
+                    "cst": self.first_row_value(detail, "cst_icms", "cst"),
+                    "icms_rate": self.decimal_value(detail.get("icms_rate")),
+                    "effective_rate": compute_display_icms_rate(
+                        self.decimal_value(detail.get("icms_rate")),
+                        operation_value,
+                        base_icms,
+                        icms_value,
+                    ),
+                    "code": detail.get("code", ""),
+                    "description": detail.get("description", ""),
+                    "ncm": detail.get("ncm", ""),
+                    "document_series": detail.get("document_series", ""),
+                    "document_model": detail.get("document_model", ""),
+                    "quantity": quantity,
+                    "operation_value": operation_value,
+                    "base_icms": base_icms,
+                    "icms_value": icms_value,
+                }
+            )
+        detail_payloads.sort(
+            key=lambda row: (
+                str(row.get("document_date", "")),
+                str(row.get("document_number", "")),
+                str(row.get("document_key", "")),
+                str(row.get("item_number", "")),
+            )
+        )
+        for payload in detail_payloads:
+            rows.append(
+                [
+                    payload.get("document_date", ""),
+                    payload.get("document_number", ""),
+                    payload.get("participant_name", ""),
+                    payload.get("document_key", ""),
+                    payload.get("item_number", ""),
+                    payload.get("cest", ""),
+                    payload.get("cfop", ""),
+                    payload.get("cst", ""),
+                    payload.get("icms_rate", Decimal("0")),
+                    payload.get("effective_rate", Decimal("0")),
+                    payload.get("code", ""),
+                    payload.get("description", ""),
+                    payload.get("ncm", ""),
+                    payload.get("document_series", ""),
+                    payload.get("document_model", ""),
+                ]
+            )
+
+        dialog = QDialog(self)
+        dialog.setObjectName("popupDialog")
+        dialog.setWindowTitle(f"Detalhamento - {operation_type}s")
+        dialog.resize(1420, 760)
+        dialog.setStyleSheet(self.styleSheet())
+        layout = QVBoxLayout(dialog)
+        layout.setContentsMargins(12, 12, 12, 12)
+        layout.setSpacing(10)
+        title_label = QLabel(f"Detalhamento - {operation_type}s")
+        title_label.setObjectName("popupTitle")
+        layout.addWidget(title_label)
+
+        headers = ["Data", "Documento", "Fornecedor", "Chave", "Item", "CEST", "CFOP", "CST", "Aliq ICMS", "Aliq Efetiva", "Codigo", "Descricao", "NCM", "Serie", "Modelo"]
+        table = QTableWidget()
+        table.setColumnCount(len(headers))
+        table.setHorizontalHeaderLabels(headers)
+        table.setRowCount(len(rows))
+        table.setAlternatingRowColors(True)
+        table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        table.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOn)
+        table.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOn)
+        table.setHorizontalScrollMode(QAbstractItemView.ScrollPerPixel)
+        table.setVerticalScrollMode(QAbstractItemView.ScrollPerPixel)
+        table.setWordWrap(False)
+        table.verticalHeader().setVisible(False)
+        table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        table.horizontalHeader().setStretchLastSection(True)
+        for row_index, row in enumerate(rows):
+            for column_index, value in enumerate(row):
+                item = QTableWidgetItem(str(value))
+                item.setForeground(QColor(COLORS["text"]))
+                if column_index not in {2, 3, 11}:
+                    item.setTextAlignment(Qt.AlignCenter)
+                table.setItem(row_index, column_index, item)
+        table.itemDoubleClicked.connect(lambda item: self.open_invoice_mirror_from_detail_row(item, detail_payloads, operation_type))
+        header = table.horizontalHeader()
+        header.setStretchLastSection(False)
+        for column_index in range(table.columnCount()):
+            header.setSectionResizeMode(column_index, QHeaderView.ResizeToContents)
+        self.enable_table_sorting(table)
+        layout.addWidget(table, 1)
+
+        ratio = (total_base * Decimal("100") / total_operation).quantize(Decimal("0.01")) if total_operation > 0 else Decimal("0.00")
+        cards_grid = QGridLayout()
+        cards = (
+            ("Lancamentos", str(len(rows))),
+            ("Quantidade", self.format_number(total_quantity)),
+            ("Valor Operacao", self.format_number(total_operation)),
+            ("Base ICMS", self.format_number(total_base)),
+            ("% Base/Oper", self.format_number(ratio)),
+            ("Valor ICMS", self.format_number(total_icms)),
+        )
+        for index, (label, value) in enumerate(cards):
+            card, value_label = self.create_metric_card_with_label(label, value)
+            value_label.setText(value)
+            cards_grid.addWidget(card, 0, index)
+        layout.addLayout(cards_grid)
+
+        actions = QHBoxLayout()
+        actions.addWidget(self.create_button("Exportar Excel", lambda: self.export_popup_dataset("Detalhamento", headers, rows, "xlsx")))
+        actions.addWidget(self.create_button("Exportar CSV", lambda: self.export_popup_dataset("Detalhamento", headers, rows, "csv")))
+        actions.addStretch()
+        actions.addWidget(self.create_button("Fechar", dialog.close))
+        layout.addLayout(actions)
+        dialog.exec()
+
+    def open_invoice_mirror_from_detail_row(
+        self,
+        item: QTableWidgetItem,
+        detail_rows: list[dict[str, object]],
+        operation_type: str,
+    ) -> None:
+        row_index = item.row()
+        if not detail_rows:
+            return
+        selected = detail_rows[row_index] if 0 <= row_index < len(detail_rows) else detail_rows[0]
+        selected_document = str(selected.get("document_number", ""))
+        selected_key = str(selected.get("document_key", ""))
+        selected_item = str(selected.get("item_number", "")).strip()
+        selected_code = str(selected.get("code", "")).strip()
+        selected_series = str(selected.get("document_series", "")).strip()
+
+        source_pool = self.get_filtered_launch_details() if operation_type == "Entrada" else self.get_filtered_sale_launch_details()
+        invoice_details = [
+            row
+            for row in source_pool
+            if isinstance(row, dict)
+            and (
+                (selected_key and str(row.get("document_key", "")).strip() == selected_key)
+                or (
+                    selected_document
+                    and str(row.get("document_number", "")).strip() == selected_document
+                    and (not selected_series or str(row.get("document_series", "")).strip() == selected_series)
+                )
+            )
+        ]
+        if not invoice_details:
+            invoice_details = [
+                {
+                    "item_number": selected.get("item_number", ""),
+                    "code": selected.get("code", ""),
+                    "description": selected.get("description", ""),
+                    "ncm": selected.get("ncm", ""),
+                    "cest": selected.get("cest", ""),
+                    "cfop": selected.get("cfop", ""),
+                    "cst_icms": selected.get("cst", ""),
+                    "icms_rate": selected.get("icms_rate", Decimal("0")),
+                    "document_number": selected_document,
+                    "document_key": selected_key,
+                    "document_date": selected.get("document_date", ""),
+                    "document_series": selected.get("document_series", ""),
+                    "document_model": selected.get("document_model", ""),
+                    "participant_name": selected.get("participant_name", ""),
+                    "participant_tax_id": "",
+                    "quantity": selected.get("quantity", Decimal("0")),
+                    "sale_value": selected.get("operation_value", Decimal("0")),
+                    "base_icms": selected.get("base_icms", Decimal("0")),
+                    "icms_value": selected.get("icms_value", Decimal("0")),
+                }
+            ]
+        title = f"Espelho da Nota - {selected_document or selected_key}"
+        headers = ["Item", "Codigo", "Descricao", "NCM", "CEST", "CFOP", "CST", "Aliq ICMS", "Aliq Efetiva"]
+        rows = []
+        highlight_rows: set[int] = set()
+        for index, row in enumerate(
+            sorted(
+                invoice_details,
+                key=lambda current: (
+                    str(current.get("item_number", "")),
+                    str(current.get("code", "")),
+                ),
+            )
+        ):
+            operation_value = self.decimal_value(self.first_row_value(row, "sale_value", "total_operation_value", "operation_value"))
+            base_icms = self.decimal_value(row.get("base_icms"))
+            icms_value = self.decimal_value(row.get("icms_value"))
+            rows.append(
+                [
+                    row.get("item_number", ""),
+                    row.get("code", ""),
+                    row.get("description", ""),
+                    row.get("ncm", ""),
+                    row.get("cest", ""),
+                    row.get("cfop", ""),
+                    self.first_row_value(row, "cst_icms", "cst"),
+                    self.decimal_value(row.get("icms_rate")),
+                    compute_display_icms_rate(self.decimal_value(row.get("icms_rate")), operation_value, base_icms, icms_value),
+                ]
+            )
+            current_item = str(row.get("item_number", "")).strip()
+            current_code = str(row.get("code", "")).strip()
+            if (selected_item and current_item == selected_item) or (selected_code and current_code == selected_code):
+                highlight_rows.add(index)
+
+        total_quantity = Decimal("0")
+        total_operation = Decimal("0")
+        total_base = Decimal("0")
+        total_icms = Decimal("0")
+        for row in invoice_details:
+            total_quantity += self.decimal_value(row.get("quantity"))
+            total_operation += self.decimal_value(self.first_row_value(row, "sale_value", "total_operation_value", "operation_value"))
+            total_base += self.decimal_value(row.get("base_icms"))
+            total_icms += self.decimal_value(row.get("icms_value"))
+
+        note_header = {
+            "document_number": selected_document,
+            "document_key": selected_key,
+            "document_date": str(invoice_details[0].get("document_date", "")) if invoice_details else "",
+            "document_series": str(invoice_details[0].get("document_series", "")) if invoice_details else "",
+            "document_model": str(invoice_details[0].get("document_model", "")) if invoice_details else "",
+            "participant_name": str(invoice_details[0].get("participant_name", "")) if invoice_details else "",
+            "participant_tax_id": str(invoice_details[0].get("participant_tax_id", "")) if invoice_details else "",
+            "participant_code": str(invoice_details[0].get("participant_code", "")) if invoice_details else "",
+            "effective_rate": compute_display_icms_rate(
+                self.decimal_value(invoice_details[0].get("icms_rate")) if invoice_details else Decimal("0"),
+                total_operation,
+                total_base,
+                total_icms,
+            ),
+            "items_count": len(rows),
+        }
+        self.open_invoice_mirror_popup_with_cards(
+            title,
+            headers,
+            rows,
+            total_quantity,
+            total_operation,
+            total_base,
+            total_icms,
+            note_header,
+            highlight_rows,
+        )
+
+    def open_invoice_mirror_popup_with_cards(
+        self,
+        title: str,
+        headers: list[str],
+        rows: list[list[object]],
+        total_quantity: Decimal,
+        total_operation: Decimal,
+        total_base: Decimal,
+        total_icms: Decimal,
+        note_header: dict[str, object],
+        highlight_rows: set[int] | None = None,
+    ) -> None:
+        if not rows:
+            QMessageBox.warning(self, title, "Nao ha dados para esta nota.")
+            return
+        dialog = QDialog(self)
+        dialog.setObjectName("popupDialog")
+        dialog.setWindowTitle(title)
+        dialog.resize(1220, 700)
+        dialog.setStyleSheet(self.styleSheet())
+        layout = QVBoxLayout(dialog)
+        layout.setContentsMargins(12, 12, 12, 12)
+        layout.setSpacing(10)
+
+        title_label = QLabel(title)
+        title_label.setObjectName("popupTitle")
+        layout.addWidget(title_label)
+        section_label = QLabel("Cabecalho da Nota")
+        section_label.setObjectName("sectionTitle")
+        layout.addWidget(section_label)
+
+        header_panel = self.create_panel()
+        header_layout = QGridLayout(header_panel)
+        header_layout.setContentsMargins(10, 10, 10, 10)
+        header_layout.setHorizontalSpacing(18)
+        header_layout.setVerticalSpacing(6)
+        header_layout.addWidget(QLabel(f"Documento: {note_header.get('document_number', '')}"), 0, 0)
+        header_layout.addWidget(QLabel(f"Fornecedor: {note_header.get('participant_name', '')}"), 0, 1)
+        header_layout.addWidget(QLabel(f"Chave: {note_header.get('document_key', '')}"), 1, 0)
+        header_layout.addWidget(QLabel(f"Cod. Participante: {note_header.get('participant_code', '')}"), 1, 1)
+        header_layout.addWidget(QLabel(f"Data: {note_header.get('document_date', '')}"), 2, 0)
+        header_layout.addWidget(QLabel(f"CPF/CNPJ: {note_header.get('participant_tax_id', '')}"), 2, 1)
+        header_layout.addWidget(QLabel(f"Serie: {note_header.get('document_series', '')}"), 3, 0)
+        header_layout.addWidget(QLabel(f"Aliq ICMS Efetiva: {self.format_number(note_header.get('effective_rate', Decimal('0')))}"), 3, 1)
+        header_layout.addWidget(QLabel(f"Modelo: {note_header.get('document_model', '')}"), 4, 0)
+        header_layout.addWidget(QLabel(f"Itens: {note_header.get('items_count', 0)}"), 4, 1)
+        header_layout.setColumnStretch(0, 1)
+        header_layout.setColumnStretch(1, 1)
+        layout.addWidget(header_panel)
+
+        table = QTableWidget()
+        table.setColumnCount(len(headers))
+        table.setHorizontalHeaderLabels(headers)
+        table.setRowCount(len(rows))
+        table.setAlternatingRowColors(True)
+        table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        table.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOn)
+        table.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOn)
+        table.setHorizontalScrollMode(QAbstractItemView.ScrollPerPixel)
+        table.setVerticalScrollMode(QAbstractItemView.ScrollPerPixel)
+        table.setWordWrap(False)
+        table.verticalHeader().setVisible(False)
+        table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        table.horizontalHeader().setStretchLastSection(True)
+        for row_index, row in enumerate(rows):
+            for column_index, value in enumerate(row):
+                item = QTableWidgetItem(str(value))
+                item.setForeground(QColor(COLORS["text"]))
+                if column_index not in {2}:
+                    item.setTextAlignment(Qt.AlignCenter)
+                if highlight_rows and row_index in highlight_rows:
+                    item.setBackground(QColor("#d9ecff"))
+                table.setItem(row_index, column_index, item)
+        self.apply_popup_column_widths(table, headers)
+        self.enable_table_sorting(table)
+        layout.addWidget(table, 1)
+
+        ratio = (total_base * Decimal("100") / total_operation).quantize(Decimal("0.01")) if total_operation > 0 else Decimal("0.00")
+        cards_grid = QGridLayout()
+        cards = (
+            ("Quantidade", self.format_number(total_quantity)),
+            ("Valor Operacao", self.format_number(total_operation)),
+            ("Base ICMS", self.format_number(total_base)),
+            ("% Base/Oper", self.format_number(ratio)),
+            ("Valor ICMS", self.format_number(total_icms)),
+        )
+        for index, (label, value) in enumerate(cards):
+            card, value_label = self.create_metric_card_with_label(label, value)
+            value_label.setText(value)
+            cards_grid.addWidget(card, 0, index)
+        layout.addLayout(cards_grid)
+
+        actions = QHBoxLayout()
+        actions.addWidget(self.create_button("Exportar Excel", lambda: self.export_popup_dataset(title, headers, rows, "xlsx")))
+        actions.addWidget(self.create_button("Exportar CSV", lambda: self.export_popup_dataset(title, headers, rows, "csv")))
+        actions.addStretch()
+        actions.addWidget(self.create_button("Fechar", dialog.close))
+        layout.addLayout(actions)
+        dialog.exec()
 
     def open_documents_popup_for_details(self, details: list[dict[str, object]], caption: str) -> None:
         grouped: dict[tuple[str, str, str], dict[str, object]] = {}
+        grouped_launch_details: dict[tuple[str, str, str], list[dict[str, object]]] = {}
         for detail in details:
             key = (str(detail.get("period", "")), str(detail.get("document_number", "")), str(detail.get("document_key", "")))
             bucket = grouped.setdefault(
                 key,
                 {"period": detail.get("period", ""), "document_date": detail.get("document_date", detail.get("date", "")), "document_number": detail.get("document_number", ""), "document_series": detail.get("document_series", ""), "document_model": detail.get("document_model", ""), "participant_name": detail.get("participant_name", ""), "participant_tax_id": detail.get("participant_tax_id", ""), "document_key": detail.get("document_key", ""), "items": 0, "sale_value": Decimal("0"), "base_icms": Decimal("0"), "icms_value": Decimal("0")},
             )
+            grouped_launch_details.setdefault(key, []).append(detail)
             bucket["items"] = int(bucket["items"]) + 1
             bucket["sale_value"] = Decimal(bucket["sale_value"]) + self.decimal_value(self.first_row_value(detail, "sale_value", "total_operation_value", "operation_value"))
             bucket["base_icms"] = Decimal(bucket["base_icms"]) + self.decimal_value(detail.get("base_icms"))
             bucket["icms_value"] = Decimal(bucket["icms_value"]) + self.decimal_value(detail.get("icms_value"))
-        rows = [(row["period"], row["document_date"], row["document_number"], row["document_series"], row["document_model"], row["participant_name"], row["participant_tax_id"], row["document_key"], row["items"], row["sale_value"], row["base_icms"], row["icms_value"]) for row in sorted(grouped.values(), key=lambda item: (str(item["period"]), str(item["document_date"]), str(item["document_number"])))]
-        self.open_table_popup(f"Espelho de Documentos Fiscais - {caption}", ["Periodo", "Data", "Documento", "Serie", "Modelo", "Participante", "CPF/CNPJ", "Chave", "Itens", "Valor Operacao", "Base ICMS", "Valor ICMS"], rows, 1380, 720)
+        grouped_items = sorted(grouped.items(), key=lambda item: (str(item[1]["period"]), str(item[1]["document_date"]), str(item[1]["document_number"])))
+        rows = [
+            (
+                row["period"],
+                row["document_date"],
+                row["document_number"],
+                row["document_series"],
+                row["document_model"],
+                row["participant_name"],
+                row["participant_tax_id"],
+                row["document_key"],
+                row["items"],
+                row["sale_value"],
+                row["base_icms"],
+                row["icms_value"],
+            )
+            for _key, row in grouped_items
+        ]
+        detail_payloads_by_row_index: dict[int, list[dict[str, object]]] = {
+            index: [dict(detail) for detail in grouped_launch_details.get(key, []) if isinstance(detail, dict)]
+            for index, (key, _row) in enumerate(grouped_items)
+        }
+
+        dialog = QDialog(self)
+        dialog.setObjectName("popupDialog")
+        dialog.setWindowTitle(f"Espelho de Documentos Fiscais - {caption}")
+        dialog.resize(1380, 720)
+        dialog.setStyleSheet(self.styleSheet())
+        layout = QVBoxLayout(dialog)
+        layout.setContentsMargins(12, 12, 12, 12)
+        layout.setSpacing(10)
+
+        title_label = QLabel(f"Espelho de Documentos Fiscais - {caption}")
+        title_label.setObjectName("popupTitle")
+        layout.addWidget(title_label)
+
+        headers = ["Periodo", "Data", "Documento", "Serie", "Modelo", "Participante", "CPF/CNPJ", "Chave", "Itens", "Valor Operacao", "Base ICMS", "Valor ICMS"]
+        table = QTableWidget()
+        table.setColumnCount(len(headers))
+        table.setHorizontalHeaderLabels(headers)
+        table.setRowCount(len(rows))
+        table.setAlternatingRowColors(True)
+        table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        table.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOn)
+        table.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOn)
+        table.setHorizontalScrollMode(QAbstractItemView.ScrollPerPixel)
+        table.setVerticalScrollMode(QAbstractItemView.ScrollPerPixel)
+        table.setWordWrap(False)
+        table.verticalHeader().setVisible(False)
+        table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        table.horizontalHeader().setStretchLastSection(True)
+        for row_index, row in enumerate(rows):
+            for column_index, value in enumerate(row):
+                item = QTableWidgetItem(str(value))
+                item.setForeground(QColor(COLORS["text"]))
+                if column_index not in {5, 7}:
+                    item.setTextAlignment(Qt.AlignCenter)
+                table.setItem(row_index, column_index, item)
+        self.apply_popup_column_widths(table, headers)
+        self.enable_table_sorting(table)
+        operation_type = "Entrada" if "Entrada" in caption else "Saida"
+        table.itemDoubleClicked.connect(
+            lambda item: self.open_invoice_mirror_from_documents_popup_row(item, table, grouped_launch_details, operation_type)
+        )
+        layout.addWidget(table, 1)
+
+        actions = QHBoxLayout()
+        actions.addWidget(self.create_button("Exportar Excel", lambda: self.export_popup_dataset(f"Espelho de Documentos Fiscais - {caption}", headers, [list(row) for row in rows], "xlsx")))
+        actions.addWidget(self.create_button("Exportar CSV", lambda: self.export_popup_dataset(f"Espelho de Documentos Fiscais - {caption}", headers, [list(row) for row in rows], "csv")))
+        actions.addStretch()
+        actions.addWidget(self.create_button("Fechar", dialog.close))
+        layout.addLayout(actions)
+        dialog.exec()
+
+    def open_invoice_mirror_from_documents_popup_row(
+        self,
+        item: QTableWidgetItem,
+        table: QTableWidget,
+        grouped_launch_details: dict[tuple[str, str, str], list[dict[str, object]]],
+        operation_type: str,
+    ) -> None:
+        row_index = item.row()
+        document_item = table.item(row_index, 2)
+        key_item = table.item(row_index, 7)
+        selected_document = str(document_item.text()).strip() if document_item else ""
+        selected_key = str(key_item.text()).strip() if key_item else ""
+        selected_details: list[dict[str, object]] = []
+        for key_tuple, detail_rows in grouped_launch_details.items():
+            current_document = str(key_tuple[1]).strip() if len(key_tuple) > 1 else ""
+            current_key = str(key_tuple[2]).strip() if len(key_tuple) > 2 else ""
+            if (selected_key and current_key == selected_key) or (selected_document and current_document == selected_document):
+                selected_details = [detail for detail in detail_rows if isinstance(detail, dict)]
+                break
+        if not selected_details:
+            return
+        self.open_invoice_mirror_from_detail_row(item, selected_details[:1], operation_type)
