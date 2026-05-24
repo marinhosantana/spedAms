@@ -6637,9 +6637,6 @@ class QtSpedApp(QMainWindow):
             lambda column: self.sort_table_by_column(table, column, sort_state)
         )
         operation_type = "Entrada" if "Entrada" in caption else "Saida"
-        table.cellDoubleClicked.connect(
-            lambda row, _column: self.open_invoice_mirror_from_documents_popup_selection(row, table, grouped_launch_details, operation_type)
-        )
         table.itemDoubleClicked.connect(
             lambda item: self.open_invoice_mirror_from_documents_popup_selection(item.row(), table, grouped_launch_details, operation_type)
         )
