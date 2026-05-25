@@ -58,9 +58,12 @@ from app.services.analysis_reports import (
     build_credit_diagnostic_datasets,
     build_credit_diagnostic_period_comparison_dataset,
     build_contrib_operation_launch_details_map,
+    build_entry_exit_analysis_rows,
+    build_entry_exit_footer_rows,
     build_contrib_operation_summary_rows,
     build_contrib_product_monthly_linear_dataset,
     build_product_monthly_linear_dataset,
+    write_entry_exit_analysis_excel,
 )
 from app.services.operation_summary import build_filtered_apuracao_rows, build_reduction_launch_rows
 from app.services.path_selection import append_unique_paths, collapse_xml_selection_paths, format_selected_paths, limit_selected_paths, parse_selected_paths
@@ -233,6 +236,9 @@ class QtSpedApp(QMainWindow):
         self.archive_file_rows: dict[int, dict[str, object]] = {}
         self.nfe_extract_rows: list[dict[str, object]] = []
         self.nfe_extract_all_rows: list[dict[str, object]] = []
+        self.entry_exit_detail_rows: list[dict[str, object]] = []
+        self.entry_exit_excel_rows: list[list[object]] = []
+        self.entry_exit_totals: dict[str, Decimal] = {}
 
         self.setWindowTitle(self.app_window_title)
         self.resize(1360, 820)
@@ -375,6 +381,33 @@ class QtSpedApp(QMainWindow):
                 color: {COLORS["text"]};
                 spacing: 7px;
             }}
+            QTabWidget::pane {{
+                border: 1px solid {COLORS["line"]};
+                border-radius: 8px;
+                background: #ffffff;
+                top: -1px;
+            }}
+            QTabBar::tab {{
+                background: #edf3f7;
+                color: {COLORS["text"]};
+                border: 1px solid {COLORS["line"]};
+                border-bottom-color: {COLORS["line"]};
+                border-top-left-radius: 6px;
+                border-top-right-radius: 6px;
+                padding: 8px 14px;
+                margin-right: 4px;
+                min-width: 92px;
+                font-weight: 700;
+            }}
+            QTabBar::tab:selected {{
+                background: {COLORS["accent"]};
+                color: #ffffff;
+                border-color: {COLORS["accent"]};
+            }}
+            QTabBar::tab:hover:!selected {{
+                background: #dbeafe;
+                color: {COLORS["text"]};
+            }}
             QTableWidget {{
                 background: #ffffff;
                 alternate-background-color: #fbfdff;
@@ -487,12 +520,13 @@ class QtSpedApp(QMainWindow):
                 "Consultas",
                 (
                     ("Dashboard", 0),
-                    ("Consulta Entradas", 1),
-                    ("Consulta Saidas", 2),
+                    ("ICMS/IPI Entradas", 1),
+                    ("ICMS/IPI Saidas", 2),
                     ("PIS/COFINS Entradas", 3),
                     ("PIS/COFINS Saidas", 4),
                     ("XML", 5),
                     ("SPED x XML", 6),
+                    ("Analise Entrada e Saida", 17),
                 ),
             ),
             (
@@ -576,6 +610,7 @@ class QtSpedApp(QMainWindow):
         self.stack.addWidget(self.build_settings_page())
         self.stack.addWidget(self.build_duplicates_cleanup_page())
         self.stack.addWidget(self.build_nfe_key_extract_page())
+        self.stack.addWidget(self.build_entry_exit_page())
         content_layout.addWidget(self.stack, 1)
         shell.addWidget(content, 1)
         self.setCentralWidget(root)
@@ -1650,6 +1685,67 @@ class QtSpedApp(QMainWindow):
         self.enable_table_sorting(self.sale_table)
         layout.addWidget(self.sale_table, 1)
         self.bind_sale_live_filters()
+        return page
+
+    def build_entry_exit_page(self) -> QWidget:
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(12)
+
+        toolbar = self.create_panel()
+        toolbar_layout = QHBoxLayout(toolbar)
+        toolbar_layout.setContentsMargins(12, 10, 12, 10)
+        title = QLabel("Analise Entrada e Saida")
+        title.setObjectName("sectionTitle")
+        toolbar_layout.addWidget(title)
+        toolbar_layout.addStretch()
+        toolbar_layout.addWidget(self.create_button("Limpar", self.clear_entry_exit_page))
+        toolbar_layout.addWidget(self.create_button("Exportar Excel", self.export_entry_exit_analysis))
+        toolbar_layout.addWidget(self.create_button("Processar", self.process_entry_exit_analysis, primary=True))
+        layout.addWidget(toolbar)
+
+        setup = self.create_panel()
+        setup_layout = QGridLayout(setup)
+        setup_layout.setContentsMargins(12, 12, 12, 12)
+        setup_layout.setHorizontalSpacing(8)
+        setup_layout.setVerticalSpacing(8)
+        self.entry_exit_sped_input = QLineEdit()
+        self.entry_exit_sped_input.setPlaceholderText("Selecione um ou mais arquivos SPED Fiscal")
+        self.add_path_row(setup_layout, 0, "SPEDs", self.entry_exit_sped_input, self.select_entry_exit_sped_files, lambda: self.entry_exit_sped_input.clear())
+        layout.addWidget(setup)
+
+        metrics = QGridLayout()
+        metrics.setHorizontalSpacing(8)
+        self.entry_exit_metric_labels: dict[str, QLabel] = {}
+        for column, (key, label) in enumerate(
+            (
+                ("saida_icms", "Saidas ICMS"),
+                ("entrada_icms", "Entradas ICMS"),
+                ("recolher", "A recolher"),
+                ("percent_sale", "% sobre venda"),
+                ("source_files", "Arquivos"),
+            )
+        ):
+            card, value_label = self.create_metric_card_with_label(label, "0")
+            self.entry_exit_metric_labels[key] = value_label
+            metrics.addWidget(card, 0, column)
+        layout.addLayout(metrics)
+
+        self.entry_exit_tabs = QTabWidget()
+        self.entry_exit_sale_table = self.create_data_table(self.entry_exit_detail_headers())
+        self.entry_exit_entry_table = self.create_data_table(self.entry_exit_detail_headers())
+        self.entry_exit_sale_footer_table = self.create_data_table(self.entry_exit_footer_headers())
+        self.entry_exit_entry_footer_table = self.create_data_table(self.entry_exit_footer_headers())
+        self.entry_exit_tabs.addTab(self.entry_exit_sale_table, "Saidas")
+        self.entry_exit_tabs.addTab(self.entry_exit_entry_table, "Entradas")
+        self.entry_exit_tabs.addTab(self.entry_exit_sale_footer_table, "Resumo Saidas")
+        self.entry_exit_tabs.addTab(self.entry_exit_entry_footer_table, "Resumo Entradas")
+        layout.addWidget(self.entry_exit_tabs, 1)
+
+        self.entry_exit_status_label = QLabel("Selecione os SPEDs e clique em Processar.")
+        self.entry_exit_status_label.setObjectName("muted")
+        layout.addWidget(self.entry_exit_status_label)
         return page
 
     def build_contrib_page(self, operation_type: str) -> QWidget:
@@ -2871,6 +2967,16 @@ class QtSpedApp(QMainWindow):
         if limit_exceeded:
             QMessageBox.warning(self, "SPED Qt", "A consulta aceita no maximo 12 SPEDs.")
 
+    def select_entry_exit_sped_files(self) -> None:
+        files, _ = QFileDialog.getOpenFileNames(self, "Selecionar SPEDs Fiscais", "", "Arquivos SPED (*.txt *.sped *.efd);;Todos os arquivos (*.*)")
+        if not files:
+            return
+        paths = append_unique_paths(parse_selected_paths(self.entry_exit_sped_input.text()), files)
+        paths, limit_exceeded = limit_selected_paths(paths, 12)
+        self.entry_exit_sped_input.setText(format_selected_paths(paths))
+        if limit_exceeded:
+            QMessageBox.warning(self, "SPED Qt", "A analise aceita no maximo 12 SPEDs.")
+
     def select_sale_xml_sources(self) -> None:
         files, _ = QFileDialog.getOpenFileNames(self, "Selecionar XMLs 55/65", "", "Arquivos XML (*.xml);;Todos os arquivos (*.*)")
         if files:
@@ -3406,6 +3512,26 @@ class QtSpedApp(QMainWindow):
         finally:
             QApplication.restoreOverrideCursor()
 
+    def process_entry_exit_analysis(self) -> None:
+        try:
+            QApplication.setOverrideCursor(Qt.WaitCursor)
+            sped_paths = parse_selected_paths(self.entry_exit_sped_input.text())
+            if not sped_paths:
+                QMessageBox.warning(self, "Analise Entrada e Saida", "Selecione ao menos um arquivo SPED Fiscal.")
+                return
+            detail_rows, excel_rows, totals = build_entry_exit_analysis_rows(sped_paths)
+            self.entry_exit_detail_rows = list(detail_rows)
+            self.entry_exit_excel_rows = list(excel_rows)
+            self.entry_exit_totals = dict(totals)
+            self.refresh_entry_exit_analysis()
+            self.entry_exit_status_label.setText(f"Analise montada com {len(detail_rows)} agrupamento(s) de CST/CFOP/aliquota.")
+            self.statusBar().showMessage(f"Analise Entrada e Saida processada: {len(detail_rows)} agrupamento(s). {dt.datetime.now().strftime('%H:%M:%S')}")
+        except Exception as exc:
+            QMessageBox.critical(self, "Analise Entrada e Saida", str(exc))
+            self.statusBar().showMessage(f"Falha na analise Entrada e Saida: {exc}")
+        finally:
+            QApplication.restoreOverrideCursor()
+
     def process_contrib_query(self, operation_type: str) -> None:
         prefix = self.contrib_prefix(operation_type)
         try:
@@ -3867,6 +3993,86 @@ class QtSpedApp(QMainWindow):
         self.sale_metric_labels["base"].setText(self.format_number(total_base))
         self.sale_metric_labels["icms"].setText(self.format_number(total_icms))
 
+    def entry_exit_detail_headers(self) -> list[str]:
+        return [
+            "Tipo",
+            "Classificacao",
+            "CST",
+            "CFOP",
+            "Aliq ICMS",
+            "Aliq Efetiva",
+            "Valor ICMS",
+            "Total Operacao",
+            "Base ICMS",
+            "Base ICMS ST",
+            "Valor ICMS ST",
+            "Base IPI",
+            "Aliq IPI",
+            "Valor IPI",
+        ]
+
+    def entry_exit_footer_headers(self) -> list[str]:
+        return [
+            "Resumo",
+            "Valor ICMS",
+            "Total Operacao",
+            "Base ICMS",
+            "Base ICMS ST",
+            "Valor ICMS ST",
+            "Base IPI",
+            "Valor IPI",
+        ]
+
+    def refresh_entry_exit_analysis(self) -> None:
+        sale_rows = [row for row in self.entry_exit_detail_rows if str(row.get("operation_type", "")) == "Saida"]
+        entry_rows = [row for row in self.entry_exit_detail_rows if str(row.get("operation_type", "")) == "Entrada"]
+        self.set_table_rows(self.entry_exit_sale_table, [self.entry_exit_detail_display_row(row) for row in sale_rows])
+        self.set_table_rows(self.entry_exit_entry_table, [self.entry_exit_detail_display_row(row) for row in entry_rows])
+        self.set_table_rows(
+            self.entry_exit_sale_footer_table,
+            [self.entry_exit_footer_display_row(row) for row in build_entry_exit_footer_rows(sale_rows, "Saida")],
+        )
+        self.set_table_rows(
+            self.entry_exit_entry_footer_table,
+            [self.entry_exit_footer_display_row(row) for row in build_entry_exit_footer_rows(entry_rows, "Entrada")],
+        )
+        totals = self.entry_exit_totals
+        self.entry_exit_metric_labels["saida_icms"].setText(self.format_number(totals.get("saida_icms", Decimal("0"))))
+        self.entry_exit_metric_labels["entrada_icms"].setText(self.format_number(totals.get("entrada_icms", Decimal("0"))))
+        self.entry_exit_metric_labels["recolher"].setText(self.format_number(totals.get("recolher", Decimal("0"))))
+        self.entry_exit_metric_labels["percent_sale"].setText(f"{self.format_number(totals.get('percent_sale', Decimal('0')))}%")
+        self.entry_exit_metric_labels["source_files"].setText(str(int(totals.get("source_files", Decimal("0")))))
+
+    def entry_exit_detail_display_row(self, row: dict[str, object]) -> list[object]:
+        return [
+            row.get("marker", ""),
+            row.get("category", ""),
+            row.get("cst_icms", ""),
+            row.get("cfop", ""),
+            self.format_number(row.get("icms_rate", Decimal("0"))),
+            self.format_number(row.get("effective_rate", Decimal("0"))),
+            self.format_number(row.get("icms_value", Decimal("0"))),
+            self.format_number(row.get("total_operation_value", Decimal("0"))),
+            self.format_number(row.get("base_icms", Decimal("0"))),
+            self.format_number(row.get("base_icms_st", Decimal("0"))),
+            self.format_number(row.get("icms_st_value", Decimal("0"))),
+            self.format_number(row.get("base_ipi", Decimal("0"))),
+            self.format_number(row.get("ipi_rate", Decimal("0"))),
+            self.format_number(row.get("ipi_value", Decimal("0"))),
+        ]
+
+    def entry_exit_footer_display_row(self, row: dict[str, object]) -> list[object]:
+        return [
+            row.get("label", ""),
+            self.format_number(row.get("icms_value", Decimal("0"))),
+            self.format_number(row.get("total_operation_value", Decimal("0"))),
+            self.format_number(row.get("base_icms", Decimal("0"))),
+            self.format_number(row.get("base_icms_st", Decimal("0"))),
+            self.format_number(row.get("icms_st_value", Decimal("0"))),
+            self.format_number(row.get("base_ipi", Decimal("0"))),
+            self.format_number(row.get("ipi_value", Decimal("0"))),
+        ]
+
     def refresh_contrib_table(self, operation_type: str) -> None:
         prefix = self.contrib_prefix(operation_type)
         filtered_rows = self.filtered_contrib_table_rows(operation_type)
@@ -4053,6 +4259,15 @@ class QtSpedApp(QMainWindow):
         self.rebuild_sale_period_checks([])
         self.refresh_sale_table()
         self.statusBar().showMessage("Tela limpa.")
+
+    def clear_entry_exit_page(self) -> None:
+        self.entry_exit_sped_input.clear()
+        self.entry_exit_detail_rows = []
+        self.entry_exit_excel_rows = []
+        self.entry_exit_totals = {}
+        self.refresh_entry_exit_analysis()
+        self.entry_exit_status_label.setText("Selecione os SPEDs e clique em Processar.")
+        self.statusBar().showMessage("Tela Analise Entrada e Saida limpa.")
 
     def clear_contrib_page(self, operation_type: str) -> None:
         prefix = self.contrib_prefix(operation_type)
@@ -4291,6 +4506,27 @@ class QtSpedApp(QMainWindow):
             self.handle_export_success("Exportar consulta", output_path, "Consulta exportada")
         except Exception as exc:
             self.handle_export_failure("Exportar consulta", "consulta", exc)
+
+    def export_entry_exit_analysis(self) -> None:
+        if not self.entry_exit_excel_rows:
+            QMessageBox.warning(self, "Analise Entrada e Saida", "Nao ha analise para exportar.")
+            return
+        output, _selected_filter = QFileDialog.getSaveFileName(
+            self,
+            "Salvar analise Entrada e Saida",
+            "analise_entrada_saida.xlsx",
+            "Arquivo Excel (*.xlsx)",
+        )
+        if not output:
+            return
+        output_path = Path(output)
+        if output_path.suffix.lower() != ".xlsx":
+            output_path = output_path.with_suffix(".xlsx")
+        try:
+            write_entry_exit_analysis_excel(output_path, self.entry_exit_excel_rows)
+            self.handle_export_success("Analise Entrada e Saida", output_path, "Analise exportada")
+        except Exception as exc:
+            self.handle_export_failure("Analise Entrada e Saida", "analise", exc)
 
     def export_catalog_table_filtered(self, table: QTableWidget, context_name: str = "cadastros") -> None:
         headers = [
