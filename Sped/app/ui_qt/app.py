@@ -1396,6 +1396,18 @@ class QtSpedApp(QMainWindow):
         header = table.horizontalHeader()
         header.setSortIndicatorShown(True)
         header.setSectionsClickable(True)
+        header.setMinimumSectionSize(70)
+        self.ensure_full_header_visibility(table)
+
+    def ensure_full_header_visibility(self, table: QTableWidget) -> None:
+        header = table.horizontalHeader()
+        font_metrics = header.fontMetrics()
+        for column_index in range(table.columnCount()):
+            header_item = table.horizontalHeaderItem(column_index)
+            header_text = header_item.text() if header_item else ""
+            minimum_width = max(70, font_metrics.horizontalAdvance(header_text) + 28)
+            if table.columnWidth(column_index) < minimum_width:
+                table.setColumnWidth(column_index, minimum_width)
 
     def apply_table_column_policy(self, table: QTableWidget) -> None:
         short_labels = (
@@ -4744,6 +4756,7 @@ class QtSpedApp(QMainWindow):
         }
         for index, header in enumerate(headers):
             table.setColumnWidth(index, width_by_header.get(header, 135))
+        self.ensure_full_header_visibility(table)
 
     def export_popup_dataset(self, title: str, headers: list[str], rows: list[list[object]], output_type: str) -> None:
         suffix = ".csv" if output_type == "csv" else ".xlsx"
