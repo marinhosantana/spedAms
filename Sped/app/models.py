@@ -44,6 +44,7 @@ class CompareXmlItem:
     vl_bc_cofins: float
     aliq_cofins: float
     vl_cofins: float
+    icms_code_source: str = ""
 
 
 @dataclass

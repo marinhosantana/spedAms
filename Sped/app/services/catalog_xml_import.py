@@ -106,6 +106,7 @@ class CatalogImportPreviewRow:
     empresa_ie: str
     fornecedor: str
     fornecedor_ie: str
+    regime_tributario: str
     codigo_fornecedor: str
     descricao: str
     ean: str
@@ -162,6 +163,8 @@ def build_catalog_import_preview(
         company_name = _normalize_name(invoice.recipient_name, "Empresa sem nome")
         supplier_name = _normalize_name(invoice.issuer_name, "Fornecedor sem nome")
         for item in invoice.items:
+            icms_source = str(getattr(item, "icms_code_source", "") or "").strip().upper()
+            regime_tributario = "SIMPLES_NACIONAL" if icms_source == "CSOSN" else "LUCRO_REAL_PRESUMIDO"
             ean = _digits_only(getattr(item, "ean", ""))
             code = str(getattr(item, "code", "") or "").strip()
             if not ean and not code:
@@ -179,6 +182,7 @@ def build_catalog_import_preview(
                     empresa_ie=_digits_only(invoice.recipient_ie),
                     fornecedor=supplier_name,
                     fornecedor_ie=_digits_only(invoice.issuer_ie),
+                    regime_tributario=regime_tributario,
                     codigo_fornecedor=code or ean,
                     descricao=str(getattr(item, "description", "") or "").strip(),
                     ean=ean,
@@ -265,7 +269,13 @@ def import_catalogs_from_preview(
         company_id = company_cache[company_key]
         supplier_key = (company_id, row.fornecedor.upper())
         if supplier_key not in supplier_cache:
-            supplier_cache[supplier_key] = repository.ensure_supplier(company_id, row.fornecedor, issuer_cnpj, row.fornecedor_ie)
+            supplier_cache[supplier_key] = repository.ensure_supplier(
+                company_id,
+                row.fornecedor,
+                issuer_cnpj,
+                row.fornecedor_ie,
+                row.regime_tributario,
+            )
             stats["suppliers_processed"] += 1
         supplier_id = supplier_cache[supplier_key]
         payload = {

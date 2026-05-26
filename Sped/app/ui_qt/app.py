@@ -748,7 +748,7 @@ class QtSpedApp(QMainWindow):
         layout.addWidget(toolbar)
 
         self.catalog_company_fields = self.create_line_fields(("id", "nome", "cnpj", "inscricao_estadual", "observacao"))
-        self.catalog_supplier_fields = self.create_line_fields(("id", "nome", "cnpj", "inscricao_estadual", "codigo", "observacao"))
+        self.catalog_supplier_fields = self.create_line_fields(("id", "nome", "cnpj", "inscricao_estadual", "codigo", "regime_tributario", "observacao"))
         self.catalog_type_fields = self.create_line_fields(("id", "nome", "descricao"))
         self.catalog_product_fields = self.create_line_fields(
             (
@@ -759,6 +759,8 @@ class QtSpedApp(QMainWindow):
                 "ean",
                 "ncm",
                 "cest",
+                "cfop_entrada",
+                "cfop_saida",
                 "c_classtrib",
                 "c_benef",
                 "cst_icms",
@@ -803,9 +805,9 @@ class QtSpedApp(QMainWindow):
             0,
             1,
             "Fornecedores da Empresa",
-            ["ID", "Fornecedor", "CNPJ", "IE", "Codigo"],
+            ["ID", "Fornecedor", "CNPJ", "IE", "Codigo", "Regime"],
             self.catalog_supplier_fields,
-            [("nome", "Fornecedor"), ("cnpj", "CNPJ"), ("inscricao_estadual", "IE"), ("codigo", "Codigo"), ("observacao", "Observacao")],
+            [("nome", "Fornecedor"), ("cnpj", "CNPJ"), ("inscricao_estadual", "IE"), ("codigo", "Codigo"), ("regime_tributario", "Regime Tributario"), ("observacao", "Observacao")],
             self.save_catalog_supplier,
             self.clear_catalog_supplier_form,
             self.delete_catalog_supplier,
@@ -833,7 +835,7 @@ class QtSpedApp(QMainWindow):
         product_title = QLabel("Produtos do Fornecedor")
         product_title.setObjectName("sectionTitle")
         product_layout.addWidget(product_title)
-        self.catalog_product_table = self.create_data_table(["ID", "Cod. Forn.", "Cod. Empresa", "Descricao", "Classificacao", "NCM", "CST ICMS", "% ICMS"])
+        self.catalog_product_table = self.create_data_table(["ID", "Cod. Forn.", "Cod. Empresa", "Descricao", "Classificacao", "NCM", "CFOP Entrada", "CFOP Saida", "CST ICMS", "% ICMS"])
         self.catalog_product_table.setColumnWidth(0, 55)
         self.catalog_product_table.setColumnWidth(1, 90)
         self.catalog_product_table.setColumnWidth(2, 100)
@@ -854,6 +856,8 @@ class QtSpedApp(QMainWindow):
             ("ean", "EAN"),
             ("ncm", "NCM"),
             ("cest", "CEST"),
+            ("cfop_entrada", "CFOP Entrada"),
+            ("cfop_saida", "CFOP Saida"),
             ("c_classtrib", "cClassTrib"),
             ("c_benef", "cBenef"),
             ("cst_icms", "CST ICMS"),
@@ -877,7 +881,7 @@ class QtSpedApp(QMainWindow):
         actions.addWidget(self.create_button("Salvar Produto", self.save_catalog_product, primary=True))
         actions.addWidget(self.create_button("Novo", self.clear_catalog_product_form))
         actions.addWidget(self.create_button("Excluir", self.delete_catalog_product))
-        product_form.addLayout(actions, 10, 0, 1, 4)
+        product_form.addLayout(actions, 11, 0, 1, 4)
         product_layout.addLayout(product_form)
         grid.addWidget(product_panel, 1, 1)
         grid.setColumnStretch(0, 1)
@@ -905,9 +909,11 @@ class QtSpedApp(QMainWindow):
 
     def build_catalog_supplier_page(self) -> QWidget:
         page = self.create_single_catalog_page("Fornecedores")
-        self.supplier_page_fields = self.create_line_fields(("id", "nome", "cnpj", "inscricao_estadual", "codigo", "observacao"))
+        self.supplier_page_fields = self.create_line_fields(("id", "nome", "cnpj", "inscricao_estadual", "codigo", "regime_tributario", "observacao"))
         self.supplier_page_company_combo = QComboBox()
-        self.supplier_page_table = self.create_data_table(["ID", "Empresa", "Fornecedor", "CNPJ", "IE", "Codigo"])
+        self.supplier_page_regime_combo = QComboBox()
+        self.populate_regime_tributario_combo(self.supplier_page_regime_combo)
+        self.supplier_page_table = self.create_data_table(["ID", "Empresa", "Fornecedor", "CNPJ", "IE", "Codigo", "Regime"])
         self.supplier_page_table.setObjectName("fornecedores")
         self.add_single_catalog_form(
             page,
@@ -917,7 +923,7 @@ class QtSpedApp(QMainWindow):
             self.save_supplier_page,
             self.clear_supplier_page_form,
             self.delete_supplier_page,
-            [("Empresa", self.supplier_page_company_combo)],
+            [("Empresa", self.supplier_page_company_combo), ("Regime Tributario", self.supplier_page_regime_combo)],
         )
         self.supplier_page_table.itemSelectionChanged.connect(self.handle_supplier_page_select)
         return page
@@ -950,6 +956,8 @@ class QtSpedApp(QMainWindow):
                 "ean",
                 "ncm",
                 "cest",
+                "cfop_entrada",
+                "cfop_saida",
                 "c_classtrib",
                 "c_benef",
                 "cst_icms",
@@ -982,6 +990,8 @@ class QtSpedApp(QMainWindow):
                 "EAN",
                 "NCM",
                 "CEST",
+                "CFOP Entrada",
+                "CFOP Saida",
                 "cClassTrib",
                 "cBenef",
                 "CST ICMS",
@@ -1058,6 +1068,8 @@ class QtSpedApp(QMainWindow):
             ("ean", "EAN"),
             ("ncm", "NCM"),
             ("cest", "CEST"),
+            ("cfop_entrada", "CFOP Entrada"),
+            ("cfop_saida", "CFOP Saida"),
             ("c_classtrib", "cClassTrib"),
             ("c_benef", "cBenef"),
             ("cst_icms", "CST ICMS"),
@@ -1081,7 +1093,7 @@ class QtSpedApp(QMainWindow):
         actions.addWidget(self.create_button("Salvar Alteracoes", self.save_product_page, primary=True))
         actions.addWidget(self.create_button("Novo", self.clear_product_page_form))
         actions.addWidget(self.create_button("Excluir", self.delete_product_page))
-        form.addLayout(actions, 11, 0, 1, 4)
+        form.addLayout(actions, 12, 0, 1, 4)
         form_layout.addLayout(form)
         form_layout.addStretch()
         self.product_page_tabs.addTab(form_tab, "Cadastro / Edicao")
@@ -2213,6 +2225,11 @@ class QtSpedApp(QMainWindow):
             self.catalog_supplier_company_by_id[int(row["id"])] = int(row.get("empresa_id") or 0)
             combo.addItem(f"{row.get('empresa_nome', '')} / {row.get('nome', '')}", int(row["id"]))
 
+    def populate_regime_tributario_combo(self, combo: QComboBox) -> None:
+        combo.clear()
+        combo.addItem("Lucro Real/Presumido", "LUCRO_REAL_PRESUMIDO")
+        combo.addItem("Simples Nacional", "SIMPLES_NACIONAL")
+
     def fill_type_combo(self, combo: QComboBox) -> None:
         combo.clear()
         combo.addItem("", 0)
@@ -2262,16 +2279,29 @@ class QtSpedApp(QMainWindow):
         self.supplier_page_rows = {int(row["id"]): row for row in rows}
         self.set_table_rows(
             self.supplier_page_table,
-            [[int(row["id"]), row.get("empresa_nome", ""), row.get("nome", ""), row.get("cnpj", ""), row.get("inscricao_estadual", ""), row.get("codigo", "")] for row in rows],
+            [
+                [
+                    int(row["id"]),
+                    row.get("empresa_nome", ""),
+                    row.get("nome", ""),
+                    row.get("cnpj", ""),
+                    row.get("inscricao_estadual", ""),
+                    row.get("codigo", ""),
+                    self.regime_tributario_label(str(row.get("regime_tributario", ""))),
+                ]
+                for row in rows
+            ],
         )
 
     def handle_supplier_page_select(self) -> None:
         row = getattr(self, "supplier_page_rows", {}).get(self.selected_catalog_id(self.supplier_page_table), {})
         self.fill_line_fields(self.supplier_page_fields, row)
         self.select_combo_data(self.supplier_page_company_combo, int(row.get("empresa_id") or 0))
+        self.select_regime_tributario_combo(self.supplier_page_regime_combo, str(row.get("regime_tributario", "")))
 
     def clear_supplier_page_form(self) -> None:
         self.fill_line_fields(self.supplier_page_fields, {})
+        self.select_regime_tributario_combo(self.supplier_page_regime_combo, "")
 
     def save_supplier_page(self) -> None:
         try:
@@ -2279,6 +2309,7 @@ class QtSpedApp(QMainWindow):
             row_before = int(payload.get("id") or 0)
             if not self.validate_required_cnpj(str(payload.get("cnpj", "")), "Fornecedores"):
                 return
+            payload["regime_tributario"] = self.normalize_regime_tributario_value(self.supplier_page_regime_combo.currentData())
             company_id = int(self.supplier_page_company_combo.currentData() or 0)
             row_id = self.mysql_repo.save_supplier(company_id, payload)
             self.refresh_supplier_page()
@@ -2348,6 +2379,8 @@ class QtSpedApp(QMainWindow):
                     row.get("ean", ""),
                     row.get("ncm", ""),
                     row.get("cest", ""),
+                    row.get("cfop_entrada", ""),
+                    row.get("cfop_saida", ""),
                     row.get("c_classtrib", ""),
                     row.get("c_benef", ""),
                     row.get("cst_icms", ""),
@@ -2519,6 +2552,21 @@ class QtSpedApp(QMainWindow):
         index = combo.findData(value)
         combo.setCurrentIndex(index if index >= 0 else 0)
 
+    def normalize_regime_tributario_value(self, value: object) -> str:
+        normalized = str(value or "").strip().upper()
+        if normalized in {"SIMPLES_NACIONAL", "SIMPLES NACIONAL"}:
+            return "SIMPLES_NACIONAL"
+        return "LUCRO_REAL_PRESUMIDO"
+
+    def regime_tributario_label(self, value: str) -> str:
+        normalized = self.normalize_regime_tributario_value(value)
+        return "Simples Nacional" if normalized == "SIMPLES_NACIONAL" else "Lucro Real/Presumido"
+
+    def select_regime_tributario_combo(self, combo: QComboBox, value: str) -> None:
+        normalized = self.normalize_regime_tributario_value(value)
+        index = combo.findData(normalized)
+        combo.setCurrentIndex(index if index >= 0 else 0)
+
     def filter_table_rows(self, table: QTableWidget, text: str) -> None:
         normalized = text.strip().lower()
         for row_index in range(table.rowCount()):
@@ -2585,7 +2633,17 @@ class QtSpedApp(QMainWindow):
         self.catalog_types_by_id = {int(row["id"]): row for row in types}
         self.set_table_rows(
             self.catalog_supplier_table,
-            [[int(row["id"]), row.get("nome", ""), row.get("cnpj", ""), row.get("inscricao_estadual", ""), row.get("codigo", "")] for row in suppliers],
+            [
+                [
+                    int(row["id"]),
+                    row.get("nome", ""),
+                    row.get("cnpj", ""),
+                    row.get("inscricao_estadual", ""),
+                    row.get("codigo", ""),
+                    self.regime_tributario_label(str(row.get("regime_tributario", ""))),
+                ]
+                for row in suppliers
+            ],
         )
         self.set_table_rows(
             self.catalog_type_table,
@@ -2629,6 +2687,8 @@ class QtSpedApp(QMainWindow):
                     row.get("descricao", ""),
                     row.get("tipo_produto", ""),
                     row.get("ncm", ""),
+                    row.get("cfop_entrada", ""),
+                    row.get("cfop_saida", ""),
                     row.get("cst_icms", ""),
                     row.get("aliquota_icms", ""),
                 ]
@@ -2713,6 +2773,7 @@ class QtSpedApp(QMainWindow):
             row_before = int(payload.get("id") or 0)
             if not self.validate_required_cnpj(str(payload.get("cnpj", "")), "Cadastro Fornecedor"):
                 return
+            payload["regime_tributario"] = self.normalize_regime_tributario_value(payload.get("regime_tributario", ""))
             company_id = self.selected_catalog_id(self.catalog_company_table)
             supplier_id = self.mysql_repo.save_supplier(company_id, payload)
             self.refresh_catalog_children(company_id)
