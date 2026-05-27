@@ -20,12 +20,14 @@ from PySide6.QtWidgets import (
     QFileDialog,
     QFrame,
     QGridLayout,
+    QGroupBox,
     QHBoxLayout,
     QHeaderView,
     QLabel,
     QLineEdit,
     QMainWindow,
     QMessageBox,
+    QMenu,
     QProgressBar,
     QPushButton,
     QSizePolicy,
@@ -43,7 +45,7 @@ from app.exporters.workbook_exporter import write_simple_csv_file, write_simple_
 from app.repositories.mysql_cadastro import MysqlCadastroRepository
 from app.parsers.sped_fiscal_parser import read_sped_file
 from app.parsers.sped_parser import get_field, normalize_document_key, normalize_sped_line
-from app.services.app_paths import get_application_base_dir, get_application_environment, get_environment_config_path, get_project_root_dir
+from app.services.app_paths import get_application_base_dir, get_application_environment, get_audit_log_path, get_environment_config_path, get_project_root_dir, get_runtime_rule_history_path
 from app.services.app_config_service import load_app_config
 from app.services.catalog_xml_import import (
     CatalogImportPreviewRow,
@@ -70,8 +72,16 @@ from app.services.operation_summary import build_filtered_apuracao_rows, build_r
 from app.services.path_selection import append_unique_paths, collapse_xml_selection_paths, format_selected_paths, limit_selected_paths, parse_selected_paths
 from app.services.period_comparisons import build_entry_period_comparison_rows, build_sale_period_comparison_rows
 from app.services.sped_archive import archive_original_sped_file
-from app.services.tax_rules import compute_display_icms_rate
-from app.services.runtime_rules import parse_runtime_rule_lines, runtime_rule_summary
+from app.services.adjusted_sped import write_adjusted_sped
+from app.services.audit_utils import format_audit_paths
+from app.services.tax_rules import compute_display_icms_rate, normalize_text
+from app.services.runtime_rules import extract_tax_id_from_document_key, get_first_matching_icms_rule, parse_runtime_rule_lines, runtime_rule_summary
+from app.services.runtime_rule_history import (
+    load_runtime_rule_history as load_runtime_rule_history_file,
+    remember_runtime_rules as remember_runtime_rules_in_history,
+    remove_runtime_rule,
+    save_runtime_rule_history as save_runtime_rule_history_file,
+)
 from app.services.xml_reconciliation import build_pis_cofins_period_comparison_rows
 
 
@@ -158,6 +168,85 @@ class NFeKeyExtractWorker(QObject):
             self.failed.emit(str(exc))
 
 
+class SpedReprocessWorker(QObject):
+    finished = Signal(list)
+    failed = Signal(str)
+    progress = Signal(int, int, str)
+
+    def __init__(
+        self,
+        sped_paths: list[Path],
+        output_paths: list[Path],
+        operation_type: str,
+        runtime_rules: list[dict[str, object]],
+        rule_lines: list[str],
+        audit_log_path: Path,
+        audit_session_id: str,
+    ) -> None:
+        super().__init__()
+        self.sped_paths = sped_paths
+        self.output_paths = output_paths
+        self.operation_type = operation_type
+        self.runtime_rules = runtime_rules
+        self.rule_lines = rule_lines
+        self.audit_log_path = audit_log_path
+        self.audit_session_id = audit_session_id
+
+    def write_audit_log(self, event_type: str, message: str) -> None:
+        try:
+            timestamp = dt.datetime.now().isoformat(timespec="seconds")
+            event = str(event_type or "").strip() or "EVENTO"
+            text = str(message or "").replace("\n", " ")
+            self.audit_log_path.parent.mkdir(parents=True, exist_ok=True)
+            with self.audit_log_path.open("a", encoding="utf-8") as log_file:
+                log_file.write(f"{timestamp}\t{self.audit_session_id}\t{event}\t{text}\n")
+        except Exception:
+            pass
+
+    def run(self) -> None:
+        try:
+            generated_files: list[str] = []
+            total_files = len(self.sped_paths)
+            for index, (sped_path, output_path) in enumerate(zip(self.sped_paths, self.output_paths), start=1):
+                self.progress.emit(index - 1, total_files, f"Lendo {sped_path.name}...")
+                _products, _sales_rows, detailed_sales, _c190_rows, _c190_product_rows = read_sped_file(sped_path)
+                self.write_audit_log(
+                    "REPROCESSAMENTO_INICIO",
+                    f"sped_origem={sped_path}; sped_saida={output_path}; escopo={self.operation_type}; regras_dinamicas={len(self.rule_lines)}",
+                )
+                self.progress.emit(index - 1, total_files, f"Gravando {output_path.name}...")
+                write_adjusted_sped(
+                    output_path,
+                    sped_path,
+                    detailed_sales,
+                    [],
+                    set(),
+                    set(),
+                    None,
+                    "",
+                    "",
+                    set(),
+                    self.operation_type,
+                    "",
+                    [],
+                    set(),
+                    self.runtime_rules,
+                )
+                log_path = output_path.with_name(f"{output_path.stem}_log_ajustes.xlsx")
+                generated_files.append(str(output_path))
+                if log_path.exists():
+                    generated_files.append(str(log_path))
+                self.write_audit_log(
+                    "REPROCESSAMENTO_FIM",
+                    f"sped_origem={sped_path}; arquivo_reprocessado={output_path}; extras={format_audit_paths([log_path])}",
+                )
+                self.progress.emit(index, total_files, f"Concluido {output_path.name}.")
+            self.finished.emit(generated_files)
+        except Exception as exc:
+            self.write_audit_log("REPROCESSAMENTO_ERRO", str(exc))
+            self.failed.emit(str(exc))
+
+
 def extract_nfe_keys_from_sped_file(sped_path: Path) -> list[dict[str, object]]:
     def classify_document_type(document_model: str, document_key: str) -> str:
         model = str(document_model or "").strip()
@@ -221,6 +310,11 @@ class QtSpedApp(QMainWindow):
         self.app_window_title = str(self.app_config.get("window_title", self.get_app_default_config()["window_title"])).strip() or self.get_app_default_config()["window_title"]
         self.app_home_title = str(self.app_config.get("home_title", self.get_app_default_config()["home_title"])).strip() or self.get_app_default_config()["home_title"]
         self.mysql_config_path = get_environment_config_path(self.project_root_dir / "app" / "ui", "mysql_config", self.environment)
+        self.runtime_rule_history_path = get_runtime_rule_history_path(self.project_root_dir / "app" / "ui")
+        self.runtime_rule_history: list[dict[str, object]] = load_runtime_rule_history_file(self.runtime_rule_history_path)
+        self.current_runtime_rules: list[dict[str, object]] = []
+        self.audit_log_path = get_audit_log_path(self.project_root_dir / "app" / "ui")
+        self.audit_session_id = dt.datetime.now().strftime("%Y%m%d_%H%M%S")
         self.mysql_repo = MysqlCadastroRepository(
             self.mysql_config_path,
             self.project_root_dir / "mysql_schema.sql",
@@ -388,13 +482,17 @@ class QtSpedApp(QMainWindow):
                 border-color: {COLORS["accent"]};
                 color: #ffffff;
             }}
-            QLineEdit, QComboBox {{
+            QLineEdit, QComboBox, QTextEdit {{
                 background: #ffffff;
                 border: 1px solid #c8d4df;
                 border-radius: 6px;
                 color: {COLORS["text"]};
                 padding: 7px 9px;
                 min-height: 22px;
+            }}
+            QTextEdit {{
+                selection-background-color: #dbeafe;
+                selection-color: {COLORS["text"]};
             }}
             QComboBox QAbstractItemView {{
                 background: #ffffff;
@@ -405,6 +503,23 @@ class QtSpedApp(QMainWindow):
             QCheckBox {{
                 color: {COLORS["text"]};
                 spacing: 7px;
+            }}
+            QGroupBox {{
+                background: #ffffff;
+                border: 1px solid {COLORS["line"]};
+                border-radius: 8px;
+                color: {COLORS["text"]};
+                font-weight: 750;
+                margin-top: 18px;
+                padding: 12px 10px 10px 10px;
+            }}
+            QGroupBox::title {{
+                subcontrol-origin: margin;
+                subcontrol-position: top left;
+                left: 10px;
+                padding: 0 6px;
+                color: {COLORS["text"]};
+                background: {COLORS["bg"]};
             }}
             QTabWidget::pane {{
                 border: 1px solid {COLORS["line"]};
@@ -1560,6 +1675,9 @@ class QtSpedApp(QMainWindow):
         toolbar_layout.addStretch()
         toolbar_layout.addWidget(self.create_button("Limpar", self.clear_entry_page))
         toolbar_layout.addWidget(self.create_button("Exportar", self.export_entry_filter))
+        self.entry_reprocess_button = self.create_button("Reprocessar SPED", lambda: self.generate_adjusted_sped_from_consultation("Entrada"))
+        self.entry_reprocess_button.setEnabled(False)
+        toolbar_layout.addWidget(self.entry_reprocess_button)
         toolbar_layout.addWidget(self.create_button("Processar", self.process_entry_query, primary=True))
         layout.addWidget(toolbar)
 
@@ -1668,6 +1786,8 @@ class QtSpedApp(QMainWindow):
         self.entry_table.setColumnWidth(11, 65)
         self.entry_table.setColumnWidth(12, 75)
         self.entry_table.itemDoubleClicked.connect(self.handle_entry_table_double_click)
+        self.entry_table.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.entry_table.customContextMenuRequested.connect(lambda pos: self.show_runtime_rule_context_menu_for_table(self.entry_table, self.filtered_entry_rows, "Entrada", pos))
         self.enable_table_sorting(self.entry_table)
         layout.addWidget(self.entry_table, 1)
         self.bind_entry_live_filters()
@@ -1688,6 +1808,9 @@ class QtSpedApp(QMainWindow):
         toolbar_layout.addStretch()
         toolbar_layout.addWidget(self.create_button("Limpar", self.clear_sale_page))
         toolbar_layout.addWidget(self.create_button("Exportar", self.export_sale_filter))
+        self.sale_reprocess_button = self.create_button("Reprocessar SPED", lambda: self.generate_adjusted_sped_from_consultation("Saida"))
+        self.sale_reprocess_button.setEnabled(False)
+        toolbar_layout.addWidget(self.sale_reprocess_button)
         toolbar_layout.addWidget(self.create_button("Processar", self.process_sale_query, primary=True))
         layout.addWidget(toolbar)
 
@@ -1776,6 +1899,8 @@ class QtSpedApp(QMainWindow):
         for column, width in enumerate((88, 72, 105, 330, 260, 90, 90, 85, 80, 85, 105, 65, 75)):
             self.sale_table.setColumnWidth(column, width)
         self.sale_table.itemDoubleClicked.connect(self.handle_sale_table_double_click)
+        self.sale_table.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.sale_table.customContextMenuRequested.connect(lambda pos: self.show_runtime_rule_context_menu_for_table(self.sale_table, self.filtered_sale_rows, "Saida", pos))
         self.enable_table_sorting(self.sale_table)
         layout.addWidget(self.sale_table, 1)
         self.bind_sale_live_filters()
@@ -2119,26 +2244,76 @@ class QtSpedApp(QMainWindow):
         title.setObjectName("sectionTitle")
         toolbar_layout.addWidget(title)
         toolbar_layout.addStretch()
+        toolbar_layout.addWidget(self.create_button("Adicionar Regra Assistida", lambda: self.open_runtime_rule_builder(), primary=True))
         toolbar_layout.addWidget(self.create_button("Limpar", self.clear_runtime_rules))
-        toolbar_layout.addWidget(self.create_button("Validar regras", self.validate_runtime_rules, primary=True))
+        toolbar_layout.addWidget(self.create_button("Validar regras", self.validate_runtime_rules))
         layout.addWidget(toolbar)
+
+        content_layout = QHBoxLayout()
+        content_layout.setSpacing(12)
 
         editor_panel = self.create_panel()
         editor_layout = QVBoxLayout(editor_panel)
         editor_layout.setContentsMargins(12, 12, 12, 12)
+        editor_title = QLabel("Regras para reprocessamento")
+        editor_title.setObjectName("metricKey")
+        editor_layout.addWidget(editor_title)
         self.runtime_rules_text = QTextEdit()
-        self.runtime_rules_text.setPlaceholderText("Uma regra por linha, no mesmo formato da tela antiga.")
+        self.runtime_rules_text.setPlaceholderText(
+            "Uma regra por linha. Exemplo: tipo=entrada; cst=000; cfop=1102; novo_cfop=1101; recalcular_valor_icms=sim"
+        )
         editor_layout.addWidget(self.runtime_rules_text, 1)
-        layout.addWidget(editor_panel, 1)
+        content_layout.addWidget(editor_panel, 3)
+
+        history_panel = self.create_panel()
+        history_layout = QVBoxLayout(history_panel)
+        history_layout.setContentsMargins(12, 12, 12, 12)
+        history_title = QLabel("Historico de regras")
+        history_title.setObjectName("metricKey")
+        history_layout.addWidget(history_title)
+
+        history_filter_row = QHBoxLayout()
+        self.runtime_rule_filter_input = QLineEdit()
+        self.runtime_rule_filter_input.setPlaceholderText("Filtrar por CST, CFOP, CNPJ, codigo ou acao")
+        self.runtime_rule_filter_input.returnPressed.connect(self.refresh_runtime_rule_history_list)
+        history_filter_row.addWidget(self.runtime_rule_filter_input, 1)
+        history_filter_row.addWidget(self.create_button("Filtrar", self.refresh_runtime_rule_history_list))
+        history_filter_row.addWidget(self.create_button("Limpar", self.clear_runtime_rule_filter))
+        history_layout.addLayout(history_filter_row)
+
+        self.runtime_rule_history_table = self.create_data_table(["Regra", "Resumo", "Usos", "Ultimo uso"])
+        self.runtime_rule_history_table.setColumnWidth(0, 360)
+        self.runtime_rule_history_table.setColumnWidth(1, 300)
+        self.runtime_rule_history_table.setColumnWidth(2, 70)
+        self.runtime_rule_history_table.setColumnWidth(3, 145)
+        self.runtime_rule_history_table.itemSelectionChanged.connect(self.update_runtime_rule_history_preview)
+        self.runtime_rule_history_table.cellDoubleClicked.connect(lambda _row, _column: self.insert_selected_runtime_rule())
+        history_layout.addWidget(self.runtime_rule_history_table, 1)
+
+        self.runtime_rule_history_preview = QTextEdit()
+        self.runtime_rule_history_preview.setReadOnly(True)
+        self.runtime_rule_history_preview.setMaximumHeight(82)
+        history_layout.addWidget(self.runtime_rule_history_preview)
+
+        history_buttons = QHBoxLayout()
+        history_buttons.addWidget(self.create_button("Inserir", self.insert_selected_runtime_rule, primary=True))
+        history_buttons.addWidget(self.create_button("Editar", self.edit_selected_runtime_rule))
+        history_buttons.addWidget(self.create_button("Excluir", self.delete_selected_runtime_rule))
+        history_buttons.addStretch()
+        history_layout.addLayout(history_buttons)
+        content_layout.addWidget(history_panel, 2)
+        layout.addLayout(content_layout, 2)
 
         self.runtime_rules_status = QLabel("Informe as regras e clique em Validar regras.")
         self.runtime_rules_status.setObjectName("muted")
         layout.addWidget(self.runtime_rules_status)
 
-        self.runtime_rules_table = self.create_data_table(["Linha", "Resumo"])
+        self.runtime_rules_table = self.create_data_table(["Linha", "Resumo", "Regra"])
         self.runtime_rules_table.setColumnWidth(0, 70)
-        self.runtime_rules_table.setColumnWidth(1, 760)
+        self.runtime_rules_table.setColumnWidth(1, 560)
+        self.runtime_rules_table.setColumnWidth(2, 760)
         layout.addWidget(self.runtime_rules_table, 1)
+        self.refresh_runtime_rule_history_list()
         return page
 
     def bind_entry_live_filters(self) -> None:
@@ -3477,27 +3652,525 @@ class QtSpedApp(QMainWindow):
         if directory:
             field.setText(directory)
 
+    def write_audit_log(self, event_type: str, message: str) -> None:
+        try:
+            timestamp = dt.datetime.now().isoformat(timespec="seconds")
+            event = str(event_type or "").strip() or "EVENTO"
+            text = str(message or "").replace("\n", " ")
+            self.audit_log_path.parent.mkdir(parents=True, exist_ok=True)
+            with self.audit_log_path.open("a", encoding="utf-8") as log_file:
+                log_file.write(f"{timestamp}\t{self.audit_session_id}\t{event}\t{text}\n")
+        except Exception:
+            pass
+
     def get_current_runtime_rules(self) -> list[dict[str, object]]:
         if not hasattr(self, "runtime_rules_text"):
             return []
-        return parse_runtime_rule_lines(self.runtime_rules_text.toPlainText())
+        self.current_runtime_rules = parse_runtime_rule_lines(self.runtime_rules_text.toPlainText())
+        return self.current_runtime_rules
+
+    def runtime_rule_lines(self) -> list[str]:
+        if not hasattr(self, "runtime_rules_text"):
+            return []
+        return [line.strip() for line in self.runtime_rules_text.toPlainText().splitlines() if line.strip()]
 
     def validate_runtime_rules(self) -> None:
         try:
             rules = self.get_current_runtime_rules()
-            lines = [line.strip() for line in self.runtime_rules_text.toPlainText().splitlines() if line.strip()]
-            rows = [[index + 1, runtime_rule_summary(line)] for index, line in enumerate(lines)]
+            lines = self.runtime_rule_lines()
+            rows = [[index + 1, runtime_rule_summary(line), line] for index, line in enumerate(lines)]
             self.set_table_rows(self.runtime_rules_table, rows)
             self.runtime_rules_status.setText(f"Regras validas: {len(rules)}.")
+            self.remember_runtime_rules(lines, "validacao_qt")
             self.statusBar().showMessage(f"{len(rules)} regra(s) dinamica(s) validada(s).")
+            self.update_reprocess_buttons_state()
         except Exception as exc:
+            self.update_reprocess_buttons_state()
             self.runtime_rules_status.setText(f"Erro: {exc}")
             QMessageBox.critical(self, "Regras Dinamicas", str(exc))
 
     def clear_runtime_rules(self) -> None:
         self.runtime_rules_text.clear()
         self.runtime_rules_table.setRowCount(0)
+        self.current_runtime_rules = []
         self.runtime_rules_status.setText("Informe as regras e clique em Validar regras.")
+        self.update_reprocess_buttons_state()
+
+    def update_reprocess_buttons_state(self) -> None:
+        if getattr(self, "reprocess_thread", None) is not None:
+            if hasattr(self, "entry_reprocess_button"):
+                self.entry_reprocess_button.setEnabled(False)
+            if hasattr(self, "sale_reprocess_button"):
+                self.sale_reprocess_button.setEnabled(False)
+            return
+        entry_enabled = False
+        sale_enabled = False
+        if hasattr(self, "runtime_rules_text"):
+            try:
+                rules = parse_runtime_rule_lines(self.runtime_rules_text.toPlainText())
+                entry_enabled = any(str(rule.get("operation_type", "")).strip().lower() == "entrada" for rule in rules)
+                sale_enabled = any(str(rule.get("operation_type", "")).strip().lower() == "saida" for rule in rules)
+            except Exception:
+                entry_enabled = False
+                sale_enabled = False
+        if hasattr(self, "entry_reprocess_button"):
+            self.entry_reprocess_button.setEnabled(entry_enabled)
+        if hasattr(self, "sale_reprocess_button"):
+            self.sale_reprocess_button.setEnabled(sale_enabled)
+
+    def enriched_runtime_rule_row(self, row: dict[str, object], operation_type: str = "") -> dict[str, object]:
+        enriched = dict(row)
+        if operation_type and not str(enriched.get("operation_type", "")).strip():
+            enriched["operation_type"] = operation_type
+        if "cst_icms" not in enriched and "cst" in enriched:
+            enriched["cst_icms"] = enriched.get("cst")
+        if "sale_value" not in enriched:
+            enriched["sale_value"] = self.first_row_value(enriched, "total_operation_value", "operation_value", default=Decimal("0"))
+        if "document_tax_id" not in enriched:
+            document_key = str(enriched.get("document_key", "")).strip()
+            tax_id = extract_tax_id_from_document_key(document_key)
+            if not tax_id:
+                tax_id = self.digits_only(str(enriched.get("participant_tax_id", "")))
+            if len(tax_id) in {11, 14}:
+                enriched["document_tax_id"] = tax_id
+        return enriched
+
+    def find_matching_runtime_rule_line(self, row: dict[str, object], operation_type: str = "") -> str:
+        candidate = self.enriched_runtime_rule_row(row, operation_type)
+        for rule_line in self.runtime_rule_lines():
+            try:
+                parsed_rules = parse_runtime_rule_lines(rule_line)
+            except Exception:
+                continue
+            if get_first_matching_icms_rule(parsed_rules, candidate) is not None:
+                return rule_line
+        return ""
+
+    def remove_runtime_rule_line(self, rule_line: str) -> None:
+        normalized_line = str(rule_line or "").strip()
+        if not normalized_line:
+            return
+        answer = QMessageBox.question(self, "Remover Regra Dinamica", f"Deseja remover esta regra dinamica?\n\n{normalized_line}")
+        if answer != QMessageBox.Yes:
+            return
+        updated_lines = [line for line in self.runtime_rule_lines() if line != normalized_line]
+        self.runtime_rules_text.setPlainText("\n".join(updated_lines))
+        self.validate_runtime_rules()
+        self.statusBar().showMessage("Regra dinamica removida.")
+
+    def edit_runtime_rule_line(self, rule_line: str) -> None:
+        normalized_line = str(rule_line or "").strip()
+        if not normalized_line:
+            return
+        try:
+            prefill = self.build_runtime_rule_prefill_from_line(normalized_line)
+        except Exception as exc:
+            QMessageBox.critical(self, "Editar regra", f"Nao foi possivel carregar a regra:\n{exc}")
+            return
+        self.open_runtime_rule_builder(prefill=prefill, replace_rule_line=normalized_line)
+
+    def build_runtime_rule_prefill_from_row(self, row: dict[str, object], operation_type: str, include_document: bool = False) -> dict[str, object]:
+        enriched = self.enriched_runtime_rule_row(row, operation_type)
+        rate_value = enriched.get("icms_rate", enriched.get("nominal_icms_rate", Decimal("0")))
+        try:
+            rate_text = format(self.decimal_value(rate_value).normalize(), "f")
+        except Exception:
+            rate_text = str(rate_value or "").strip()
+        prefill = {
+            "operation": str(enriched.get("operation_type", operation_type)).strip().lower() or operation_type.lower(),
+            "cst": str(self.first_row_value(enriched, "cst_icms", "cst")).strip().split("|", 1)[0].strip(),
+            "cfop": str(enriched.get("cfop", "")).strip().split("|", 1)[0].strip(),
+            "rate": rate_text,
+            "codes": str(enriched.get("code", "")).strip(),
+        }
+        if include_document:
+            prefill["document"] = str(enriched.get("document_number", "")).strip()
+            prefill["tax_id"] = str(enriched.get("document_tax_id", "")).strip()
+        return prefill
+
+    def add_runtime_rule_actions_to_menu(self, menu: QMenu, row: dict[str, object], operation_type: str, include_document: bool = False) -> None:
+        matching_rule_line = self.find_matching_runtime_rule_line(row, operation_type)
+        if matching_rule_line:
+            menu.addAction("Editar Regra Dinamica", lambda current_rule=matching_rule_line: self.edit_runtime_rule_line(current_rule))
+            menu.addAction("Excluir Regra Dinamica", lambda current_rule=matching_rule_line: self.remove_runtime_rule_line(current_rule))
+        else:
+            menu.addAction(
+                "Criar Regra Dinamica",
+                lambda current_row=dict(row): self.open_runtime_rule_builder(
+                    prefill=self.build_runtime_rule_prefill_from_row(current_row, operation_type, include_document)
+                ),
+            )
+
+    def show_runtime_rule_context_menu_for_table(
+        self,
+        table: QTableWidget,
+        source_rows: list[dict[str, object]],
+        operation_type: str,
+        pos: object,
+    ) -> None:
+        item = table.itemAt(pos)
+        if item is None:
+            return
+        data_index = item.data(Qt.UserRole)
+        try:
+            row_index = int(data_index)
+        except (TypeError, ValueError):
+            row_index = item.row()
+        if row_index < 0 or row_index >= len(source_rows):
+            return
+        table.selectRow(item.row())
+        menu = QMenu(table)
+        self.add_runtime_rule_actions_to_menu(menu, source_rows[row_index], operation_type, include_document=False)
+        menu.addSeparator()
+        menu.addAction("Abrir Detalhamento", lambda current_row=source_rows[row_index]: self.open_row_detail_popup(current_row, operation_type))
+        menu.exec(table.viewport().mapToGlobal(pos))
+
+    def show_runtime_rule_context_menu_for_payloads(
+        self,
+        table: QTableWidget,
+        payload_rows: list[dict[str, object]],
+        operation_type: str,
+        pos: object,
+        include_document: bool = True,
+    ) -> None:
+        item = table.itemAt(pos)
+        if item is None:
+            return
+        data_index = item.data(Qt.UserRole)
+        try:
+            row_index = int(data_index)
+        except (TypeError, ValueError):
+            row_index = item.row()
+        if row_index < 0 or row_index >= len(payload_rows):
+            return
+        table.selectRow(item.row())
+        menu = QMenu(table)
+        self.add_runtime_rule_actions_to_menu(menu, payload_rows[row_index], operation_type, include_document=include_document)
+        menu.exec(table.viewport().mapToGlobal(pos))
+
+    def save_runtime_rule_history(self) -> None:
+        save_runtime_rule_history_file(self.runtime_rule_history_path, self.runtime_rule_history)
+
+    def remember_runtime_rules(self, rule_lines: list[str], source: str) -> None:
+        if not rule_lines:
+            return
+        self.runtime_rule_history = remember_runtime_rules_in_history(self.runtime_rule_history, rule_lines, source)
+        self.save_runtime_rule_history()
+        self.refresh_runtime_rule_history_list()
+
+    def clear_runtime_rule_filter(self) -> None:
+        if hasattr(self, "runtime_rule_filter_input"):
+            self.runtime_rule_filter_input.clear()
+        self.refresh_runtime_rule_history_list()
+
+    def refresh_runtime_rule_history_list(self) -> None:
+        if not hasattr(self, "runtime_rule_history_table"):
+            return
+        filter_text = normalize_text(self.runtime_rule_filter_input.text() if hasattr(self, "runtime_rule_filter_input") else "")
+
+        def sort_key(item: dict[str, object]) -> tuple[str, str]:
+            return (str(item.get("last_used_at", "")), str(item.get("rule_line", "")))
+
+        rows: list[list[object]] = []
+        for item in sorted(self.runtime_rule_history, key=sort_key, reverse=True):
+            rule_line = str(item.get("rule_line", "")).strip()
+            searchable_text = normalize_text(f"{rule_line} {item.get('summary', '')}")
+            if filter_text and filter_text not in searchable_text:
+                continue
+            rows.append([
+                rule_line,
+                str(item.get("summary", "")).strip(),
+                int(item.get("use_count", 0) or 0),
+                str(item.get("last_used_at", "")).strip(),
+            ])
+        self.set_table_rows(self.runtime_rule_history_table, rows)
+        if rows:
+            self.runtime_rule_history_table.selectRow(0)
+        self.update_runtime_rule_history_preview()
+
+    def selected_runtime_rule_history_line(self) -> str:
+        if not hasattr(self, "runtime_rule_history_table"):
+            return ""
+        selected = self.runtime_rule_history_table.selectionModel().selectedRows()
+        if not selected:
+            return ""
+        item = self.runtime_rule_history_table.item(selected[0].row(), 0)
+        return item.text().strip() if item is not None else ""
+
+    def update_runtime_rule_history_preview(self) -> None:
+        if not hasattr(self, "runtime_rule_history_preview"):
+            return
+        self.runtime_rule_history_preview.setPlainText(self.selected_runtime_rule_history_line())
+
+    def insert_selected_runtime_rule(self) -> None:
+        rule_line = self.selected_runtime_rule_history_line()
+        if not rule_line:
+            QMessageBox.warning(self, "Historico", "Selecione uma regra do historico.")
+            return
+        self.append_runtime_rule_line(rule_line)
+
+    def edit_selected_runtime_rule(self) -> None:
+        rule_line = self.selected_runtime_rule_history_line()
+        if not rule_line:
+            QMessageBox.warning(self, "Historico", "Selecione uma regra do historico.")
+            return
+        try:
+            prefill = self.build_runtime_rule_prefill_from_line(rule_line)
+        except Exception as exc:
+            QMessageBox.critical(self, "Editar regra", f"Nao foi possivel carregar a regra:\n{exc}")
+            return
+        self.open_runtime_rule_builder(prefill=prefill, replace_rule_line=rule_line)
+
+    def delete_selected_runtime_rule(self) -> None:
+        rule_line = self.selected_runtime_rule_history_line()
+        if not rule_line:
+            QMessageBox.warning(self, "Historico", "Selecione uma regra do historico.")
+            return
+        answer = QMessageBox.question(self, "Historico", "Deseja excluir a regra selecionada do historico?")
+        if answer != QMessageBox.Yes:
+            return
+        self.runtime_rule_history = remove_runtime_rule(self.runtime_rule_history, rule_line)
+        self.save_runtime_rule_history()
+        self.refresh_runtime_rule_history_list()
+        self.statusBar().showMessage("Regra removida do historico.")
+
+    def append_runtime_rule_line(self, rule_line: str) -> None:
+        normalized_line = str(rule_line or "").strip()
+        if not normalized_line:
+            return
+        current_text = self.runtime_rules_text.toPlainText().strip()
+        next_text = f"{current_text}\n{normalized_line}" if current_text else normalized_line
+        self.runtime_rules_text.setPlainText(next_text)
+        self.validate_runtime_rules()
+
+    def replace_runtime_rule_line(self, old_rule_line: str, new_rule_line: str) -> None:
+        old_normalized = str(old_rule_line or "").strip()
+        new_normalized = str(new_rule_line or "").strip()
+        if not new_normalized:
+            return
+        lines = self.runtime_rules_text.toPlainText().splitlines()
+        replaced = False
+        updated_lines: list[str] = []
+        for line in lines:
+            if not replaced and line.strip() == old_normalized:
+                updated_lines.append(new_normalized)
+                replaced = True
+            else:
+                updated_lines.append(line)
+        if not replaced:
+            updated_lines.append(new_normalized)
+        self.runtime_rules_text.setPlainText("\n".join(line for line in updated_lines if line.strip()))
+        self.validate_runtime_rules()
+
+    def build_runtime_rule_prefill_from_line(self, rule_line: str) -> dict[str, object]:
+        parsed_rules = parse_runtime_rule_lines(rule_line)
+        if not parsed_rules:
+            return {}
+        rule = parsed_rules[0]
+
+        def decimal_text(key: str) -> str:
+            value = rule.get(key, "")
+            if isinstance(value, Decimal):
+                return format(value.normalize(), "f")
+            return str(value or "").strip()
+
+        match_codes = rule.get("match_codes", "")
+        if isinstance(match_codes, set):
+            codes_text = ",".join(sorted(str(value).strip() for value in match_codes if str(value).strip()))
+        else:
+            codes_text = str(match_codes or "").strip()
+
+        return {
+            "operation": str(rule.get("operation_type", "entrada")).strip() or "entrada",
+            "document": str(rule.get("document_number", "")).strip(),
+            "tax_id": str(rule.get("document_tax_id", "")).strip(),
+            "cst": str(rule.get("cst_icms", "")).strip(),
+            "cfop": str(rule.get("cfop", "")).strip(),
+            "rate": decimal_text("match_rate"),
+            "codes": codes_text,
+            "new_cst": str(rule.get("new_cst", "")).strip(),
+            "new_cfop": str(rule.get("new_cfop", "")).strip(),
+            "force_rate": decimal_text("force_rate"),
+            "set_base": decimal_text("set_base_icms"),
+            "set_icms_value": decimal_text("set_icms_value"),
+            "base_reduction_percent": decimal_text("base_reduction_percent"),
+            "zero_icms": bool(rule.get("zero_icms", False)),
+            "use_sale_value_base": bool(rule.get("use_sale_value_as_base", False)),
+            "recalculate_icms_value": bool(rule.get("recalculate_icms_value", False)),
+            "recalculate_reduced_base": bool(rule.get("recalculate_reduced_base", False)),
+        }
+
+    def open_runtime_rule_builder(
+        self,
+        prefill: dict[str, object] | None = None,
+        replace_rule_line: str | None = None,
+    ) -> None:
+        prefill = prefill or {}
+        dialog = QDialog(self)
+        dialog.setObjectName("popupDialog")
+        dialog.setWindowTitle("Editar Regra Dinamica" if replace_rule_line else "Adicionar Regra Dinamica")
+        dialog.resize(980, 560)
+
+        container = QVBoxLayout(dialog)
+        container.setContentsMargins(16, 16, 16, 16)
+        title = QLabel("Monte a regra separando o que sera filtrado do que sera alterado no reprocessamento.")
+        title.setObjectName("sectionTitle")
+        container.addWidget(title)
+
+        help_label = QLabel("Campos vazios sao ignorados. Use os filtros para localizar os itens, e os campos de reprocessamento para informar a alteracao.")
+        help_label.setObjectName("muted")
+        container.addWidget(help_label)
+
+        filter_box = QGroupBox("Campos para filtro - localizar quais itens serao alterados")
+        filter_grid = QGridLayout(filter_box)
+        filter_grid.setSpacing(10)
+        container.addWidget(filter_box)
+
+        reprocess_box = QGroupBox("Campos para reprocessamento - alteracoes que serao aplicadas")
+        reprocess_grid = QGridLayout(reprocess_box)
+        reprocess_grid.setSpacing(10)
+        container.addWidget(reprocess_box)
+
+        fields: dict[str, QLineEdit] = {}
+
+        def add_entry(parent_grid: QGridLayout, row: int, column: int, key: str, label: str) -> QLineEdit:
+            field_box = QWidget()
+            field_layout = QVBoxLayout(field_box)
+            field_layout.setContentsMargins(0, 0, 0, 0)
+            field_layout.setSpacing(4)
+            field_layout.addWidget(QLabel(label))
+            line_edit = QLineEdit(str(prefill.get(key, "") or ""))
+            field_layout.addWidget(line_edit)
+            parent_grid.addWidget(field_box, row, column)
+            fields[key] = line_edit
+            return line_edit
+
+        operation_box = QWidget()
+        operation_layout = QVBoxLayout(operation_box)
+        operation_layout.setContentsMargins(0, 0, 0, 0)
+        operation_layout.setSpacing(4)
+        operation_layout.addWidget(QLabel("Tipo de operacao"))
+        operation_combo = QComboBox()
+        operation_combo.addItems(["entrada", "saida"])
+        operation_value = str(prefill.get("operation", "entrada") or "entrada").lower()
+        operation_combo.setCurrentText(operation_value if operation_value in {"entrada", "saida"} else "entrada")
+        operation_layout.addWidget(operation_combo)
+        filter_grid.addWidget(operation_box, 0, 0)
+
+        add_entry(filter_grid, 0, 1, "cst", "CST atual")
+        add_entry(filter_grid, 0, 2, "cfop", "CFOP atual")
+        add_entry(filter_grid, 1, 0, "rate", "Aliquota atual")
+        add_entry(filter_grid, 1, 1, "codes", "Codigo(s) do produto")
+        add_entry(filter_grid, 1, 2, "document", "Documento")
+        add_entry(filter_grid, 2, 0, "tax_id", "CNPJ/CPF do documento")
+
+        add_entry(reprocess_grid, 0, 0, "new_cst", "Novo CST")
+        add_entry(reprocess_grid, 0, 1, "new_cfop", "Novo CFOP")
+        add_entry(reprocess_grid, 0, 2, "force_rate", "Nova aliquota")
+        add_entry(reprocess_grid, 1, 0, "set_base", "Definir base ICMS")
+        add_entry(reprocess_grid, 1, 1, "set_icms_value", "Definir valor ICMS")
+        add_entry(reprocess_grid, 1, 2, "base_reduction_percent", "% reducao de base")
+
+        options_box = QGroupBox("Opcoes de recalculo")
+        options = QGridLayout(options_box)
+        options.setSpacing(8)
+        container.addWidget(options_box)
+        zero_icms_check = QCheckBox("Zerar ICMS/Base/Valor")
+        use_sale_base_check = QCheckBox("Usar valor da operacao como base ICMS")
+        recalc_value_check = QCheckBox("Recalcular valor do ICMS")
+        recalc_reduced_base_check = QCheckBox("Recalcular base de calculo da reducao")
+        zero_icms_check.setChecked(bool(prefill.get("zero_icms", False)))
+        use_sale_base_check.setChecked(bool(prefill.get("use_sale_value_base", False)))
+        recalc_value_check.setChecked(bool(prefill.get("recalculate_icms_value", False)))
+        recalc_reduced_base_check.setChecked(bool(prefill.get("recalculate_reduced_base", False)))
+        options.addWidget(zero_icms_check, 0, 0)
+        options.addWidget(use_sale_base_check, 0, 1)
+        options.addWidget(recalc_value_check, 1, 0)
+        options.addWidget(recalc_reduced_base_check, 1, 1)
+
+        example = QLabel("Exemplo: tipo=entrada; cnpj=12345678000199; cst=000; cfop=1102; novo_cfop=1101")
+        example.setObjectName("muted")
+        container.addWidget(example)
+
+        buttons = QHBoxLayout()
+        save_button = self.create_button("Salvar" if replace_rule_line else "Adicionar", lambda: save_runtime_rule(), primary=True)
+        cancel_button = self.create_button("Cancelar", dialog.reject)
+        buttons.addWidget(save_button)
+        buttons.addWidget(cancel_button)
+        buttons.addStretch()
+        container.addLayout(buttons)
+
+        def sync_reduced_base_option() -> None:
+            if recalc_reduced_base_check.isChecked():
+                recalc_value_check.setChecked(True)
+
+        def sync_reduction_percent(text: str) -> None:
+            if text.strip():
+                recalc_reduced_base_check.setChecked(True)
+                recalc_value_check.setChecked(True)
+
+        recalc_reduced_base_check.toggled.connect(lambda _checked: sync_reduced_base_option())
+        fields["base_reduction_percent"].textChanged.connect(sync_reduction_percent)
+
+        def save_runtime_rule() -> None:
+            fragments = [f"tipo={operation_combo.currentText().strip()}"]
+            optional_fields = [
+                ("documento", fields["document"].text()),
+                ("cnpj", fields["tax_id"].text()),
+                ("cst", fields["cst"].text()),
+                ("cfop", fields["cfop"].text()),
+                ("aliquota", fields["rate"].text()),
+                ("codigos", fields["codes"].text()),
+                ("novo_cst", fields["new_cst"].text()),
+                ("novo_cfop", fields["new_cfop"].text()),
+                ("nova_aliquota", fields["force_rate"].text()),
+                ("definir_base_icms", fields["set_base"].text()),
+                ("definir_valor_icms", fields["set_icms_value"].text()),
+                ("percentual_reducao_base", fields["base_reduction_percent"].text()),
+            ]
+            for key, value in optional_fields:
+                text = str(value or "").strip()
+                if text:
+                    fragments.append(f"{key}={text}")
+            if zero_icms_check.isChecked():
+                fragments.append("zerar_icms=sim")
+            if use_sale_base_check.isChecked():
+                fragments.append("usar_valor_operacao_como_base=sim")
+            if recalc_value_check.isChecked():
+                fragments.append("recalcular_valor_icms=sim")
+            if recalc_reduced_base_check.isChecked():
+                fragments.append("recalcular_base_reducao=sim")
+
+            if len(fragments) <= 1:
+                QMessageBox.warning(dialog, "Regra incompleta", "Informe pelo menos um filtro ou uma acao para montar a regra.")
+                return
+            if recalc_reduced_base_check.isChecked() and not fields["base_reduction_percent"].text().strip():
+                QMessageBox.warning(dialog, "Regra incompleta", "Informe o percentual de reducao de base.")
+                return
+
+            action_keys = {
+                "novo_cst", "novo_cfop", "nova_aliquota", "definir_base_icms", "definir_valor_icms",
+                "percentual_reducao_base", "zerar_icms", "usar_valor_operacao_como_base",
+                "recalcular_valor_icms", "recalcular_base_reducao",
+            }
+            if not any(fragment.split("=", 1)[0] in action_keys for fragment in fragments[1:]):
+                QMessageBox.warning(dialog, "Regra sem acao", "Informe ao menos uma acao de recalculo para a regra.")
+                return
+
+            rule_line = "; ".join(fragments)
+            try:
+                parse_runtime_rule_lines(rule_line)
+            except Exception as exc:
+                QMessageBox.critical(dialog, "Regra invalida", str(exc))
+                return
+
+            if replace_rule_line:
+                self.replace_runtime_rule_line(replace_rule_line, rule_line)
+            else:
+                self.append_runtime_rule_line(rule_line)
+            dialog.accept()
+
+        dialog.exec()
 
     def refresh_archives(self) -> None:
         if not hasattr(self, "archive_profile_table"):
@@ -3807,6 +4480,108 @@ class QtSpedApp(QMainWindow):
         self.compare_thread.finished.connect(lambda: setattr(self, "compare_worker", None))
         self.compare_thread.finished.connect(lambda: setattr(self, "compare_thread", None))
         self.compare_thread.start()
+
+    def get_consultation_sped_paths_for_reprocess(self, operation_type: str) -> list[Path]:
+        source_text = ""
+        if operation_type == "Entrada" and hasattr(self, "sped_input"):
+            source_text = self.sped_input.text()
+        elif operation_type == "Saida" and hasattr(self, "sale_sped_input"):
+            source_text = self.sale_sped_input.text()
+        paths = parse_selected_paths(source_text)
+        unique_paths: list[Path] = []
+        seen: set[Path] = set()
+        for path in paths:
+            resolved = path.resolve() if path.exists() else path
+            if resolved in seen:
+                continue
+            seen.add(resolved)
+            unique_paths.append(path)
+        return unique_paths
+
+    def generate_adjusted_sped_from_consultation(self, operation_type: str) -> None:
+        if getattr(self, "reprocess_thread", None) is not None:
+            QMessageBox.information(self, "Reprocessar SPED", "Ja existe um reprocessamento em andamento.")
+            return
+        try:
+            runtime_rules = self.get_current_runtime_rules()
+        except Exception as exc:
+            QMessageBox.critical(self, "Reprocessar SPED", f"Corrija as regras dinamicas antes de reprocessar.\n\n{exc}")
+            self.update_reprocess_buttons_state()
+            return
+        if not runtime_rules:
+            QMessageBox.warning(self, "Reprocessar SPED", "Cadastre e valide ao menos uma regra dinamica.")
+            self.update_reprocess_buttons_state()
+            return
+
+        sped_paths = self.get_consultation_sped_paths_for_reprocess(operation_type)
+        if not sped_paths:
+            QMessageBox.warning(self, "Reprocessar SPED", "Selecione ao menos um arquivo SPED na consulta.")
+            return
+        missing_paths = [str(path) for path in sped_paths if not path.exists()]
+        if missing_paths:
+            QMessageBox.critical(self, "Reprocessar SPED", "Os seguintes SPEDs nao existem mais:\n" + "\n".join(missing_paths))
+            return
+
+        output_paths: list[Path] = []
+        if len(sped_paths) == 1:
+            default_path = sped_paths[0].with_name(f"{sped_paths[0].stem}_ajustado{sped_paths[0].suffix or '.txt'}")
+            selected_output, _ = QFileDialog.getSaveFileName(
+                self,
+                "Salvar SPED reprocessado",
+                str(default_path),
+                "Arquivo SPED (*.txt *.sped);;Todos os arquivos (*.*)",
+            )
+            if not selected_output:
+                return
+            output_paths = [Path(selected_output)]
+        else:
+            selected_folder = QFileDialog.getExistingDirectory(self, "Selecione a pasta para salvar os SPEDs reprocessados")
+            if not selected_folder:
+                return
+            output_dir = Path(selected_folder)
+            output_paths = [output_dir / f"{path.stem}_ajustado{path.suffix or '.txt'}" for path in sped_paths]
+
+        rule_lines = self.runtime_rule_lines()
+        self.entry_reprocess_button.setEnabled(False)
+        self.sale_reprocess_button.setEnabled(False)
+        self.statusBar().showMessage("Preparando reprocessamento do SPED...")
+
+        self.reprocess_thread = QThread()
+        self.reprocess_worker = SpedReprocessWorker(
+            sped_paths,
+            output_paths,
+            operation_type,
+            runtime_rules,
+            rule_lines,
+            self.audit_log_path,
+            self.audit_session_id,
+        )
+        self.reprocess_worker.moveToThread(self.reprocess_thread)
+        self.reprocess_thread.started.connect(self.reprocess_worker.run)
+        self.reprocess_worker.progress.connect(self.update_reprocess_status)
+        self.reprocess_worker.finished.connect(lambda generated_files: self.handle_reprocess_finished(generated_files, rule_lines))
+        self.reprocess_worker.failed.connect(self.handle_reprocess_error)
+        self.reprocess_worker.finished.connect(self.reprocess_thread.quit)
+        self.reprocess_worker.failed.connect(self.reprocess_thread.quit)
+        self.reprocess_thread.finished.connect(self.reprocess_worker.deleteLater)
+        self.reprocess_thread.finished.connect(self.reprocess_thread.deleteLater)
+        self.reprocess_thread.finished.connect(lambda: setattr(self, "reprocess_worker", None))
+        self.reprocess_thread.finished.connect(lambda: setattr(self, "reprocess_thread", None))
+        self.reprocess_thread.finished.connect(self.update_reprocess_buttons_state)
+        self.reprocess_thread.start()
+
+    def update_reprocess_status(self, current: int, total: int, message: str) -> None:
+        percent = int(100 * current / max(total, 1))
+        self.statusBar().showMessage(f"{message} ({percent}%)")
+
+    def handle_reprocess_finished(self, generated_files: list[str], rule_lines: list[str]) -> None:
+        self.remember_runtime_rules(rule_lines, "sped_ajustado_qt")
+        self.statusBar().showMessage("SPED reprocessado com sucesso.")
+        QMessageBox.information(self, "Reprocessar SPED", "Arquivos gerados com sucesso:\n" + "\n".join(generated_files))
+
+    def handle_reprocess_error(self, message: str) -> None:
+        self.statusBar().showMessage("Falha ao reprocessar SPED.")
+        QMessageBox.critical(self, "Reprocessar SPED", f"Falha ao reprocessar SPED.\n\n{message}")
 
     def update_compare_status(self, current: int, total: int, message: str) -> None:
         percent = int(100 * current / max(total, 1))
@@ -4121,6 +4896,7 @@ class QtSpedApp(QMainWindow):
             ]
             for column, value in enumerate(values):
                 item = QTableWidgetItem(str(value))
+                item.setData(Qt.UserRole, row_index)
                 item.setForeground(QColor(COLORS["text"]))
                 if column in {0, 1, 2, 5, 6, 7, 8, 9, 10, 11, 12}:
                     item.setTextAlignment(Qt.AlignCenter)
@@ -4169,6 +4945,7 @@ class QtSpedApp(QMainWindow):
             ]
             for column, value in enumerate(values):
                 item = QTableWidgetItem(str(value))
+                item.setData(Qt.UserRole, row_index)
                 item.setForeground(QColor(COLORS["text"]))
                 if column in {0, 1, 2, 5, 6, 7, 8, 9, 10, 11, 12}:
                     item.setTextAlignment(Qt.AlignCenter)
@@ -5077,6 +5854,18 @@ class QtSpedApp(QMainWindow):
             QMessageBox.warning(self, title, "Nao ha dados para os filtros atuais.")
             return
         export_rows = [list(row) for row in rows]
+        runtime_rule_rows = [
+            {
+                "operation_type": operation_type,
+                "cst_icms": row[0] if len(row) > 0 else "",
+                "cfop": row[1] if len(row) > 1 else "",
+                "icms_rate": self.decimal_value(row[2] if len(row) > 2 else Decimal("0")),
+                "icms_value": self.decimal_value(row[5] if len(row) > 5 else Decimal("0")),
+                "sale_value": self.decimal_value(row[8] if len(row) > 8 else Decimal("0")),
+                "base_icms": self.decimal_value(row[9] if len(row) > 9 else Decimal("0")),
+            }
+            for row in export_rows
+        ]
         dialog = QDialog(self)
         dialog.setObjectName("popupDialog")
         dialog.setWindowTitle(title)
@@ -5724,7 +6513,7 @@ class QtSpedApp(QMainWindow):
         description = str(summary_row.get("description", "")).strip()
         title = f"Detalhamento - {code or 'produto'}{f' - {period}' if period else ''}"
 
-        rows: list[list[object]] = []
+        detail_payloads: list[dict[str, object]] = []
         total_quantity = Decimal("0")
         total_operation = Decimal("0")
         total_base = Decimal("0")
@@ -5742,26 +6531,27 @@ class QtSpedApp(QMainWindow):
             document_key = str(detail.get("document_key", "")).strip()
             if document_key:
                 document_keys.add(document_key)
+            detail_payloads.append(dict(detail))
+        detail_payloads.sort(key=lambda row: (str(row.get("document_date", row.get("date", ""))), str(row.get("document_number", "")), str(row.get("document_key", "")), str(row.get("item_number", ""))))
+        rows = []
+        for detail in detail_payloads:
+            operation_value = self.decimal_value(self.first_row_value(detail, "sale_value", "total_operation_value", "operation_value"))
+            base_icms = self.decimal_value(detail.get("base_icms"))
+            icms_value = self.decimal_value(detail.get("icms_value"))
             rows.append(
                 [
                     detail.get("document_date", detail.get("date", "")),
                     detail.get("document_number", ""),
                     detail.get("participant_name", ""),
-                    document_key,
+                    detail.get("document_key", ""),
                     detail.get("item_number", ""),
                     detail.get("cest", ""),
                     detail.get("cfop", ""),
                     self.first_row_value(detail, "cst_icms", "cst"),
                     self.decimal_value(detail.get("icms_rate")),
-                    compute_display_icms_rate(
-                        self.decimal_value(detail.get("icms_rate")),
-                        operation_value,
-                        base_icms,
-                        icms_value,
-                    ),
+                    compute_display_icms_rate(self.decimal_value(detail.get("icms_rate")), operation_value, base_icms, icms_value),
                 ]
             )
-        rows.sort(key=lambda row: (str(row[0]), str(row[1]), str(row[3]), str(row[4])))
 
         dialog = QDialog(self)
         dialog.setObjectName("popupDialog")
@@ -5801,12 +6591,17 @@ class QtSpedApp(QMainWindow):
         for row_index, row in enumerate(rows):
             for column_index, value in enumerate(row):
                 item = QTableWidgetItem(str(value))
+                item.setData(Qt.UserRole, row_index)
                 item.setForeground(QColor(COLORS["text"]))
                 if column_index not in {2, 3}:
                     item.setTextAlignment(Qt.AlignCenter)
                 table.setItem(row_index, column_index, item)
         self.apply_popup_column_widths(table, headers)
         self.enable_table_sorting(table)
+        table.setContextMenuPolicy(Qt.CustomContextMenu)
+        table.customContextMenuRequested.connect(
+            lambda pos: self.show_runtime_rule_context_menu_for_payloads(table, detail_payloads, operation_type, pos, include_document=True)
+        )
         layout.addWidget(table, 1)
 
         ratio = (total_base * Decimal("100") / total_operation).quantize(Decimal("0.01")) if total_operation > 0 else Decimal("0.00")
@@ -6267,6 +7062,7 @@ class QtSpedApp(QMainWindow):
         for row_index, row in enumerate(rows):
             for column_index, value in enumerate(row):
                 item = QTableWidgetItem(str(value))
+                item.setData(Qt.UserRole, row_index)
                 item.setForeground(QColor(COLORS["text"]))
                 if not (column_index < len(headers) and self.normalize_search_text(headers[column_index]) in {"descricao"}):
                     item.setTextAlignment(Qt.AlignCenter)
@@ -6527,6 +7323,10 @@ class QtSpedApp(QMainWindow):
             table.itemDoubleClicked.connect(
                 lambda item: self.handle_operation_summary_double_click(item, detail_rows_by_index, operation_type)
             )
+        table.setContextMenuPolicy(Qt.CustomContextMenu)
+        table.customContextMenuRequested.connect(
+            lambda pos: self.show_operation_summary_runtime_rule_menu(table, runtime_rule_rows, detail_rows_by_index or {}, operation_type, pos)
+        )
         self.apply_popup_column_widths(table, headers)
         self.enable_table_sorting(table)
         layout.addWidget(table, 1)
@@ -6574,6 +7374,7 @@ class QtSpedApp(QMainWindow):
             for row_index, row in enumerate(filtered_rows):
                 for column_index, value in enumerate(row):
                     item = QTableWidgetItem(str(value))
+                    item.setData(Qt.UserRole, filtered_indices[row_index])
                     item.setForeground(QColor(COLORS["text"]))
                     item.setTextAlignment(Qt.AlignCenter)
                     table.setItem(row_index, column_index, item)
@@ -6636,6 +7437,34 @@ class QtSpedApp(QMainWindow):
         if not details:
             return
         self.open_operation_summary_detail_popup(details, operation_type)
+
+    def show_operation_summary_runtime_rule_menu(
+        self,
+        table: QTableWidget,
+        runtime_rule_rows: list[dict[str, object]],
+        detail_rows_by_index: dict[int, list[dict[str, object]]],
+        operation_type: str,
+        pos: object,
+    ) -> None:
+        item = table.itemAt(pos)
+        if item is None:
+            return
+        data_index = item.data(Qt.UserRole)
+        try:
+            original_index = int(data_index)
+        except (TypeError, ValueError):
+            original_index = item.row()
+        if original_index < 0 or original_index >= len(runtime_rule_rows):
+            return
+        table.selectRow(item.row())
+        menu = QMenu(table)
+        self.add_runtime_rule_actions_to_menu(menu, runtime_rule_rows[original_index], operation_type, include_document=False)
+        if detail_rows_by_index:
+            details = detail_rows_by_index.get(original_index, [])
+            if details:
+                menu.addSeparator()
+                menu.addAction("Abrir Detalhamento", lambda current_details=details: self.open_operation_summary_detail_popup(current_details, operation_type))
+        menu.exec(table.viewport().mapToGlobal(pos))
 
     def open_operation_summary_detail_popup(self, details: list[dict[str, object]], operation_type: str) -> None:
         rows: list[list[object]] = []
@@ -6746,6 +7575,10 @@ class QtSpedApp(QMainWindow):
                     item.setTextAlignment(Qt.AlignCenter)
                 table.setItem(row_index, column_index, item)
         table.itemDoubleClicked.connect(lambda item: self.open_invoice_mirror_from_detail_row(item, detail_payloads, operation_type))
+        table.setContextMenuPolicy(Qt.CustomContextMenu)
+        table.customContextMenuRequested.connect(
+            lambda pos: self.show_runtime_rule_context_menu_for_payloads(table, detail_payloads, operation_type, pos, include_document=True)
+        )
         header = table.horizontalHeader()
         header.setStretchLastSection(False)
         for column_index in range(table.columnCount()):
@@ -6835,15 +7668,14 @@ class QtSpedApp(QMainWindow):
         headers = ["Item", "Codigo", "Descricao", "NCM", "CEST", "CFOP", "CST", "Aliq ICMS", "Aliq Efetiva"]
         rows = []
         highlight_rows: set[int] = set()
-        for index, row in enumerate(
-            sorted(
-                invoice_details,
-                key=lambda current: (
-                    str(current.get("item_number", "")),
-                    str(current.get("code", "")),
-                ),
-            )
-        ):
+        sorted_invoice_details = sorted(
+            invoice_details,
+            key=lambda current: (
+                str(current.get("item_number", "")),
+                str(current.get("code", "")),
+            ),
+        )
+        for index, row in enumerate(sorted_invoice_details):
             operation_value = self.decimal_value(self.first_row_value(row, "sale_value", "total_operation_value", "operation_value"))
             base_icms = self.decimal_value(row.get("base_icms"))
             icms_value = self.decimal_value(row.get("icms_value"))
@@ -6902,6 +7734,8 @@ class QtSpedApp(QMainWindow):
             total_icms,
             note_header,
             highlight_rows,
+            sorted_invoice_details,
+            operation_type,
         )
 
     def open_invoice_mirror_popup_with_cards(
@@ -6915,6 +7749,8 @@ class QtSpedApp(QMainWindow):
         total_icms: Decimal,
         note_header: dict[str, object],
         highlight_rows: set[int] | None = None,
+        runtime_rule_rows: list[dict[str, object]] | None = None,
+        operation_type: str = "",
     ) -> None:
         if not rows:
             QMessageBox.warning(self, title, "Nao ha dados para esta nota.")
@@ -6972,6 +7808,7 @@ class QtSpedApp(QMainWindow):
         for row_index, row in enumerate(rows):
             for column_index, value in enumerate(row):
                 item = QTableWidgetItem(str(value))
+                item.setData(Qt.UserRole, row_index)
                 item.setForeground(QColor(COLORS["text"]))
                 if column_index not in {2}:
                     item.setTextAlignment(Qt.AlignCenter)
@@ -6980,6 +7817,11 @@ class QtSpedApp(QMainWindow):
                 table.setItem(row_index, column_index, item)
         self.apply_popup_column_widths(table, headers)
         self.enable_table_sorting(table)
+        if runtime_rule_rows:
+            table.setContextMenuPolicy(Qt.CustomContextMenu)
+            table.customContextMenuRequested.connect(
+                lambda pos: self.show_runtime_rule_context_menu_for_payloads(table, runtime_rule_rows, operation_type, pos, include_document=True)
+            )
         layout.addWidget(table, 1)
 
         ratio = (total_base * Decimal("100") / total_operation).quantize(Decimal("0.01")) if total_operation > 0 else Decimal("0.00")
@@ -7188,15 +8030,14 @@ class QtSpedApp(QMainWindow):
         headers = ["Item", "Codigo", "Descricao", "NCM", "CEST", "CFOP", "CST", "Aliq ICMS", "Aliq Efetiva"]
         rows: list[list[object]] = []
         highlight_rows: set[int] = set()
-        for index, row in enumerate(
-            sorted(
-                invoice_details,
-                key=lambda current: (
-                    str(current.get("item_number", "")),
-                    str(current.get("code", "")),
-                ),
-            )
-        ):
+        sorted_invoice_details = sorted(
+            invoice_details,
+            key=lambda current: (
+                str(current.get("item_number", "")),
+                str(current.get("code", "")),
+            ),
+        )
+        for index, row in enumerate(sorted_invoice_details):
             operation_value = self.decimal_value(self.first_row_value(row, "sale_value", "total_operation_value", "operation_value"))
             base_icms = self.decimal_value(row.get("base_icms"))
             icms_value = self.decimal_value(row.get("icms_value"))
@@ -7255,4 +8096,6 @@ class QtSpedApp(QMainWindow):
             total_icms,
             note_header,
             highlight_rows,
+            sorted_invoice_details,
+            operation_type,
         )
