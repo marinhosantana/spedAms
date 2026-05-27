@@ -699,7 +699,7 @@ def build_import_products_from_consolidated_sources(
                 "descricao": str(row.get("descricao", "")).strip(),
                 "ncm": str(row.get("ncm", "")).strip(),
                 "unidade": str(row.get("unidade", "UN")).strip() or "UN",
-                "tipo_produto": str(row.get("tipo_produto", "Revenda")).strip() or "Revenda",
+                "tipo_produto": str(row.get("tipo_produto", "")).strip(),
                 "cst_icms_entrada": "",
                 "cst_icms_saida": "",
                 "icms_entrada": Decimal("0"),

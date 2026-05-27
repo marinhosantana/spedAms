@@ -15,6 +15,7 @@ from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
     QComboBox,
+    QCompleter,
     QDialog,
     QFileDialog,
     QFrame,
@@ -272,6 +273,18 @@ class QtSpedApp(QMainWindow):
                 color: {COLORS["text"]};
                 font-family: Segoe UI;
                 font-size: 14px;
+            }}
+            QMessageBox {{
+                background: {COLORS["panel"]};
+                color: {COLORS["text"]};
+            }}
+            QLabel {{
+                color: {COLORS["text"]};
+                background: transparent;
+            }}
+            QMessageBox QLabel {{
+                color: {COLORS["text"]};
+                background: transparent;
             }}
             QWidget#sidebar {{
                 background: {COLORS["sidebar"]};
@@ -756,7 +769,7 @@ class QtSpedApp(QMainWindow):
         self.catalog_status.setObjectName("muted")
         toolbar_layout.addWidget(title)
         toolbar_layout.addWidget(self.catalog_status, 1)
-        toolbar_layout.addWidget(self.create_button("Atualizar", self.refresh_catalog, primary=True))
+        toolbar_layout.addWidget(self.create_button("Atualizar", lambda: self.run_guarded_ui_operation("refresh_catalog", "Atualizando cadastro...", self.refresh_catalog), primary=True))
         layout.addWidget(toolbar)
 
         self.catalog_company_fields = self.create_line_fields(("id", "nome", "cnpj", "inscricao_estadual", "observacao"))
@@ -1025,24 +1038,40 @@ class QtSpedApp(QMainWindow):
         consult_layout = QVBoxLayout(consult_tab)
         consult_layout.setContentsMargins(10, 10, 10, 10)
         consult_layout.setSpacing(8)
-        search_row = QHBoxLayout()
-        search_row.addWidget(QLabel("Consultar"))
+        search_grid = QGridLayout()
+        search_grid.setHorizontalSpacing(8)
+        search_grid.setVerticalSpacing(6)
         self.product_page_filter_company_combo.addItem("Todas Empresas", 0)
         self.product_page_filter_supplier_combo.addItem("Todos Fornecedores", 0)
+        self.product_page_filter_company_combo.setMinimumWidth(260)
+        self.product_page_filter_supplier_combo.setMinimumWidth(320)
+        self.product_page_filter_company_combo.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
+        self.product_page_filter_supplier_combo.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
+        self.configure_searchable_combo(self.product_page_filter_company_combo, "Digite para localizar empresa")
+        self.configure_searchable_combo(self.product_page_filter_supplier_combo, "Digite para localizar fornecedor")
         self.product_page_filter_company_combo.currentIndexChanged.connect(self.on_product_filter_company_changed)
         self.product_page_filter_supplier_combo.currentIndexChanged.connect(lambda _idx: self.apply_product_page_filters())
-        search_row.addWidget(self.product_page_filter_company_combo)
-        search_row.addWidget(self.product_page_filter_supplier_combo)
+        search_grid.addWidget(QLabel("Empresa"), 0, 0)
+        search_grid.addWidget(QLabel("Fornecedor"), 0, 1)
+        search_grid.addWidget(QLabel("Produto"), 0, 2)
+        search_grid.addWidget(self.product_page_filter_company_combo, 1, 0)
+        search_grid.addWidget(self.product_page_filter_supplier_combo, 1, 1)
         self.product_page_search_input = QLineEdit()
-        self.product_page_search_input.setPlaceholderText("Pesquisar por empresa, fornecedor, codigo, descricao, tipo ou NCM")
+        self.product_page_search_input.setPlaceholderText("Codigo, descricao, classificacao, EAN, NCM ou CST")
         self.product_page_search_input.textChanged.connect(lambda _text: self.apply_product_page_filters())
-        search_row.addWidget(self.product_page_search_input, 1)
-        search_row.addWidget(self.create_button("Exportar", self.export_product_page_filtered))
-        search_row.addWidget(self.create_button("Limpar Consulta", self.clear_product_page_consultation))
-        search_row.addWidget(self.create_button("Atualizar", self.refresh_product_page, primary=True))
-        search_row.addWidget(self.create_button("Editar Selecionado", self.edit_product_page_selected))
-        search_row.addWidget(self.create_button("Excluir", self.delete_product_page))
-        consult_layout.addLayout(search_row)
+        search_grid.addWidget(self.product_page_search_input, 1, 2)
+        actions = QHBoxLayout()
+        actions.addWidget(self.create_button("Exportar", self.export_product_page_filtered))
+        actions.addWidget(self.create_button("Limpar Consulta", self.clear_product_page_consultation))
+        actions.addWidget(self.create_button("Atualizar", lambda: self.run_guarded_ui_operation("refresh_product_page", "Atualizando produtos...", self.refresh_product_page), primary=True))
+        actions.addWidget(self.create_button("Editar Selecionado", self.edit_product_page_selected))
+        actions.addWidget(self.create_button("Excluir", self.delete_product_page))
+        actions.addStretch()
+        search_grid.addLayout(actions, 2, 0, 1, 3)
+        search_grid.setColumnStretch(0, 2)
+        search_grid.setColumnStretch(1, 2)
+        search_grid.setColumnStretch(2, 5)
+        consult_layout.addLayout(search_grid)
         product_metrics_layout = QGridLayout()
         product_metrics_layout.setHorizontalSpacing(8)
         self.product_metric_labels: dict[str, QLabel] = {}
@@ -1359,7 +1388,7 @@ class QtSpedApp(QMainWindow):
             "1) Emitente da NF-e vira Fornecedor.\n"
             "2) Destinatario da NF-e vira Empresa.\n"
             "3) Produto vincula por Fornecedor + EAN (ou codigo quando EAN vazio).\n"
-            "4) Se classificacao nao existir, o sistema cria automaticamente: Revenda."
+            "4) Classificacao do produto fica em branco para selecionar depois."
         )
         tips_label.setObjectName("muted")
         tips_layout.addWidget(tips_label)
@@ -1394,6 +1423,7 @@ class QtSpedApp(QMainWindow):
                 "Ja Existe?",
             ]
         )
+        self.catalog_import_preview_table.setObjectName("catalog_import_preview")
         self.catalog_import_preview_rows: list[CatalogImportPreviewRow] = []
         self.catalog_import_ignored_rows: list[list[str]] = []
         self.catalog_import_skipped_product_rows: list[list[str]] = []
@@ -1449,6 +1479,18 @@ class QtSpedApp(QMainWindow):
         self.apply_table_column_policy(table)
         self.enable_table_sorting(table)
         return table
+
+    def configure_searchable_combo(self, combo: QComboBox, placeholder: str) -> None:
+        combo.setEditable(True)
+        combo.setInsertPolicy(QComboBox.NoInsert)
+        combo.setMaxVisibleItems(18)
+        if combo.lineEdit() is not None:
+            combo.lineEdit().setPlaceholderText(placeholder)
+        completer = combo.completer()
+        if completer is not None:
+            completer.setCaseSensitivity(Qt.CaseInsensitive)
+            completer.setFilterMode(Qt.MatchContains)
+            completer.setCompletionMode(QCompleter.PopupCompletion)
 
     def enable_table_sorting(self, table: QTableWidget) -> None:
         table.setSortingEnabled(True)
@@ -2174,26 +2216,34 @@ class QtSpedApp(QMainWindow):
         was_sorting_enabled = table.isSortingEnabled()
         if was_sorting_enabled:
             table.setSortingEnabled(False)
+        table.setUpdatesEnabled(False)
         header_labels = [
             (table.horizontalHeaderItem(index).text().strip().lower() if table.horizontalHeaderItem(index) else "")
             for index in range(table.columnCount())
         ]
-        table.setRowCount(len(rows))
-        for row_index, row in enumerate(rows):
-            for column_index, value in enumerate(row):
-                display_value = str(value)
-                header_label = header_labels[column_index] if column_index < len(header_labels) else ""
-                if header_label == "cnpj":
-                    display_value = self.format_cnpj(display_value)
-                elif header_label == "ie":
-                    display_value = self.format_ie(display_value)
-                item = QTableWidgetItem(display_value)
-                item.setForeground(QColor(COLORS["text"]))
-                item.setTextAlignment(Qt.AlignCenter)
-                table.setItem(row_index, column_index, item)
-        self.apply_table_column_policy(table)
-        if was_sorting_enabled:
-            table.setSortingEnabled(True)
+        try:
+            table.setRowCount(len(rows))
+            for row_index, row in enumerate(rows):
+                for column_index, value in enumerate(row):
+                    display_value = str(value)
+                    header_label = header_labels[column_index] if column_index < len(header_labels) else ""
+                    if header_label == "cnpj":
+                        display_value = self.format_cnpj(display_value)
+                    elif header_label == "ie":
+                        display_value = self.format_ie(display_value)
+                    item = QTableWidgetItem(display_value)
+                    item.setForeground(QColor(COLORS["text"]))
+                    if header_label in {"descricao", "produto"}:
+                        item.setTextAlignment(Qt.AlignVCenter | Qt.AlignLeft)
+                    else:
+                        item.setTextAlignment(Qt.AlignCenter)
+                    table.setItem(row_index, column_index, item)
+            if table.objectName() != "catalog_import_preview" or len(rows) <= 1000:
+                self.apply_table_column_policy(table)
+        finally:
+            table.setUpdatesEnabled(True)
+            if was_sorting_enabled:
+                table.setSortingEnabled(True)
 
     def format_cnpj(self, value: object) -> str:
         digits = self.digits_only(str(value or ""))
@@ -2212,18 +2262,42 @@ class QtSpedApp(QMainWindow):
         item = table.item(selected[0].row(), 0)
         return int(item.text()) if item and item.text().isdigit() else 0
 
+    def run_guarded_ui_operation(self, operation_key: str, message: str, callback: Callable[[], None]) -> None:
+        running_operations = getattr(self, "_running_ui_operations", set())
+        if operation_key in running_operations:
+            self.statusBar().showMessage("Aguarde a consulta atual terminar.")
+            return
+        running_operations.add(operation_key)
+        self._running_ui_operations = running_operations
+        QApplication.setOverrideCursor(Qt.WaitCursor)
+        self.statusBar().showMessage(message)
+        QApplication.processEvents()
+        try:
+            callback()
+        except Exception as exc:
+            self.statusBar().showMessage("Falha na consulta.")
+            QMessageBox.critical(self, "Consulta", str(exc))
+        finally:
+            running_operations.discard(operation_key)
+            QApplication.restoreOverrideCursor()
+            QApplication.processEvents()
+
     def refresh_current_catalog_page(self) -> None:
-        title = self.page_title.text()
-        if title == "Empresas":
-            self.refresh_company_page()
-        elif title == "Fornecedores":
-            self.refresh_supplier_page()
-        elif title == "Classificacao do Produto":
-            self.refresh_type_page()
-        elif title == "Produtos":
-            self.refresh_product_page()
-        else:
-            self.refresh_catalog()
+        def refresh() -> None:
+            title = self.page_title.text()
+            if title == "Empresas":
+                self.refresh_company_page()
+            elif title == "Fornecedores":
+                self.refresh_supplier_page()
+            elif title == "Classificacao do Produto":
+                self.refresh_type_page()
+            elif title == "Produtos":
+                self.refresh_product_page()
+            else:
+                self.refresh_catalog()
+            self.statusBar().showMessage("Consulta carregada.")
+
+        self.run_guarded_ui_operation("refresh_current_catalog_page", "Carregando consulta...", refresh)
 
     def fill_company_combo(self, combo: QComboBox) -> None:
         combo.clear()
@@ -3202,7 +3276,7 @@ class QtSpedApp(QMainWindow):
                 f"Empresas processadas: {stats['companies_processed']} | Fornecedores processados: {stats['suppliers_processed']}\n"
                 f"Produtos criados: {stats['products_created']} | atualizados: {stats['products_updated']} | "
                 f"existentes ignorados: {stats['products_skipped_existing']}\n"
-                f"Classificacao padrao aplicada quando necessario: Revenda (ID {stats['default_type_id']})"
+                "Classificacao do produto: em branco para selecionar depois"
             )
             self.catalog_import_status.setText(summary)
             self.catalog_import_skipped_product_rows = list(stats.get("skipped_rows", [])) if isinstance(stats, dict) else []
