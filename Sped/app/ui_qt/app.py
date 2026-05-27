@@ -158,6 +158,13 @@ class NFeKeyExtractWorker(QObject):
 
 
 def extract_nfe_keys_from_sped_file(sped_path: Path) -> list[dict[str, object]]:
+    def classify_document_type(document_model: str, document_key: str) -> str:
+        model = str(document_model or "").strip()
+        key_digits = normalize_document_key(document_key)
+        if model in {"55", "65"} or len(key_digits) == 44:
+            return "NFe"
+        return "NFSe"
+
     rows: list[dict[str, object]] = []
     participants: dict[str, dict[str, str]] = {}
     with sped_path.open("r", encoding="latin-1") as sped_file:
@@ -177,8 +184,11 @@ def extract_nfe_keys_from_sped_file(sped_path: Path) -> list[dict[str, object]]:
                 continue
             ind_oper = get_field(fields, 2)
             operation_type = "Entrada" if ind_oper == "0" else "Saida" if ind_oper == "1" else ""
-            document_key = normalize_document_key(get_field(fields, 9))
-            if len(document_key) != 44:
+            document_model = str(get_field(fields, 6) or "").strip()
+            raw_document_key = str(get_field(fields, 9) or "").strip()
+            normalized_document_key = normalize_document_key(raw_document_key)
+            document_key = normalized_document_key if normalized_document_key else raw_document_key
+            if not document_key:
                 continue
             participant_code = get_field(fields, 4)
             participant_data = participants.get(participant_code, {})
@@ -186,7 +196,9 @@ def extract_nfe_keys_from_sped_file(sped_path: Path) -> list[dict[str, object]]:
                 {
                     "file_name": sped_path.name,
                     "operation_type": operation_type,
+                    "document_type": classify_document_type(document_model, document_key),
                     "document_key": document_key,
+                    "document_model": document_model,
                     "document_number": get_field(fields, 8),
                     "document_series": get_field(fields, 7),
                     "document_date": get_field(fields, 10),
@@ -2936,7 +2948,7 @@ class QtSpedApp(QMainWindow):
         table_layout.setSpacing(8)
         table_layout.addWidget(QLabel("Chaves carregadas"))
         self.nfe_extract_table = self.create_data_table(
-            ["Operacao", "Chave NFe", "Documento", "Serie", "Data", "Participante", "CNPJ/CPF", "Arquivo SPED"]
+            ["Tipo Documento", "Operacao", "Chave", "Documento", "Serie", "Data", "Participante", "CNPJ/CPF", "Arquivo SPED"]
         )
         table_layout.addWidget(self.nfe_extract_table, 1)
         layout.addWidget(table_panel, 1)
@@ -4505,6 +4517,7 @@ class QtSpedApp(QMainWindow):
     def refresh_nfe_key_extract_table(self) -> None:
         rows = [
             [
+                row.get("document_type", ""),
                 row.get("operation_type", ""),
                 row.get("document_key", ""),
                 row.get("document_number", ""),
@@ -4530,20 +4543,24 @@ class QtSpedApp(QMainWindow):
         )
         if not output:
             return
-        headers = ["Arquivo SPED", "Operacao", "Chave NFe", "Documento", "Serie", "Data", "Participante", "CNPJ/CPF"]
+        headers = ["Arquivo SPED", "Tipo Documento", "Operacao", "Chave", "Documento", "Serie", "Modelo", "Data", "Participante", "CNPJ/CPF"]
         rows = [
             [
                 row.get("file_name", ""),
+                row.get("document_type", ""),
                 row.get("operation_type", ""),
                 row.get("document_key", ""),
                 row.get("document_number", ""),
                 row.get("document_series", ""),
+                row.get("document_model", ""),
                 row.get("document_date", ""),
                 row.get("participant_name", ""),
                 row.get("participant_tax_id", ""),
             ]
             for row in self.nfe_extract_rows
         ]
+        nfe_rows = [row for row in rows if str(row[1]) == "NFe"]
+        nfse_rows = [row for row in rows if str(row[1]) == "NFSe"]
         output_path = Path(output)
         try:
             if selected_filter.startswith("Arquivo CSV") or output_path.suffix.lower() == ".csv":
@@ -4553,7 +4570,14 @@ class QtSpedApp(QMainWindow):
             else:
                 if output_path.suffix.lower() != ".xlsx":
                     output_path = output_path.with_suffix(".xlsx")
-                write_simple_excel_workbook(output_path, [("Chaves NFe", headers, rows, {"include_total": False})])
+                sheets: list[tuple[str, list[str], list[list[object]], dict[str, object]]] = []
+                if nfe_rows:
+                    sheets.append(("NFe", headers, nfe_rows, {"include_total": False}))
+                if nfse_rows:
+                    sheets.append(("NFSe", headers, nfse_rows, {"include_total": False}))
+                if not sheets:
+                    sheets.append(("Chaves", headers, rows, {"include_total": False}))
+                write_simple_excel_workbook(output_path, sheets)
             self.handle_export_success("Exportar chaves NFe", output_path, "Chaves NFe exportadas")
         except Exception as exc:
             self.handle_export_failure("Exportar chaves NFe", "chaves NFe", exc)
