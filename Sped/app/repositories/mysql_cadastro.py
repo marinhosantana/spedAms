@@ -639,11 +639,13 @@ class MysqlCadastroRepository:
         name: str,
         cnpj: str = "",
         inscricao_estadual: str = "",
+        uf: str = "",
         regime_tributario: str = "LUCRO_REAL_PRESUMIDO",
     ) -> int:
         normalized_name = str(name or "").strip()
         normalized_cnpj = self._only_digits(cnpj)
         normalized_ie = str(inscricao_estadual or "").strip()
+        normalized_uf = self._trim_text(uf, 2).upper()
         normalized_regime = self._trim_text(regime_tributario, 30) or "LUCRO_REAL_PRESUMIDO"
         if not company_id:
             raise ValueError("Empresa obrigatoria para fornecedor.")
@@ -672,6 +674,7 @@ class MysqlCadastroRepository:
                         SET nome = %s,
                             cnpj = CASE WHEN %s <> '' THEN %s ELSE cnpj END,
                             inscricao_estadual = CASE WHEN %s <> '' THEN %s ELSE inscricao_estadual END,
+                            uf = CASE WHEN %s <> '' THEN %s ELSE uf END,
                             regime_tributario = CASE WHEN %s <> '' THEN %s ELSE regime_tributario END
                         WHERE id = %s
                         """,
@@ -681,6 +684,8 @@ class MysqlCadastroRepository:
                             normalized_cnpj,
                             normalized_ie,
                             normalized_ie,
+                            normalized_uf,
+                            normalized_uf,
                             normalized_regime,
                             normalized_regime,
                             supplier_id,
@@ -706,6 +711,7 @@ class MysqlCadastroRepository:
                     UPDATE cad_fornecedores
                     SET cnpj = CASE WHEN %s <> '' THEN %s ELSE cnpj END,
                         inscricao_estadual = CASE WHEN %s <> '' THEN %s ELSE inscricao_estadual END,
+                        uf = CASE WHEN %s <> '' THEN %s ELSE uf END,
                         regime_tributario = CASE WHEN %s <> '' THEN %s ELSE regime_tributario END
                     WHERE id = %s
                     """,
@@ -714,6 +720,8 @@ class MysqlCadastroRepository:
                         normalized_cnpj,
                         normalized_ie,
                         normalized_ie,
+                        normalized_uf,
+                        normalized_uf,
                         normalized_regime,
                         normalized_regime,
                         supplier_id,
@@ -723,10 +731,10 @@ class MysqlCadastroRepository:
                 return supplier_id
             cursor.execute(
                 """
-                INSERT INTO cad_fornecedores (empresa_id, nome, cnpj, inscricao_estadual, codigo, regime_tributario, observacao)
-                VALUES (%s, %s, %s, %s, '', %s, 'Importado de XML')
+                INSERT INTO cad_fornecedores (empresa_id, nome, cnpj, inscricao_estadual, uf, codigo, regime_tributario, observacao)
+                VALUES (%s, %s, %s, %s, %s, '', %s, 'Importado de XML')
                 """,
-                (company_id, normalized_name, normalized_cnpj, normalized_ie, normalized_regime),
+                (company_id, normalized_name, normalized_cnpj, normalized_ie, normalized_uf, normalized_regime),
             )
             connection.commit()
             return int(cursor.lastrowid)

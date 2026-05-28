@@ -59,6 +59,7 @@ class CompareXmlInvoice:
     issuer_cnpj: str
     issuer_name: str
     issuer_ie: str
+    issuer_uf: str
     issuer_city_code: str
     recipient_cnpj: str
     recipient_name: str

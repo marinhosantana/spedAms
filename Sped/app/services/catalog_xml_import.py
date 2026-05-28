@@ -352,6 +352,7 @@ class CatalogImportPreviewRow:
     empresa_ie: str
     fornecedor: str
     fornecedor_ie: str
+    fornecedor_uf: str
     regime_tributario: str
     chave_nfe_origem: str
     codigo_fornecedor: str
@@ -433,6 +434,7 @@ def build_catalog_import_preview(
                     empresa_ie=_digits_only(invoice.recipient_ie),
                     fornecedor=supplier_name,
                     fornecedor_ie=_digits_only(invoice.issuer_ie),
+                    fornecedor_uf=str(getattr(invoice, "issuer_uf", "") or "").strip().upper()[:2],
                     regime_tributario=regime_tributario,
                     chave_nfe_origem=str(invoice.key or "").strip(),
                     codigo_fornecedor=code or ean,
@@ -503,6 +505,7 @@ def import_catalogs_from_preview(
                 row.fornecedor,
                 issuer_cnpj,
                 row.fornecedor_ie,
+                row.fornecedor_uf,
                 row.regime_tributario,
             )
             stats["suppliers_processed"] += 1
@@ -576,9 +579,6 @@ def import_catalogs_from_preview(
             for field_name in UPDATABLE_PRODUCT_FIELDS:
                 if field_name not in selected_fields or _values_equal(field_name, existing_product.get(field_name, ""), payload.get(field_name, "")):
                     payload[field_name] = existing_product.get(field_name, payload[field_name])
-            values = _supplier_product_values(repository, supplier_id, payload)
-            update_values.append((*values, existing_id))
-            stats["products_updated"] += 1
             changed_fields = [
                 field_name
                 for field_name in UPDATABLE_PRODUCT_FIELDS
@@ -587,6 +587,10 @@ def import_catalogs_from_preview(
             ]
             if not changed_fields:
                 skipped_rows.append([row.xml_file, row.codigo_fornecedor, row.ean, row.descricao, "Sem alteracao", "Item existente sem diferenca real nos campos selecionados."])
+                continue
+            values = _supplier_product_values(repository, supplier_id, payload)
+            update_values.append((*values, existing_id))
+            stats["products_updated"] += 1
         else:
             values = _supplier_product_values(repository, supplier_id, payload)
             insert_values.append(values)
