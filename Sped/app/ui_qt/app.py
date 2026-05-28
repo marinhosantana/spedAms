@@ -888,7 +888,7 @@ class QtSpedApp(QMainWindow):
         layout.addWidget(toolbar)
 
         self.catalog_company_fields = self.create_line_fields(("id", "nome", "cnpj", "inscricao_estadual", "observacao"))
-        self.catalog_supplier_fields = self.create_line_fields(("id", "nome", "cnpj", "inscricao_estadual", "codigo", "regime_tributario", "observacao"))
+        self.catalog_supplier_fields = self.create_line_fields(("id", "nome", "cnpj", "inscricao_estadual", "uf", "codigo", "regime_tributario", "observacao"))
         self.catalog_type_fields = self.create_line_fields(("id", "nome", "descricao"))
         self.catalog_product_fields = self.create_line_fields(
             (
@@ -912,6 +912,7 @@ class QtSpedApp(QMainWindow):
                 "cfop_saida_empresa",
                 "aliquota_icms_saida",
                 "cst_icms",
+                "reducao_bc_icms",
                 "aliquota_icms",
                 "cst_ipi",
                 "aliquota_ipi",
@@ -956,9 +957,9 @@ class QtSpedApp(QMainWindow):
             0,
             1,
             "Fornecedores da Empresa",
-            ["ID", "Fornecedor", "CNPJ", "IE", "Codigo", "Regime"],
+            ["ID", "Fornecedor", "CNPJ", "IE", "UF", "Codigo", "Regime"],
             self.catalog_supplier_fields,
-            [("nome", "Fornecedor"), ("cnpj", "CNPJ"), ("inscricao_estadual", "IE"), ("codigo", "Codigo"), ("regime_tributario", "Regime Tributario"), ("observacao", "Observacao")],
+            [("nome", "Fornecedor"), ("cnpj", "CNPJ"), ("inscricao_estadual", "IE"), ("uf", "UF"), ("codigo", "Codigo"), ("regime_tributario", "Regime Tributario"), ("observacao", "Observacao")],
             self.save_catalog_supplier,
             self.clear_catalog_supplier_form,
             self.delete_catalog_supplier,
@@ -986,7 +987,7 @@ class QtSpedApp(QMainWindow):
         product_title = QLabel("Produtos do Fornecedor")
         product_title.setObjectName("sectionTitle")
         product_layout.addWidget(product_title)
-        self.catalog_product_table = self.create_data_table(["ID", "Cod. Forn.", "Cod. Empresa", "Descricao", "Classificacao", "NCM", "Origem (entrada)", "CST ICMS (entrada)", "CFOP saida fornecedor", "% ICMS (entrada)", "CFOP entrada empresa", "CST IPI", "% IPI", "CST PIS (entrada)", "% PIS", "CST COFINS (entrada)", "% COFINS", "Natureza da receita", "MVA", "Valor ICMS-ST", "cClassTrib", "cBenef", "Origem (saida)", "CST ICMS (saida)", "CFOP saida empresa", "% ICMS (saida)", "CST PIS (saida)", "CST COFINS (saida)", "Natureza da receita"])
+        self.catalog_product_table = self.create_data_table(["ID", "Cod. Forn.", "Cod. Empresa", "Descricao", "Classificacao", "NCM", "Origem (entrada)", "CST ICMS (entrada)", "% Red BC ICMS", "CFOP saida fornecedor", "% ICMS (entrada)", "CFOP entrada empresa", "CST IPI", "% IPI", "CST PIS (entrada)", "% PIS", "CST COFINS (entrada)", "% COFINS", "Natureza da receita", "MVA", "Valor ICMS-ST", "cClassTrib", "cBenef", "Origem (saida)", "CST ICMS (saida)", "CFOP saida empresa", "% ICMS (saida)", "CST PIS (saida)", "CST COFINS (saida)", "Natureza da receita"])
         self.catalog_product_table.setColumnWidth(0, 55)
         self.catalog_product_table.setColumnWidth(1, 90)
         self.catalog_product_table.setColumnWidth(2, 100)
@@ -1002,7 +1003,7 @@ class QtSpedApp(QMainWindow):
         product_form.addWidget(self.catalog_product_type_combo, 0, 1, 1, 3)
         grouped_product_labels = [
             ("Dados Gerais", [("codigo_fornecedor", "Cod. Produto Fornecedor"), ("codigo_empresa", "Cod. Produto Empresa"), ("descricao", "Descricao"), ("ean", "EAN"), ("ncm", "NCM"), ("cest", "CEST")]),
-            ("Tributacao Entrada", [("origem_entrada", "Origem (entrada)"), ("cst_icms", "CST ICMS (entrada)"), ("cfop_saida_fornecedor", "CFOP saida fornecedor"), ("aliquota_icms", "% ICMS (entrada)"), ("cfop_entrada", "CFOP entrada empresa"), ("cst_ipi", "CST IPI"), ("aliquota_ipi", "% IPI"), ("cst_pis", "CST PIS (entrada)"), ("aliquota_pis", "% PIS"), ("cst_cofins", "CST COFINS (entrada)"), ("aliquota_cofins", "% COFINS"), ("natureza_receita_entrada", "Natureza da receita"), ("mva", "MVA"), ("valor_icms_st", "Valor ICMS-ST"), ("c_classtrib", "cClassTrib"), ("c_benef", "cBenef")]),
+            ("Tributacao Entrada", [("origem_entrada", "Origem (entrada)"), ("cst_icms", "CST ICMS (entrada)"), ("reducao_bc_icms", "% Red BC ICMS"), ("cfop_saida_fornecedor", "CFOP saida fornecedor"), ("aliquota_icms", "% ICMS (entrada)"), ("cfop_entrada", "CFOP entrada empresa"), ("cst_ipi", "CST IPI"), ("aliquota_ipi", "% IPI"), ("cst_pis", "CST PIS (entrada)"), ("aliquota_pis", "% PIS"), ("cst_cofins", "CST COFINS (entrada)"), ("aliquota_cofins", "% COFINS"), ("natureza_receita_entrada", "Natureza da receita"), ("mva", "MVA"), ("valor_icms_st", "Valor ICMS-ST"), ("c_classtrib", "cClassTrib"), ("c_benef", "cBenef")]),
             ("Dados de Saida", [("origem_saida", "Origem (saida)"), ("cst_icms_saida", "CST ICMS (saida)"), ("cfop_saida_empresa", "CFOP saida empresa"), ("aliquota_icms_saida", "% ICMS (saida)"), ("cst_pis_saida", "CST PIS (saida)"), ("cst_cofins_saida", "CST COFINS (saida)"), ("natureza_receita_saida", "Natureza da receita")]),
         ]
         current_row = 1
@@ -1056,17 +1057,17 @@ class QtSpedApp(QMainWindow):
 
     def build_catalog_supplier_page(self) -> QWidget:
         page = self.create_single_catalog_page("Fornecedores")
-        self.supplier_page_fields = self.create_line_fields(("id", "nome", "cnpj", "inscricao_estadual", "codigo", "regime_tributario", "observacao"))
+        self.supplier_page_fields = self.create_line_fields(("id", "nome", "cnpj", "inscricao_estadual", "uf", "codigo", "regime_tributario", "observacao"))
         self.supplier_page_company_combo = QComboBox()
         self.supplier_page_regime_combo = QComboBox()
         self.populate_regime_tributario_combo(self.supplier_page_regime_combo)
-        self.supplier_page_table = self.create_data_table(["ID", "Empresa", "Fornecedor", "CNPJ", "IE", "Codigo", "Regime"])
+        self.supplier_page_table = self.create_data_table(["ID", "Empresa", "Fornecedor", "CNPJ", "IE", "UF", "Codigo", "Regime"])
         self.supplier_page_table.setObjectName("fornecedores")
         self.add_single_catalog_form(
             page,
             self.supplier_page_table,
             self.supplier_page_fields,
-            [("nome", "Fornecedor"), ("cnpj", "CNPJ"), ("inscricao_estadual", "IE"), ("codigo", "Codigo"), ("observacao", "Observacao")],
+            [("nome", "Fornecedor"), ("cnpj", "CNPJ"), ("inscricao_estadual", "IE"), ("uf", "UF"), ("codigo", "Codigo"), ("observacao", "Observacao")],
             self.save_supplier_page,
             self.clear_supplier_page_form,
             self.delete_supplier_page,
@@ -1116,6 +1117,7 @@ class QtSpedApp(QMainWindow):
                 "cfop_saida_empresa",
                 "aliquota_icms_saida",
                 "cst_icms",
+                "reducao_bc_icms",
                 "aliquota_icms",
                 "cst_ipi",
                 "aliquota_ipi",
@@ -1142,6 +1144,7 @@ class QtSpedApp(QMainWindow):
                 "ID",
                 "Empresa",
                 "Fornecedor",
+                "UF",
                 "Classificação",
                 "Cod. Forn.",
                 "Cod. Empresa",
@@ -1151,6 +1154,7 @@ class QtSpedApp(QMainWindow):
                 "CEST",
                 "Origem (entrada)",
                 "CST ICMS (entrada)",
+                "% Red BC ICMS",
                 "CFOP saída fornecedor",
                 "% ICMS (entrada)",
                 "CFOP entrada empresa",
@@ -1260,6 +1264,7 @@ class QtSpedApp(QMainWindow):
         entrada_fields = [
             ("origem_entrada", "Origem (entrada)"),
             ("cst_icms", "CST ICMS (entrada)"),
+            ("reducao_bc_icms", "% Red BC ICMS"),
             ("cfop_saida_fornecedor", "CFOP saida fornecedor"),
             ("aliquota_icms", "% ICMS (entrada)"),
             ("cfop_entrada", "CFOP entrada empresa"),
@@ -1436,6 +1441,8 @@ class QtSpedApp(QMainWindow):
         if "inscricao_estadual" in fields:
             # IE varia por UF; aqui aplicamos mascara generica numerica.
             fields["inscricao_estadual"].setInputMask("000000000000000;_")
+        if "uf" in fields:
+            fields["uf"].setMaxLength(2)
         return fields
 
     def create_catalog_section(
@@ -1603,6 +1610,7 @@ class QtSpedApp(QMainWindow):
                 "EAN",
                 "NCM",
                 "CST ICMS",
+                "% Red BC ICMS",
                 "% ICMS",
                 "BC ST",
                 "Valor ICMS ST",
@@ -2633,6 +2641,7 @@ class QtSpedApp(QMainWindow):
                     row.get("nome", ""),
                     row.get("cnpj", ""),
                     row.get("inscricao_estadual", ""),
+                    row.get("uf", ""),
                     row.get("codigo", ""),
                     self.regime_tributario_label(str(row.get("regime_tributario", ""))),
                 ]
@@ -2720,6 +2729,7 @@ class QtSpedApp(QMainWindow):
                     int(row["id"]),
                     row.get("empresa_nome", ""),
                     row.get("fornecedor_nome", ""),
+                    row.get("fornecedor_uf", ""),
                     row.get("tipo_produto", ""),
                     row.get("codigo_fornecedor", ""),
                     row.get("codigo_empresa", ""),
@@ -2729,6 +2739,7 @@ class QtSpedApp(QMainWindow):
                     row.get("cest", ""),
                     row.get("origem_entrada", ""),
                     row.get("cst_icms", ""),
+                    row.get("reducao_bc_icms", ""),
                     row.get("cfop_saida_fornecedor", ""),
                     row.get("aliquota_icms", ""),
                     row.get("cfop_entrada", ""),
@@ -2831,7 +2842,7 @@ class QtSpedApp(QMainWindow):
         total_products = len(visible_rows)
         class_counter: dict[str, int] = {}
         for row_index in visible_rows:
-            class_item = self.product_page_table.item(row_index, 4)
+            class_item = self.product_page_table.item(row_index, 5)
             class_name = (class_item.text().strip() if class_item else "") or "Sem classificacao"
             class_counter[class_name] = class_counter.get(class_name, 0) + 1
         total_classes = len(class_counter)
@@ -2863,7 +2874,7 @@ class QtSpedApp(QMainWindow):
         if not selected_rows:
             self.product_page_type_combo.setCurrentIndex(0)
             return
-        classification_text = (self.product_page_table.item(selected_rows[0].row(), 4).text() if self.product_page_table.item(selected_rows[0].row(), 4) else "").strip()
+        classification_text = (self.product_page_table.item(selected_rows[0].row(), 5).text() if self.product_page_table.item(selected_rows[0].row(), 5) else "").strip()
         combo_index = self.product_page_type_combo.findText(classification_text)
         self.product_page_type_combo.setCurrentIndex(combo_index if combo_index >= 0 else 0)
 
@@ -2998,6 +3009,7 @@ class QtSpedApp(QMainWindow):
                     row.get("nome", ""),
                     row.get("cnpj", ""),
                     row.get("inscricao_estadual", ""),
+                    row.get("uf", ""),
                     row.get("codigo", ""),
                     self.regime_tributario_label(str(row.get("regime_tributario", ""))),
                 ]
@@ -3048,6 +3060,7 @@ class QtSpedApp(QMainWindow):
                     row.get("ncm", ""),
                     row.get("origem_entrada", ""),
                     row.get("cst_icms", ""),
+                    row.get("reducao_bc_icms", ""),
                     row.get("cfop_saida_fornecedor", ""),
                     row.get("aliquota_icms", ""),
                     row.get("cfop_entrada", ""),
@@ -3615,6 +3628,7 @@ class QtSpedApp(QMainWindow):
             "cest": "CEST",
             "c_classtrib": "cClassTrib",
             "cst_icms": "CST ICMS",
+            "reducao_bc_icms": "% Red BC ICMS",
             "aliquota_icms": "% ICMS",
             "cst_pis": "CST PIS",
             "cst_cofins": "CST COFINS",
@@ -3687,6 +3701,7 @@ class QtSpedApp(QMainWindow):
                     row.ean,
                     row.ncm,
                     row.cst_icms,
+                    row.reducao_bc_icms,
                     row.aliquota_icms,
                     row.bc_st,
                     row.valor_icms_st,

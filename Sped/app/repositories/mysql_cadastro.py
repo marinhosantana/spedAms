@@ -235,6 +235,8 @@ class MysqlCadastroRepository:
         if column_exists("cad_fornecedores", "id"):
             if not column_exists("cad_fornecedores", "inscricao_estadual"):
                 cursor.execute("ALTER TABLE cad_fornecedores ADD COLUMN inscricao_estadual VARCHAR(30) NOT NULL DEFAULT '' AFTER cnpj")
+            if not column_exists("cad_fornecedores", "uf"):
+                cursor.execute("ALTER TABLE cad_fornecedores ADD COLUMN uf VARCHAR(2) NOT NULL DEFAULT '' AFTER inscricao_estadual")
             if not column_exists("cad_fornecedores", "regime_tributario"):
                 cursor.execute(
                     "ALTER TABLE cad_fornecedores ADD COLUMN regime_tributario VARCHAR(30) NOT NULL DEFAULT 'LUCRO_REAL_PRESUMIDO' AFTER codigo"
@@ -264,6 +266,8 @@ class MysqlCadastroRepository:
                 cursor.execute("ALTER TABLE cad_produtos_fornecedor ADD COLUMN cfop_saida_empresa VARCHAR(10) NOT NULL DEFAULT '' AFTER cst_icms_saida")
             if not column_exists("cad_produtos_fornecedor", "aliquota_icms_saida"):
                 cursor.execute("ALTER TABLE cad_produtos_fornecedor ADD COLUMN aliquota_icms_saida DECIMAL(10,4) NOT NULL DEFAULT 0.0000 AFTER cfop_saida_empresa")
+            if not column_exists("cad_produtos_fornecedor", "reducao_bc_icms"):
+                cursor.execute("ALTER TABLE cad_produtos_fornecedor ADD COLUMN reducao_bc_icms DECIMAL(10,4) NOT NULL DEFAULT 0.0000 AFTER cst_icms")
             if not column_exists("cad_produtos_fornecedor", "cst_pis_saida"):
                 cursor.execute("ALTER TABLE cad_produtos_fornecedor ADD COLUMN cst_pis_saida VARCHAR(4) NOT NULL DEFAULT '' AFTER cst_pis")
             if not column_exists("cad_produtos_fornecedor", "cst_cofins_saida"):
@@ -353,7 +357,7 @@ class MysqlCadastroRepository:
             cursor = connection.cursor(dictionary=True)
             cursor.execute(
                 """
-                SELECT id, empresa_id, nome, cnpj, inscricao_estadual, codigo, regime_tributario, observacao
+                SELECT id, empresa_id, nome, cnpj, inscricao_estadual, uf, codigo, regime_tributario, observacao
                 FROM cad_fornecedores
                 WHERE empresa_id = %s
                 ORDER BY nome
@@ -377,6 +381,7 @@ class MysqlCadastroRepository:
                     f.nome,
                     f.cnpj,
                     f.inscricao_estadual,
+                    f.uf,
                     f.codigo,
                     f.regime_tributario,
                     f.observacao
@@ -398,6 +403,7 @@ class MysqlCadastroRepository:
             str(data.get("nome", "")).strip(),
             self._only_digits(data.get("cnpj", "")),
             str(data.get("inscricao_estadual", "")).strip(),
+            self._trim_text(data.get("uf", ""), 2).upper(),
             str(data.get("codigo", "")).strip(),
             self._trim_text(data.get("regime_tributario", "LUCRO_REAL_PRESUMIDO"), 30) or "LUCRO_REAL_PRESUMIDO",
             str(data.get("observacao", "")).strip(),
@@ -413,7 +419,7 @@ class MysqlCadastroRepository:
                 cursor.execute(
                     """
                     UPDATE cad_fornecedores
-                    SET empresa_id = %s, nome = %s, cnpj = %s, inscricao_estadual = %s, codigo = %s, regime_tributario = %s, observacao = %s
+                    SET empresa_id = %s, nome = %s, cnpj = %s, inscricao_estadual = %s, uf = %s, codigo = %s, regime_tributario = %s, observacao = %s
                     WHERE id = %s
                     """,
                     (*values, supplier_id),
@@ -422,8 +428,8 @@ class MysqlCadastroRepository:
                 return supplier_id
             cursor.execute(
                 """
-                INSERT INTO cad_fornecedores (empresa_id, nome, cnpj, inscricao_estadual, codigo, regime_tributario, observacao)
-                VALUES (%s, %s, %s, %s, %s, %s, %s)
+                INSERT INTO cad_fornecedores (empresa_id, nome, cnpj, inscricao_estadual, uf, codigo, regime_tributario, observacao)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
                 """,
                 values,
             )
@@ -792,6 +798,7 @@ class MysqlCadastroRepository:
                     p.*,
                     f.empresa_id,
                     f.nome AS fornecedor_nome,
+                    f.uf AS fornecedor_uf,
                     e.nome AS empresa_nome,
                     COALESCE(t.nome, '') AS tipo_produto
                 FROM cad_produtos_fornecedor p
@@ -846,6 +853,7 @@ class MysqlCadastroRepository:
             self._only_digits(data.get("cfop_saida_empresa", ""))[:10],
             self._decimal_text(data.get("aliquota_icms_saida", "")),
             self._trim_text(data.get("cst_icms", ""), 4),
+            self._decimal_text(data.get("reducao_bc_icms", "")),
             self._decimal_text(data.get("aliquota_icms", "")),
             self._trim_text(data.get("cst_ipi", ""), 4),
             self._decimal_text(data.get("aliquota_ipi", "")),
@@ -899,7 +907,7 @@ class MysqlCadastroRepository:
                     UPDATE cad_produtos_fornecedor
                     SET fornecedor_id = %s, tipo_produto_id = %s, codigo_fornecedor = %s, codigo_empresa = %s,
                         chave_nfe_origem = %s, status_produto = %s, descricao = %s, ean = %s, ean_unico = %s, ncm = %s, cest = %s, origem_entrada = %s, cfop_saida_fornecedor = %s, cfop_entrada = %s, cfop_saida = %s, natureza_receita_entrada = %s, c_classtrib = %s, c_benef = %s, origem_saida = %s, cst_icms_saida = %s, cfop_saida_empresa = %s, aliquota_icms_saida = %s,
-                        cst_icms = %s, aliquota_icms = %s, cst_ipi = %s, aliquota_ipi = %s,
+                        cst_icms = %s, reducao_bc_icms = %s, aliquota_icms = %s, cst_ipi = %s, aliquota_ipi = %s,
                         cst_pis_cofins = %s, aliquota_pis_cofins = %s, cst_pis = %s, cst_pis_saida = %s, cst_cofins = %s, cst_cofins_saida = %s, natureza_receita_saida = %s,
                         aliquota_pis = %s, aliquota_cofins = %s, bc_st = %s, mva = %s,
                         valor_icms_st = %s, aliquota_icms_st = %s
@@ -913,12 +921,12 @@ class MysqlCadastroRepository:
                 """
                 INSERT INTO cad_produtos_fornecedor (
                     fornecedor_id, tipo_produto_id, codigo_fornecedor, codigo_empresa, chave_nfe_origem, status_produto, descricao, ean, ean_unico, ncm, cest, origem_entrada, cfop_saida_fornecedor, cfop_entrada, cfop_saida, natureza_receita_entrada,
-                    c_classtrib, c_benef, origem_saida, cst_icms_saida, cfop_saida_empresa, aliquota_icms_saida, cst_icms, aliquota_icms, cst_ipi, aliquota_ipi,
+                    c_classtrib, c_benef, origem_saida, cst_icms_saida, cfop_saida_empresa, aliquota_icms_saida, cst_icms, reducao_bc_icms, aliquota_icms, cst_ipi, aliquota_ipi,
                     cst_pis_cofins, aliquota_pis_cofins, cst_pis, cst_pis_saida, cst_cofins, cst_cofins_saida, natureza_receita_saida, aliquota_pis, aliquota_cofins,
                     bc_st, mva, valor_icms_st, aliquota_icms_st
                 ) VALUES (
                     %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
-                    %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+                    %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
                     %s, %s, %s, %s, %s, %s, %s, %s, %s,
                     %s, %s, %s, %s
                 )

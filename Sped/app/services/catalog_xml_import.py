@@ -40,6 +40,7 @@ def _digits_only(value: object) -> str:
 
 NUMERIC_COMPARE_FIELDS = {
     "aliquota_icms",
+    "reducao_bc_icms",
     "aliquota_pis",
     "aliquota_cofins",
     "bc_st",
@@ -265,6 +266,7 @@ def _supplier_product_values(repository: MysqlCadastroRepository, supplier_id: i
         repository._trim_text(data.get("c_classtrib", ""), 20),
         repository._trim_text(data.get("c_benef", ""), 20),
         repository._trim_text(data.get("cst_icms", ""), 4),
+        repository._decimal_text(data.get("reducao_bc_icms", "")),
         repository._decimal_text(data.get("aliquota_icms", "")),
         repository._trim_text(data.get("cst_ipi", ""), 4),
         repository._decimal_text(data.get("aliquota_ipi", "")),
@@ -301,6 +303,7 @@ def _payload_from_preview_row(row: CatalogImportPreviewRow) -> dict[str, object]
         "c_classtrib": row.c_classtrib,
         "c_benef": "",
         "cst_icms": row.cst_icms,
+        "reducao_bc_icms": row.reducao_bc_icms,
         "aliquota_icms": row.aliquota_icms,
         "cst_ipi": "",
         "aliquota_ipi": "0",
@@ -329,6 +332,7 @@ UPDATABLE_PRODUCT_FIELDS = [
     "cest",
     "c_classtrib",
     "cst_icms",
+    "reducao_bc_icms",
     "aliquota_icms",
     "cst_pis",
     "cst_cofins",
@@ -359,6 +363,7 @@ class CatalogImportPreviewRow:
     cst_icms: str
     cfop_saida_fornecedor: str
     origem_entrada: str
+    reducao_bc_icms: str
     aliquota_icms: str
     bc_st: str
     valor_icms_st: str
@@ -439,6 +444,7 @@ def build_catalog_import_preview(
                     cst_icms=str(getattr(item, "cst_icms", "") or "").strip(),
                     cfop_saida_fornecedor=str(getattr(item, "cfop", "") or "").strip(),
                     origem_entrada=str(getattr(item, "orig_icms", "") or "").strip(),
+                    reducao_bc_icms=str(getattr(item, "reducao_bc_icms", "") or "0"),
                     aliquota_icms=str(getattr(item, "aliq_icms", "") or "0"),
                     bc_st=str(getattr(item, "vl_bc_icms_st", "") or "0"),
                     valor_icms_st=str(getattr(item, "vl_icms_st", "") or "0"),
@@ -603,7 +609,7 @@ def import_catalogs_from_preview(
                     UPDATE cad_produtos_fornecedor
                     SET fornecedor_id = %s, tipo_produto_id = %s, codigo_fornecedor = %s, codigo_empresa = %s,
                         chave_nfe_origem = %s, descricao = %s, ean = %s, ean_unico = %s, ncm = %s, cest = %s, origem_entrada = %s, cfop_saida_fornecedor = %s, cfop_entrada = %s, cfop_saida = %s, origem_saida = %s, c_classtrib = %s, c_benef = %s,
-                        cst_icms = %s, aliquota_icms = %s, cst_ipi = %s, aliquota_ipi = %s,
+                        cst_icms = %s, reducao_bc_icms = %s, aliquota_icms = %s, cst_ipi = %s, aliquota_ipi = %s,
                         cst_pis_cofins = %s, aliquota_pis_cofins = %s, cst_pis = %s, cst_cofins = %s,
                         aliquota_pis = %s, aliquota_cofins = %s, bc_st = %s, mva = %s,
                         valor_icms_st = %s, aliquota_icms_st = %s
@@ -616,12 +622,12 @@ def import_catalogs_from_preview(
                     """
                     INSERT INTO cad_produtos_fornecedor (
                         fornecedor_id, tipo_produto_id, codigo_fornecedor, codigo_empresa, chave_nfe_origem, descricao, ean, ean_unico, ncm, cest, origem_entrada, cfop_saida_fornecedor, cfop_entrada, cfop_saida, origem_saida,
-                        c_classtrib, c_benef, cst_icms, aliquota_icms, cst_ipi, aliquota_ipi,
+                        c_classtrib, c_benef, cst_icms, reducao_bc_icms, aliquota_icms, cst_ipi, aliquota_ipi,
                         cst_pis_cofins, aliquota_pis_cofins, cst_pis, cst_cofins, aliquota_pis, aliquota_cofins,
                         bc_st, mva, valor_icms_st, aliquota_icms_st
                     ) VALUES (
                         %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
-                        %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+                        %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
                         %s, %s, %s, %s
                     )
                     """,
@@ -668,6 +674,7 @@ def build_catalog_import_change_rows(
             "cest": str(existing.get("cest", "")),
             "c_classtrib": str(existing.get("c_classtrib", "")),
             "cst_icms": str(existing.get("cst_icms", "")),
+            "reducao_bc_icms": str(existing.get("reducao_bc_icms", "")),
             "aliquota_icms": str(existing.get("aliquota_icms", "")),
         }
         new_map = {
@@ -677,6 +684,7 @@ def build_catalog_import_change_rows(
             "c_classtrib": row.c_classtrib,
             "cst_icms": row.cst_icms,
             "cfop_saida_fornecedor": row.cfop_saida_fornecedor,
+            "reducao_bc_icms": row.reducao_bc_icms,
             "aliquota_icms": row.aliquota_icms,
         }
         for field_name, old_value in current_map.items():

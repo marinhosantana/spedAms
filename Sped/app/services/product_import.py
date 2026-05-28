@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from decimal import Decimal
 from pathlib import Path
 from typing import Callable, Iterable
@@ -61,6 +62,76 @@ def local_name_text(parent: ET.Element | None, *names: str) -> str:
     return ""
 
 
+def extract_simples_credit_rate_from_inf_cpl(root: ET.Element, namespace: dict[str, str]) -> Decimal:
+    text = root.findtext(".//nfe:infAdic/nfe:infCpl", default="", namespaces=namespace).strip()
+    if not text:
+        return Decimal("0")
+    normalized_text = normalize_text(text).lower()
+    if "credito" not in normalized_text or "icms" not in normalized_text:
+        return Decimal("0")
+    marker_match = re.search(r"\[ALIQUOTA_CREDITO_ICMS\]", text, flags=re.IGNORECASE)
+    if marker_match:
+        nearby_text = text[max(0, marker_match.start() - 80): marker_match.end() + 80]
+        percent_values = re.findall(r"(\d+(?:[,.]\d+)?)\s*%", nearby_text)
+        if percent_values:
+            after_marker = nearby_text[nearby_text.upper().find("[ALIQUOTA_CREDITO_ICMS]"):]
+            after_values = re.findall(r"(\d+(?:[,.]\d+)?)\s*%", after_marker)
+            return parse_decimal(after_values[0] if after_values else percent_values[-1])
+        after_marker = nearby_text[nearby_text.upper().find("[ALIQUOTA_CREDITO_ICMS]"):]
+        before_marker = nearby_text[:nearby_text.upper().find("[ALIQUOTA_CREDITO_ICMS]")]
+        after_numbers = re.findall(r"(\d+(?:[,.]\d+)?)", after_marker)
+        before_numbers = re.findall(r"(\d+(?:[,.]\d+)?)", before_marker)
+        if after_numbers:
+            return parse_decimal(after_numbers[0])
+        if before_numbers:
+            return parse_decimal(before_numbers[-1])
+    patterns = (
+        r"\[ALIQUOTA_CREDITO_ICMS\]\s*(\d+(?:[,.]\d+)?)\s*%",
+        r"ALIQUOTA[\s_-]*CREDITO[\s_-]*ICMS[^\d]{0,40}(\d+(?:[,.]\d+)?)\s*%",
+        r"PERCENTUAL\s+DE[^\d]{0,100}(\d+(?:[,.]\d+)?)\s*%",
+        r"(?:ALIQUOTA|ALÍQUOTA|ALIQ|PERCENTUAL)[^\d]{0,60}(\d+(?:[,.]\d+)?)\s*(?:%|POR\s*CENTO)?",
+    )
+    for pattern in patterns:
+        match = re.search(pattern, text, flags=re.IGNORECASE)
+        if match:
+            return parse_decimal(match.group(1))
+    percent_values = re.findall(r"(\d+(?:[,.]\d+)?)\s*%", text)
+    if percent_values:
+        return parse_decimal(percent_values[0])
+    for match in re.finditer(r"(\d+(?:[,.]\d+)?)", text):
+        prefix = text[max(0, match.start() - 12): match.start()].upper()
+        value = parse_decimal(match.group(1))
+        if "R$" in prefix or "VALOR" in prefix or value <= Decimal("0") or value > Decimal("30"):
+            continue
+        return value
+    return Decimal("0")
+
+
+def extract_xml_icms_rate(icms_group: ET.Element | None, simples_credit_rate: Decimal) -> Decimal:
+    rate = parse_decimal(local_name_text(icms_group, "pICMS"))
+    if rate:
+        return rate
+    csosn = local_name_text(icms_group, "CSOSN")
+    if not csosn:
+        return rate
+    return parse_decimal(local_name_text(icms_group, "pCredSN")) or simples_credit_rate
+
+
+def compute_icms_reduction_percent(sale_value: object, base_icms: object) -> Decimal:
+    sale = sale_value if isinstance(sale_value, Decimal) else parse_decimal(str(sale_value or "0"))
+    base = base_icms if isinstance(base_icms, Decimal) else parse_decimal(str(base_icms or "0"))
+    if sale <= 0 or base <= 0 or base >= sale:
+        return Decimal("0")
+    return ((Decimal("1") - (base / sale)) * Decimal("100")).quantize(Decimal("0.01"))
+
+
+def extract_xml_icms_reduction_percent(icms_group: ET.Element | None, sale_value: object, base_icms: object) -> Decimal:
+    red_bc = parse_decimal(local_name_text(icms_group, "pRedBC"))
+    if red_bc > 0:
+        return red_bc
+    return compute_icms_reduction_percent(sale_value, base_icms)
+
+
 def ncm_matches_filters(ncm: str, ncm_filters: set[str]) -> bool:
     normalized_ncm = normalize_ncm(ncm)
     if not ncm_filters:
@@ -84,6 +155,7 @@ def ncm_matches_filters(ncm: str, ncm_filters: set[str]) -> bool:
 def parse_nfce_xml_items(file_path: Path) -> list[dict[str, object]]:
     namespace = {"nfe": "http://www.portalfiscal.inf.br/nfe"}
     root = ET.parse(file_path).getroot()
+    simples_credit_rate = extract_simples_credit_rate_from_inf_cpl(root, namespace)
 
     document_key = normalize_document_key(
         root.findtext(".//nfe:protNFe/nfe:infProt/nfe:chNFe", default="", namespaces=namespace)
@@ -126,6 +198,8 @@ def parse_nfce_xml_items(file_path: Path) -> list[dict[str, object]]:
         valor_desconto = parse_decimal(prod.findtext("nfe:vDesc", default="", namespaces=namespace))
         valor_frete = parse_decimal(prod.findtext("nfe:vFrete", default="", namespaces=namespace))
         valor_outros = parse_decimal(prod.findtext("nfe:vOutro", default="", namespaces=namespace))
+        valor_operacao = valor_produto - valor_desconto + valor_frete + valor_outros
+        base_icms = parse_decimal(local_name_text(icms_group, "vBC"))
         item_row = {
             "arquivo_xml": str(file_path),
             "chave_acesso": document_key,
@@ -152,13 +226,14 @@ def parse_nfce_xml_items(file_path: Path) -> list[dict[str, object]]:
             "valor_desconto": valor_desconto,
             "valor_frete": valor_frete,
             "valor_outros": valor_outros,
-            "valor_operacao": valor_produto - valor_desconto + valor_frete + valor_outros,
+            "valor_operacao": valor_operacao,
             "valor_total_tributos": parse_decimal(prod.findtext("nfe:vTotTrib", default="", namespaces=namespace)),
             "orig_icms": local_name_text(icms_group, "orig"),
             "cst_icms": local_name_text(icms_group, "CST"),
             "csosn_icms": local_name_text(icms_group, "CSOSN"),
-            "base_icms": parse_decimal(local_name_text(icms_group, "vBC")),
-            "aliquota_icms": parse_decimal(local_name_text(icms_group, "pICMS")),
+            "base_icms": base_icms,
+            "reducao_bc_icms": extract_xml_icms_reduction_percent(icms_group, valor_operacao, base_icms),
+            "aliquota_icms": extract_xml_icms_rate(icms_group, simples_credit_rate),
             "valor_icms": parse_decimal(local_name_text(icms_group, "vICMS")),
             "base_icms_st": parse_decimal(local_name_text(icms_group, "vBCST", "vBCSTRet")),
             "aliquota_icms_st": parse_decimal(local_name_text(icms_group, "pICMSST")),
@@ -255,6 +330,7 @@ def build_import_products_from_xml_sources(
                     "unidade": str(item.get("unidade", "")).strip() or "UN",
                     "cst_icms_entrada": normalize_tax_code(item.get("cst_icms", "") or item.get("csosn_icms", ""), 3),
                     "cst_icms_saida": normalize_tax_code(item.get("cst_icms", "") or item.get("csosn_icms", ""), 3),
+                    "reducao_bc_icms": Decimal(item.get("reducao_bc_icms", Decimal("0"))),
                     "icms_entrada": Decimal(item.get("aliquota_icms", Decimal("0"))),
                     "icms_saida": Decimal(item.get("aliquota_icms", Decimal("0"))),
                     "cst_pis_entrada": cst_pis_entrada,
@@ -281,6 +357,7 @@ def build_import_products_from_xml_sources(
                 bucket["cst_icms_entrada"] = normalize_tax_code(item.get("cst_icms", "") or item.get("csosn_icms", ""), 3)
             if not bucket["cst_icms_saida"]:
                 bucket["cst_icms_saida"] = normalize_tax_code(item.get("cst_icms", "") or item.get("csosn_icms", ""), 3)
+            bucket["reducao_bc_icms"] = max(Decimal(bucket["reducao_bc_icms"]), Decimal(item.get("reducao_bc_icms", Decimal("0"))))
             if not bucket["cst_pis_entrada"] and cst_pis_entrada:
                 bucket["cst_pis_entrada"] = cst_pis_entrada
             if not bucket["cst_pis_saida"] and cst_pis_saida:
@@ -465,6 +542,7 @@ def build_import_products_from_sped_contrib_sources(
                     "unidade": "UN",
                     "cst_icms_entrada": "",
                     "cst_icms_saida": "",
+                    "reducao_bc_icms": Decimal("0"),
                     "icms_entrada": Decimal("0"),
                     "icms_saida": Decimal("0"),
                     "cst_pis_entrada": "",
@@ -565,6 +643,7 @@ def build_import_products_from_sped_0200(
                 "unidade": "UN",
                 "cst_icms_entrada": "",
                 "cst_icms_saida": "",
+                "reducao_bc_icms": Decimal("0"),
                 "icms_entrada": product.icms_rate if isinstance(product.icms_rate, Decimal) else Decimal("0"),
                 "icms_saida": product.icms_rate if isinstance(product.icms_rate, Decimal) else Decimal("0"),
                 "cst_pis_entrada": "",
@@ -605,6 +684,7 @@ def build_import_products_from_sped_fiscal_sources(
                     "unidade": "UN",
                     "cst_icms_entrada": normalize_tax_code(product.cst_icms, 3),
                     "cst_icms_saida": normalize_tax_code(product.cst_icms, 3),
+                    "reducao_bc_icms": Decimal("0"),
                     "icms_entrada": Decimal(product.icms_rate or Decimal("0")),
                     "icms_saida": Decimal(product.icms_rate or Decimal("0")),
                     "cst_pis_entrada": "",
@@ -638,6 +718,7 @@ def build_import_products_from_sped_fiscal_sources(
                     "unidade": "UN",
                     "cst_icms_entrada": "",
                     "cst_icms_saida": "",
+                    "reducao_bc_icms": Decimal("0"),
                     "icms_entrada": Decimal("0"),
                     "icms_saida": Decimal("0"),
                     "cst_pis_entrada": "",
@@ -657,10 +738,12 @@ def build_import_products_from_sped_fiscal_sources(
                 bucket["ncm"] = ncm
             cst_icms = normalize_tax_code(item.get("cst_icms", ""), 3)
             icms_rate = Decimal(item.get("icms_rate", Decimal("0")) or Decimal("0"))
+            reduction_percent = compute_icms_reduction_percent(item.get("sale_value", Decimal("0")), item.get("base_icms", Decimal("0")))
             if operation_type == "Entrada":
                 if not bucket["cst_icms_entrada"] and cst_icms:
                     bucket["cst_icms_entrada"] = cst_icms
                 bucket["icms_entrada"] = max(Decimal(bucket["icms_entrada"]), icms_rate)
+                bucket["reducao_bc_icms"] = max(Decimal(bucket["reducao_bc_icms"]), reduction_percent)
             elif operation_type == "Saida":
                 if not bucket["cst_icms_saida"] and cst_icms:
                     bucket["cst_icms_saida"] = cst_icms
@@ -702,6 +785,7 @@ def build_import_products_from_consolidated_sources(
                 "tipo_produto": str(row.get("tipo_produto", "")).strip(),
                 "cst_icms_entrada": "",
                 "cst_icms_saida": "",
+                "reducao_bc_icms": Decimal("0"),
                 "icms_entrada": Decimal("0"),
                 "icms_saida": Decimal("0"),
                 "cst_pis_entrada": "",
@@ -728,6 +812,7 @@ def build_import_products_from_consolidated_sources(
             bucket["cst_icms_entrada"] = normalize_tax_code(row.get("cst_icms_entrada", ""), 3)
         if not bucket["cst_icms_saida"] and row.get("cst_icms_saida"):
             bucket["cst_icms_saida"] = normalize_tax_code(row.get("cst_icms_saida", ""), 3)
+        bucket["reducao_bc_icms"] = max(Decimal(bucket["reducao_bc_icms"]), Decimal(row.get("reducao_bc_icms", Decimal("0"))))
         bucket["icms_entrada"] = max(Decimal(bucket["icms_entrada"]), Decimal(row.get("icms_entrada", Decimal("0"))))
         bucket["icms_saida"] = max(Decimal(bucket["icms_saida"]), Decimal(row.get("icms_saida", Decimal("0"))))
 
@@ -768,6 +853,7 @@ def build_import_products_from_consolidated_sources(
             bucket["cst_icms_entrada"] = normalize_tax_code(row.get("cst_icms_entrada", ""), 3)
         if not bucket["cst_icms_saida"] and row.get("cst_icms_saida"):
             bucket["cst_icms_saida"] = normalize_tax_code(row.get("cst_icms_saida", ""), 3)
+        bucket["reducao_bc_icms"] = max(Decimal(bucket["reducao_bc_icms"]), Decimal(row.get("reducao_bc_icms", Decimal("0"))))
         if not bucket["cst_pis_entrada"] and row.get("cst_pis_entrada"):
             bucket["cst_pis_entrada"] = normalize_tax_code(row.get("cst_pis_entrada", ""), 2)
         if not bucket["cst_pis_saida"] and row.get("cst_pis_saida"):

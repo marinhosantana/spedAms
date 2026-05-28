@@ -46,6 +46,51 @@ def compare_extract_money_values(text: object) -> list[float]:
     return values
 
 
+def compare_extract_simples_credit_rate(text: object) -> float:
+    raw_text = compare_clean(text)
+    if not raw_text:
+        return 0.0
+    normalized_text = normalize_text(raw_text).lower()
+    if "credito" not in normalized_text or "icms" not in normalized_text:
+        return 0.0
+    marker_match = re.search(r"\[ALIQUOTA_CREDITO_ICMS\]", raw_text, flags=re.IGNORECASE)
+    if marker_match:
+        nearby_text = raw_text[max(0, marker_match.start() - 80): marker_match.end() + 80]
+        percent_values = re.findall(r"(\d+(?:[,.]\d+)?)\s*%", nearby_text)
+        if percent_values:
+            after_marker = nearby_text[nearby_text.upper().find("[ALIQUOTA_CREDITO_ICMS]"):]
+            after_values = re.findall(r"(\d+(?:[,.]\d+)?)\s*%", after_marker)
+            return compare_to_float(after_values[0] if after_values else percent_values[-1])
+        after_marker = nearby_text[nearby_text.upper().find("[ALIQUOTA_CREDITO_ICMS]"):]
+        before_marker = nearby_text[:nearby_text.upper().find("[ALIQUOTA_CREDITO_ICMS]")]
+        after_numbers = re.findall(r"(\d+(?:[,.]\d+)?)", after_marker)
+        before_numbers = re.findall(r"(\d+(?:[,.]\d+)?)", before_marker)
+        if after_numbers:
+            return compare_to_float(after_numbers[0])
+        if before_numbers:
+            return compare_to_float(before_numbers[-1])
+    patterns = (
+        r"\[ALIQUOTA_CREDITO_ICMS\]\s*(\d+(?:[,.]\d+)?)\s*%",
+        r"ALIQUOTA[\s_-]*CREDITO[\s_-]*ICMS[^\d]{0,40}(\d+(?:[,.]\d+)?)\s*%",
+        r"PERCENTUAL\s+DE[^\d]{0,100}(\d+(?:[,.]\d+)?)\s*%",
+        r"(?:ALIQUOTA|ALÍQUOTA|ALIQ|PERCENTUAL)[^\d]{0,60}(\d+(?:[,.]\d+)?)\s*(?:%|POR\s*CENTO)?",
+    )
+    for pattern in patterns:
+        match = re.search(pattern, raw_text, flags=re.IGNORECASE)
+        if match:
+            return compare_to_float(match.group(1))
+    percent_values = re.findall(r"(\d+(?:[,.]\d+)?)\s*%", raw_text)
+    if percent_values:
+        return compare_to_float(percent_values[0])
+    for match in re.finditer(r"(\d+(?:[,.]\d+)?)", raw_text):
+        prefix = raw_text[max(0, match.start() - 12): match.start()].upper()
+        value = compare_to_float(match.group(1))
+        if "R$" in prefix or "VALOR" in prefix or value <= 0 or value > 30:
+            continue
+        return value
+    return 0.0
+
+
 def compare_format_float(value: float, decimals: int = 2) -> str:
     return f"{value:.{decimals}f}".replace(".", ",")
 
@@ -102,7 +147,7 @@ def compare_date_to_sped(value: object) -> str:
     return date_text if len(date_text) == 8 and date_text.isdigit() else ""
 
 
-def compare_extract_icms(det: ET.Element) -> tuple[str, str, str, float, float, float, float, float, float, float]:
+def compare_extract_icms(det: ET.Element, simples_credit_rate: float = 0.0) -> tuple[str, str, str, float, float, float, float, float, float, float, float]:
     def _find_local_float(node: ET.Element, *local_names: str) -> float:
         wanted = {name.lower() for name in local_names}
         for child in node.iter():
@@ -116,7 +161,7 @@ def compare_extract_icms(det: ET.Element) -> tuple[str, str, str, float, float, 
 
     icms_parent = det.find("./nfe:imposto/nfe:ICMS", COMPARE_NS_NFE)
     if icms_parent is None or len(icms_parent) == 0:
-        return "000", "", "", 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0
+        return "000", "", "", 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0
     icms_node = list(icms_parent)[0]
     orig_icms = compare_clean(icms_node.findtext("nfe:orig", default="", namespaces=COMPARE_NS_NFE))
     cst_value = compare_clean(icms_node.findtext("nfe:CST", default="", namespaces=COMPARE_NS_NFE))
@@ -141,12 +186,19 @@ def compare_extract_icms(det: ET.Element) -> tuple[str, str, str, float, float, 
     mva_st = compare_to_float(icms_node.findtext("nfe:pMVAST", default="", namespaces=COMPARE_NS_NFE))
     if mva_st == 0.0:
         mva_st = _find_local_float(det, "pMVAST")
+    aliq_icms = compare_to_float(icms_node.findtext("nfe:pICMS", default="", namespaces=COMPARE_NS_NFE))
+    if icms_code_source == "CSOSN" and aliq_icms == 0.0:
+        aliq_icms = compare_to_float(icms_node.findtext("nfe:pCredSN", default="", namespaces=COMPARE_NS_NFE)) or simples_credit_rate
+    reducao_bc_icms = compare_to_float(icms_node.findtext("nfe:pRedBC", default="", namespaces=COMPARE_NS_NFE))
+    if reducao_bc_icms == 0.0:
+        reducao_bc_icms = _find_local_float(icms_node, "pRedBC")
     return (
         cst,
         icms_code_source,
         orig_icms,
         compare_to_float(icms_node.findtext("nfe:vBC", default="", namespaces=COMPARE_NS_NFE)),
-        compare_to_float(icms_node.findtext("nfe:pICMS", default="", namespaces=COMPARE_NS_NFE)),
+        reducao_bc_icms,
+        aliq_icms,
         compare_to_float(icms_node.findtext("nfe:vICMS", default="", namespaces=COMPARE_NS_NFE)),
         vl_bc_st,
         aliq_st,
@@ -227,6 +279,7 @@ def parse_compare_nfse_file(root: ET.Element, file_path: Path) -> CompareXmlInvo
         discount=0.0,
         cst_icms="090",
         vl_bc_icms=0.0,
+        reducao_bc_icms=0.0,
         aliq_icms=0.0,
         vl_icms=0.0,
         vl_bc_icms_st=0.0,
@@ -301,12 +354,18 @@ def parse_compare_xml_file(file_path: Path) -> CompareXmlInvoice | None:
         or issue_datetime
     )
 
+    simples_credit_rate = compare_extract_simples_credit_rate(compare_xml_text(root, ".//nfe:infAdic/nfe:infCpl"))
     items: list[CompareXmlItem] = []
     for det in root.findall(".//nfe:det", COMPARE_NS_NFE):
-        cst_icms, icms_code_source, orig_icms, vl_bc_icms, aliq_icms, vl_icms, vl_bc_st, aliq_st, vl_st, mva_st = compare_extract_icms(det)
+        cst_icms, icms_code_source, orig_icms, vl_bc_icms, reducao_bc_icms, aliq_icms, vl_icms, vl_bc_st, aliq_st, vl_st, mva_st = compare_extract_icms(det, simples_credit_rate)
         vl_ipi = compare_extract_ipi(det)
         cst_pis, vl_bc_pis, aliq_pis, vl_pis = compare_extract_pis_cofins(det, "PIS")
         cst_cofins, vl_bc_cofins, aliq_cofins, vl_cofins = compare_extract_pis_cofins(det, "COFINS")
+        item_value = compare_to_float(compare_xml_text(det, "./nfe:prod/nfe:vProd"))
+        item_discount = compare_to_float(compare_xml_text(det, "./nfe:prod/nfe:vDesc"))
+        operation_value = item_value - item_discount
+        if reducao_bc_icms == 0.0 and operation_value > 0 and 0 < vl_bc_icms < operation_value:
+            reducao_bc_icms = round((1 - (vl_bc_icms / operation_value)) * 100, 2)
         items.append(
             CompareXmlItem(
                 item_no=compare_clean(det.attrib.get("nItem", "")),
@@ -322,10 +381,11 @@ def parse_compare_xml_file(file_path: Path) -> CompareXmlInvoice | None:
                 ),
                 cfop=compare_sanitize(compare_xml_text(det, "./nfe:prod/nfe:CFOP")),
                 quantity=compare_to_float(compare_xml_text(det, "./nfe:prod/nfe:qCom")),
-                value=compare_to_float(compare_xml_text(det, "./nfe:prod/nfe:vProd")),
-                discount=compare_to_float(compare_xml_text(det, "./nfe:prod/nfe:vDesc")),
+                value=item_value,
+                discount=item_discount,
                 cst_icms=cst_icms,
                 vl_bc_icms=vl_bc_icms,
+                reducao_bc_icms=reducao_bc_icms,
                 aliq_icms=aliq_icms,
                 vl_icms=vl_icms,
                 vl_bc_icms_st=vl_bc_st,

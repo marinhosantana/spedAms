@@ -30,6 +30,7 @@ class CompareXmlItem:
     discount: float
     cst_icms: str
     vl_bc_icms: float
+    reducao_bc_icms: float
     aliq_icms: float
     vl_icms: float
     vl_bc_icms_st: float
