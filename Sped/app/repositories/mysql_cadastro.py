@@ -248,6 +248,30 @@ class MysqlCadastroRepository:
                 cursor.execute(
                     "ALTER TABLE cad_produtos_fornecedor ADD COLUMN cfop_saida VARCHAR(10) NOT NULL DEFAULT '' AFTER cfop_entrada"
                 )
+            if not column_exists("cad_produtos_fornecedor", "status_produto"):
+                cursor.execute("ALTER TABLE cad_produtos_fornecedor ADD COLUMN status_produto VARCHAR(40) NOT NULL DEFAULT '' AFTER codigo_empresa")
+            if not column_exists("cad_produtos_fornecedor", "origem_entrada"):
+                cursor.execute("ALTER TABLE cad_produtos_fornecedor ADD COLUMN origem_entrada VARCHAR(4) NOT NULL DEFAULT '' AFTER cest")
+            if not column_exists("cad_produtos_fornecedor", "cfop_saida_fornecedor"):
+                cursor.execute("ALTER TABLE cad_produtos_fornecedor ADD COLUMN cfop_saida_fornecedor VARCHAR(10) NOT NULL DEFAULT '' AFTER origem_entrada")
+            if not column_exists("cad_produtos_fornecedor", "natureza_receita_entrada"):
+                cursor.execute("ALTER TABLE cad_produtos_fornecedor ADD COLUMN natureza_receita_entrada VARCHAR(40) NOT NULL DEFAULT '' AFTER cfop_saida")
+            if not column_exists("cad_produtos_fornecedor", "origem_saida"):
+                cursor.execute("ALTER TABLE cad_produtos_fornecedor ADD COLUMN origem_saida VARCHAR(4) NOT NULL DEFAULT '' AFTER c_benef")
+            if not column_exists("cad_produtos_fornecedor", "cst_icms_saida"):
+                cursor.execute("ALTER TABLE cad_produtos_fornecedor ADD COLUMN cst_icms_saida VARCHAR(4) NOT NULL DEFAULT '' AFTER origem_saida")
+            if not column_exists("cad_produtos_fornecedor", "cfop_saida_empresa"):
+                cursor.execute("ALTER TABLE cad_produtos_fornecedor ADD COLUMN cfop_saida_empresa VARCHAR(10) NOT NULL DEFAULT '' AFTER cst_icms_saida")
+            if not column_exists("cad_produtos_fornecedor", "aliquota_icms_saida"):
+                cursor.execute("ALTER TABLE cad_produtos_fornecedor ADD COLUMN aliquota_icms_saida DECIMAL(10,4) NOT NULL DEFAULT 0.0000 AFTER cfop_saida_empresa")
+            if not column_exists("cad_produtos_fornecedor", "cst_pis_saida"):
+                cursor.execute("ALTER TABLE cad_produtos_fornecedor ADD COLUMN cst_pis_saida VARCHAR(4) NOT NULL DEFAULT '' AFTER cst_pis")
+            if not column_exists("cad_produtos_fornecedor", "cst_cofins_saida"):
+                cursor.execute("ALTER TABLE cad_produtos_fornecedor ADD COLUMN cst_cofins_saida VARCHAR(4) NOT NULL DEFAULT '' AFTER cst_cofins")
+            if not column_exists("cad_produtos_fornecedor", "natureza_receita_saida"):
+                cursor.execute("ALTER TABLE cad_produtos_fornecedor ADD COLUMN natureza_receita_saida VARCHAR(40) NOT NULL DEFAULT '' AFTER cst_cofins_saida")
+            if not column_exists("cad_produtos_fornecedor", "chave_nfe_origem"):
+                cursor.execute("ALTER TABLE cad_produtos_fornecedor ADD COLUMN chave_nfe_origem VARCHAR(44) NOT NULL DEFAULT '' AFTER codigo_empresa")
 
     def _only_digits(self, value: object) -> str:
         return "".join(char for char in str(value or "") if char.isdigit())
@@ -803,15 +827,24 @@ class MysqlCadastroRepository:
             int(data.get("tipo_produto_id") or 0) or None,
             normalized_code,
             self._trim_text(data.get("codigo_empresa", ""), 80),
+            self._trim_text(data.get("chave_nfe_origem", ""), 44),
+            self._trim_text(data.get("status_produto", ""), 40),
             self._trim_text(data.get("descricao", ""), 255),
             normalized_ean,
             normalized_ean or None,
             self._only_digits(data.get("ncm", ""))[:20],
             self._only_digits(data.get("cest", ""))[:20],
+            self._trim_text(data.get("origem_entrada", ""), 4),
+            self._only_digits(data.get("cfop_saida_fornecedor", ""))[:10],
             self._only_digits(data.get("cfop_entrada", ""))[:10],
             self._only_digits(data.get("cfop_saida", ""))[:10],
+            self._trim_text(data.get("natureza_receita_entrada", ""), 40),
             self._trim_text(data.get("c_classtrib", ""), 20),
             self._trim_text(data.get("c_benef", ""), 20),
+            self._trim_text(data.get("origem_saida", ""), 4),
+            self._trim_text(data.get("cst_icms_saida", ""), 4),
+            self._only_digits(data.get("cfop_saida_empresa", ""))[:10],
+            self._decimal_text(data.get("aliquota_icms_saida", "")),
             self._trim_text(data.get("cst_icms", ""), 4),
             self._decimal_text(data.get("aliquota_icms", "")),
             self._trim_text(data.get("cst_ipi", ""), 4),
@@ -819,7 +852,10 @@ class MysqlCadastroRepository:
             cst_pis_cofins,
             aliquota_pis_cofins,
             cst_pis,
+            self._trim_text(data.get("cst_pis_saida", ""), 4),
             cst_cofins,
+            self._trim_text(data.get("cst_cofins_saida", ""), 4),
+            self._trim_text(data.get("natureza_receita_saida", ""), 40),
             aliquota_pis,
             aliquota_cofins,
             self._decimal_text(data.get("bc_st", "")),
@@ -862,9 +898,9 @@ class MysqlCadastroRepository:
                     """
                     UPDATE cad_produtos_fornecedor
                     SET fornecedor_id = %s, tipo_produto_id = %s, codigo_fornecedor = %s, codigo_empresa = %s,
-                        descricao = %s, ean = %s, ean_unico = %s, ncm = %s, cest = %s, cfop_entrada = %s, cfop_saida = %s, c_classtrib = %s, c_benef = %s,
+                        chave_nfe_origem = %s, status_produto = %s, descricao = %s, ean = %s, ean_unico = %s, ncm = %s, cest = %s, origem_entrada = %s, cfop_saida_fornecedor = %s, cfop_entrada = %s, cfop_saida = %s, natureza_receita_entrada = %s, c_classtrib = %s, c_benef = %s, origem_saida = %s, cst_icms_saida = %s, cfop_saida_empresa = %s, aliquota_icms_saida = %s,
                         cst_icms = %s, aliquota_icms = %s, cst_ipi = %s, aliquota_ipi = %s,
-                        cst_pis_cofins = %s, aliquota_pis_cofins = %s, cst_pis = %s, cst_cofins = %s,
+                        cst_pis_cofins = %s, aliquota_pis_cofins = %s, cst_pis = %s, cst_pis_saida = %s, cst_cofins = %s, cst_cofins_saida = %s, natureza_receita_saida = %s,
                         aliquota_pis = %s, aliquota_cofins = %s, bc_st = %s, mva = %s,
                         valor_icms_st = %s, aliquota_icms_st = %s
                     WHERE id = %s
@@ -876,14 +912,15 @@ class MysqlCadastroRepository:
             cursor.execute(
                 """
                 INSERT INTO cad_produtos_fornecedor (
-                    fornecedor_id, tipo_produto_id, codigo_fornecedor, codigo_empresa, descricao, ean, ean_unico, ncm, cest, cfop_entrada, cfop_saida,
-                    c_classtrib, c_benef, cst_icms, aliquota_icms, cst_ipi, aliquota_ipi,
-                    cst_pis_cofins, aliquota_pis_cofins, cst_pis, cst_cofins, aliquota_pis, aliquota_cofins,
+                    fornecedor_id, tipo_produto_id, codigo_fornecedor, codigo_empresa, chave_nfe_origem, status_produto, descricao, ean, ean_unico, ncm, cest, origem_entrada, cfop_saida_fornecedor, cfop_entrada, cfop_saida, natureza_receita_entrada,
+                    c_classtrib, c_benef, origem_saida, cst_icms_saida, cfop_saida_empresa, aliquota_icms_saida, cst_icms, aliquota_icms, cst_ipi, aliquota_ipi,
+                    cst_pis_cofins, aliquota_pis_cofins, cst_pis, cst_pis_saida, cst_cofins, cst_cofins_saida, natureza_receita_saida, aliquota_pis, aliquota_cofins,
                     bc_st, mva, valor_icms_st, aliquota_icms_st
                 ) VALUES (
-                    %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
-                    %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
-                    %s, %s, %s, %s, %s
+                    %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+                    %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+                    %s, %s, %s, %s, %s, %s, %s, %s, %s,
+                    %s, %s, %s, %s
                 )
                 """,
                 values,

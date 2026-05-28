@@ -102,27 +102,56 @@ def compare_date_to_sped(value: object) -> str:
     return date_text if len(date_text) == 8 and date_text.isdigit() else ""
 
 
-def compare_extract_icms(det: ET.Element) -> tuple[str, str, float, float, float, float, float, float]:
+def compare_extract_icms(det: ET.Element) -> tuple[str, str, str, float, float, float, float, float, float, float]:
+    def _find_local_float(node: ET.Element, *local_names: str) -> float:
+        wanted = {name.lower() for name in local_names}
+        for child in node.iter():
+            tag = str(getattr(child, "tag", "") or "")
+            local_name = tag.split("}", 1)[-1].lower() if "}" in tag else tag.lower()
+            if local_name in wanted:
+                value = compare_to_float(child.text or "")
+                if value:
+                    return value
+        return 0.0
+
     icms_parent = det.find("./nfe:imposto/nfe:ICMS", COMPARE_NS_NFE)
     if icms_parent is None or len(icms_parent) == 0:
-        return "000", "", 0.0, 0.0, 0.0, 0.0, 0.0, 0.0
+        return "000", "", "", 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0
     icms_node = list(icms_parent)[0]
+    orig_icms = compare_clean(icms_node.findtext("nfe:orig", default="", namespaces=COMPARE_NS_NFE))
     cst_value = compare_clean(icms_node.findtext("nfe:CST", default="", namespaces=COMPARE_NS_NFE))
     csosn_value = compare_clean(icms_node.findtext("nfe:CSOSN", default="", namespaces=COMPARE_NS_NFE))
     cst = cst_value or csosn_value or "000"
     icms_code_source = "CST" if cst_value else "CSOSN" if csosn_value else ""
+    vl_bc_st = compare_to_float(icms_node.findtext("nfe:vBCST", default="", namespaces=COMPARE_NS_NFE)) or compare_to_float(
+        icms_node.findtext("nfe:vBCSTRet", default="", namespaces=COMPARE_NS_NFE)
+    )
+    aliq_st = compare_to_float(icms_node.findtext("nfe:pICMSST", default="", namespaces=COMPARE_NS_NFE)) or compare_to_float(
+        icms_node.findtext("nfe:pST", default="", namespaces=COMPARE_NS_NFE)
+    )
+    vl_st = compare_to_float(icms_node.findtext("nfe:vICMSST", default="", namespaces=COMPARE_NS_NFE)) or compare_to_float(
+        icms_node.findtext("nfe:vICMSSTRet", default="", namespaces=COMPARE_NS_NFE)
+    )
+    if vl_st == 0.0:
+        vl_st = _find_local_float(det, "vICMSST", "vICMSSTRet")
+    if vl_bc_st == 0.0:
+        vl_bc_st = _find_local_float(det, "vBCST", "vBCSTRet")
+    if aliq_st == 0.0:
+        aliq_st = _find_local_float(det, "pICMSST", "pST")
+    mva_st = compare_to_float(icms_node.findtext("nfe:pMVAST", default="", namespaces=COMPARE_NS_NFE))
+    if mva_st == 0.0:
+        mva_st = _find_local_float(det, "pMVAST")
     return (
         cst,
         icms_code_source,
+        orig_icms,
         compare_to_float(icms_node.findtext("nfe:vBC", default="", namespaces=COMPARE_NS_NFE)),
         compare_to_float(icms_node.findtext("nfe:pICMS", default="", namespaces=COMPARE_NS_NFE)),
         compare_to_float(icms_node.findtext("nfe:vICMS", default="", namespaces=COMPARE_NS_NFE)),
-        compare_to_float(icms_node.findtext("nfe:vBCST", default="", namespaces=COMPARE_NS_NFE))
-        or compare_to_float(icms_node.findtext("nfe:vBCSTRet", default="", namespaces=COMPARE_NS_NFE)),
-        compare_to_float(icms_node.findtext("nfe:pICMSST", default="", namespaces=COMPARE_NS_NFE))
-        or compare_to_float(icms_node.findtext("nfe:pST", default="", namespaces=COMPARE_NS_NFE)),
-        compare_to_float(icms_node.findtext("nfe:vICMSST", default="", namespaces=COMPARE_NS_NFE))
-        or compare_to_float(icms_node.findtext("nfe:vICMSSTRet", default="", namespaces=COMPARE_NS_NFE)),
+        vl_bc_st,
+        aliq_st,
+        vl_st,
+        mva_st,
     )
 
 
@@ -274,7 +303,7 @@ def parse_compare_xml_file(file_path: Path) -> CompareXmlInvoice | None:
 
     items: list[CompareXmlItem] = []
     for det in root.findall(".//nfe:det", COMPARE_NS_NFE):
-        cst_icms, icms_code_source, vl_bc_icms, aliq_icms, vl_icms, vl_bc_st, aliq_st, vl_st = compare_extract_icms(det)
+        cst_icms, icms_code_source, orig_icms, vl_bc_icms, aliq_icms, vl_icms, vl_bc_st, aliq_st, vl_st, mva_st = compare_extract_icms(det)
         vl_ipi = compare_extract_ipi(det)
         cst_pis, vl_bc_pis, aliq_pis, vl_pis = compare_extract_pis_cofins(det, "PIS")
         cst_cofins, vl_bc_cofins, aliq_cofins, vl_cofins = compare_extract_pis_cofins(det, "COFINS")
@@ -311,7 +340,9 @@ def parse_compare_xml_file(file_path: Path) -> CompareXmlInvoice | None:
                 vl_bc_cofins=vl_bc_cofins,
                 aliq_cofins=aliq_cofins,
                 vl_cofins=vl_cofins,
+                orig_icms=orig_icms,
                 icms_code_source=icms_code_source,
+                mva=mva_st,
             )
         )
 

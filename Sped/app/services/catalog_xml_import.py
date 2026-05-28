@@ -251,13 +251,17 @@ def _supplier_product_values(repository: MysqlCadastroRepository, supplier_id: i
         int(data.get("tipo_produto_id") or 0) or None,
         repository._trim_text(data.get("codigo_fornecedor", ""), 80),
         repository._trim_text(data.get("codigo_empresa", ""), 80),
+        repository._trim_text(data.get("chave_nfe_origem", ""), 44),
         repository._trim_text(data.get("descricao", ""), 255),
         normalized_ean,
         normalized_ean or None,
         repository._only_digits(data.get("ncm", ""))[:20],
         repository._only_digits(data.get("cest", ""))[:20],
+        repository._trim_text(data.get("origem_entrada", ""), 4),
+        repository._only_digits(data.get("cfop_saida_fornecedor", ""))[:10],
         repository._only_digits(data.get("cfop_entrada", ""))[:10],
         repository._only_digits(data.get("cfop_saida", ""))[:10],
+        repository._trim_text(data.get("origem_saida", ""), 4),
         repository._trim_text(data.get("c_classtrib", ""), 20),
         repository._trim_text(data.get("c_benef", ""), 20),
         repository._trim_text(data.get("cst_icms", ""), 4),
@@ -278,16 +282,22 @@ def _supplier_product_values(repository: MysqlCadastroRepository, supplier_id: i
 
 
 def _payload_from_preview_row(row: CatalogImportPreviewRow) -> dict[str, object]:
+    cfop_xml = str(row.cfop_saida_fornecedor or "").strip()
+    origem_xml = str(row.origem_entrada or "").strip()
     return {
         "tipo_produto_id": None,
+        "chave_nfe_origem": row.chave_nfe_origem,
         "codigo_fornecedor": row.codigo_fornecedor,
         "codigo_empresa": "",
         "descricao": row.descricao,
         "ean": row.ean,
         "ncm": row.ncm,
         "cest": row.cest,
+        "origem_entrada": origem_xml,
+        "cfop_saida_fornecedor": cfop_xml,
         "cfop_entrada": "",
         "cfop_saida": "",
+        "origem_saida": origem_xml,
         "c_classtrib": row.c_classtrib,
         "c_benef": "",
         "cst_icms": row.cst_icms,
@@ -301,7 +311,7 @@ def _payload_from_preview_row(row: CatalogImportPreviewRow) -> dict[str, object]
         "cst_pis_cofins": f"{row.cst_pis}/{row.cst_cofins}".strip("/"),
         "aliquota_pis_cofins": row.aliquota_pis,
         "bc_st": row.bc_st,
-        "mva": "0",
+        "mva": row.mva,
         "valor_icms_st": row.valor_icms_st,
         "aliquota_icms_st": row.aliquota_icms_st,
     }
@@ -339,6 +349,7 @@ class CatalogImportPreviewRow:
     fornecedor: str
     fornecedor_ie: str
     regime_tributario: str
+    chave_nfe_origem: str
     codigo_fornecedor: str
     descricao: str
     ean: str
@@ -346,10 +357,13 @@ class CatalogImportPreviewRow:
     cest: str
     c_classtrib: str
     cst_icms: str
+    cfop_saida_fornecedor: str
+    origem_entrada: str
     aliquota_icms: str
     bc_st: str
     valor_icms_st: str
     aliquota_icms_st: str
+    mva: str
     cst_pis: str
     cst_cofins: str
     aliquota_pis: str
@@ -415,6 +429,7 @@ def build_catalog_import_preview(
                     fornecedor=supplier_name,
                     fornecedor_ie=_digits_only(invoice.issuer_ie),
                     regime_tributario=regime_tributario,
+                    chave_nfe_origem=str(invoice.key or "").strip(),
                     codigo_fornecedor=code or ean,
                     descricao=str(getattr(item, "description", "") or "").strip(),
                     ean=ean,
@@ -422,10 +437,13 @@ def build_catalog_import_preview(
                     cest=str(getattr(item, "cest", "") or "").strip(),
                     c_classtrib=str(getattr(item, "c_classtrib", "") or "").strip(),
                     cst_icms=str(getattr(item, "cst_icms", "") or "").strip(),
+                    cfop_saida_fornecedor=str(getattr(item, "cfop", "") or "").strip(),
+                    origem_entrada=str(getattr(item, "orig_icms", "") or "").strip(),
                     aliquota_icms=str(getattr(item, "aliq_icms", "") or "0"),
                     bc_st=str(getattr(item, "vl_bc_icms_st", "") or "0"),
                     valor_icms_st=str(getattr(item, "vl_icms_st", "") or "0"),
                     aliquota_icms_st=str(getattr(item, "aliq_icms_st", "") or "0"),
+                    mva=str(getattr(item, "mva", "") or "0"),
                     cst_pis=cst_pis,
                     cst_cofins=cst_cofins,
                     aliquota_pis=aliquota_pis,
@@ -584,7 +602,7 @@ def import_catalogs_from_preview(
                     """
                     UPDATE cad_produtos_fornecedor
                     SET fornecedor_id = %s, tipo_produto_id = %s, codigo_fornecedor = %s, codigo_empresa = %s,
-                        descricao = %s, ean = %s, ean_unico = %s, ncm = %s, cest = %s, cfop_entrada = %s, cfop_saida = %s, c_classtrib = %s, c_benef = %s,
+                        chave_nfe_origem = %s, descricao = %s, ean = %s, ean_unico = %s, ncm = %s, cest = %s, origem_entrada = %s, cfop_saida_fornecedor = %s, cfop_entrada = %s, cfop_saida = %s, origem_saida = %s, c_classtrib = %s, c_benef = %s,
                         cst_icms = %s, aliquota_icms = %s, cst_ipi = %s, aliquota_ipi = %s,
                         cst_pis_cofins = %s, aliquota_pis_cofins = %s, cst_pis = %s, cst_cofins = %s,
                         aliquota_pis = %s, aliquota_cofins = %s, bc_st = %s, mva = %s,
@@ -597,14 +615,14 @@ def import_catalogs_from_preview(
                 cursor.executemany(
                     """
                     INSERT INTO cad_produtos_fornecedor (
-                        fornecedor_id, tipo_produto_id, codigo_fornecedor, codigo_empresa, descricao, ean, ean_unico, ncm, cest, cfop_entrada, cfop_saida,
+                        fornecedor_id, tipo_produto_id, codigo_fornecedor, codigo_empresa, chave_nfe_origem, descricao, ean, ean_unico, ncm, cest, origem_entrada, cfop_saida_fornecedor, cfop_entrada, cfop_saida, origem_saida,
                         c_classtrib, c_benef, cst_icms, aliquota_icms, cst_ipi, aliquota_ipi,
                         cst_pis_cofins, aliquota_pis_cofins, cst_pis, cst_cofins, aliquota_pis, aliquota_cofins,
                         bc_st, mva, valor_icms_st, aliquota_icms_st
                     ) VALUES (
-                        %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
-                        %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
-                        %s, %s, %s, %s, %s
+                        %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+                        %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+                        %s, %s, %s, %s
                     )
                     """,
                     insert_values,
@@ -658,6 +676,7 @@ def build_catalog_import_change_rows(
             "cest": row.cest,
             "c_classtrib": row.c_classtrib,
             "cst_icms": row.cst_icms,
+            "cfop_saida_fornecedor": row.cfop_saida_fornecedor,
             "aliquota_icms": row.aliquota_icms,
         }
         for field_name, old_value in current_map.items():

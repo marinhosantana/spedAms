@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import csv
 import datetime as dt
@@ -893,22 +893,33 @@ class QtSpedApp(QMainWindow):
         self.catalog_product_fields = self.create_line_fields(
             (
                 "id",
+                "chave_nfe_origem",
                 "codigo_fornecedor",
                 "codigo_empresa",
                 "descricao",
                 "ean",
                 "ncm",
                 "cest",
+                "origem_entrada",
+                "cfop_saida_fornecedor",
                 "cfop_entrada",
                 "cfop_saida",
+                "natureza_receita_entrada",
                 "c_classtrib",
                 "c_benef",
+                "origem_saida",
+                "cst_icms_saida",
+                "cfop_saida_empresa",
+                "aliquota_icms_saida",
                 "cst_icms",
                 "aliquota_icms",
                 "cst_ipi",
                 "aliquota_ipi",
                 "cst_pis",
+                "cst_pis_saida",
                 "cst_cofins",
+                "cst_cofins_saida",
+                "natureza_receita_saida",
                 "aliquota_pis",
                 "aliquota_cofins",
                 "bc_st",
@@ -975,7 +986,7 @@ class QtSpedApp(QMainWindow):
         product_title = QLabel("Produtos do Fornecedor")
         product_title.setObjectName("sectionTitle")
         product_layout.addWidget(product_title)
-        self.catalog_product_table = self.create_data_table(["ID", "Cod. Forn.", "Cod. Empresa", "Descricao", "Classificacao", "NCM", "CFOP Entrada", "CFOP Saida", "CST ICMS", "% ICMS"])
+        self.catalog_product_table = self.create_data_table(["ID", "Cod. Forn.", "Cod. Empresa", "Descricao", "Classificacao", "NCM", "Origem (entrada)", "CST ICMS (entrada)", "CFOP saida fornecedor", "% ICMS (entrada)", "CFOP entrada empresa", "CST IPI", "% IPI", "CST PIS (entrada)", "% PIS", "CST COFINS (entrada)", "% COFINS", "Natureza da receita", "MVA", "Valor ICMS-ST", "cClassTrib", "cBenef", "Origem (saida)", "CST ICMS (saida)", "CFOP saida empresa", "% ICMS (saida)", "CST PIS (saida)", "CST COFINS (saida)", "Natureza da receita"])
         self.catalog_product_table.setColumnWidth(0, 55)
         self.catalog_product_table.setColumnWidth(1, 90)
         self.catalog_product_table.setColumnWidth(2, 100)
@@ -989,39 +1000,35 @@ class QtSpedApp(QMainWindow):
         self.catalog_product_type_combo = QComboBox()
         product_form.addWidget(QLabel("Classificacao do Produto"), 0, 0)
         product_form.addWidget(self.catalog_product_type_combo, 0, 1, 1, 3)
-        product_labels = [
-            ("codigo_fornecedor", "Cod. Produto Fornecedor"),
-            ("codigo_empresa", "Cod. Produto Empresa"),
-            ("descricao", "Descricao"),
-            ("ean", "EAN"),
-            ("ncm", "NCM"),
-            ("cest", "CEST"),
-            ("cfop_entrada", "CFOP Entrada"),
-            ("cfop_saida", "CFOP Saida"),
-            ("c_classtrib", "cClassTrib"),
-            ("c_benef", "cBenef"),
-            ("cst_icms", "CST ICMS"),
-            ("aliquota_icms", "% ICMS"),
-            ("cst_ipi", "CST IPI"),
-            ("aliquota_ipi", "% IPI"),
-            ("cst_pis", "CST PIS"),
-            ("cst_cofins", "CST COFINS"),
-            ("aliquota_pis", "% PIS"),
-            ("aliquota_cofins", "% COFINS"),
-            ("mva", "MVA"),
-            ("aliquota_icms_st", "% ICMS ST"),
+        grouped_product_labels = [
+            ("Dados Gerais", [("codigo_fornecedor", "Cod. Produto Fornecedor"), ("codigo_empresa", "Cod. Produto Empresa"), ("descricao", "Descricao"), ("ean", "EAN"), ("ncm", "NCM"), ("cest", "CEST")]),
+            ("Tributacao Entrada", [("origem_entrada", "Origem (entrada)"), ("cst_icms", "CST ICMS (entrada)"), ("cfop_saida_fornecedor", "CFOP saida fornecedor"), ("aliquota_icms", "% ICMS (entrada)"), ("cfop_entrada", "CFOP entrada empresa"), ("cst_ipi", "CST IPI"), ("aliquota_ipi", "% IPI"), ("cst_pis", "CST PIS (entrada)"), ("aliquota_pis", "% PIS"), ("cst_cofins", "CST COFINS (entrada)"), ("aliquota_cofins", "% COFINS"), ("natureza_receita_entrada", "Natureza da receita"), ("mva", "MVA"), ("valor_icms_st", "Valor ICMS-ST"), ("c_classtrib", "cClassTrib"), ("c_benef", "cBenef")]),
+            ("Dados de Saida", [("origem_saida", "Origem (saida)"), ("cst_icms_saida", "CST ICMS (saida)"), ("cfop_saida_empresa", "CFOP saida empresa"), ("aliquota_icms_saida", "% ICMS (saida)"), ("cst_pis_saida", "CST PIS (saida)"), ("cst_cofins_saida", "CST COFINS (saida)"), ("natureza_receita_saida", "Natureza da receita")]),
         ]
-        for index, (key, label) in enumerate(product_labels, start=1):
-            row = ((index - 1) // 2) + 1
-            column = 0 if index % 2 else 2
-            product_form.addWidget(QLabel(label), row, column)
-            product_form.addWidget(self.catalog_product_fields[key], row, column + 1)
+        current_row = 1
+        for section_title, section_fields in grouped_product_labels:
+            if section_title == "Dados de Saida":
+                divider = QFrame()
+                divider.setFrameShape(QFrame.HLine)
+                divider.setFrameShadow(QFrame.Sunken)
+                product_form.addWidget(divider, current_row, 0, 1, 4)
+                current_row += 1
+            section_label = QLabel(section_title)
+            section_label.setObjectName("sectionTitle")
+            product_form.addWidget(section_label, current_row, 0, 1, 4)
+            current_row += 1
+            for index, (key, label) in enumerate(section_fields):
+                row = current_row + (index // 2)
+                column = 0 if index % 2 == 0 else 2
+                product_form.addWidget(QLabel(label), row, column)
+                product_form.addWidget(self.catalog_product_fields[key], row, column + 1)
+            current_row += (len(section_fields) + 1) // 2 + 1
         actions = QHBoxLayout()
         actions.addStretch()
         actions.addWidget(self.create_button("Salvar Produto", self.save_catalog_product, primary=True))
         actions.addWidget(self.create_button("Novo", self.clear_catalog_product_form))
         actions.addWidget(self.create_button("Excluir", self.delete_catalog_product))
-        product_form.addLayout(actions, 11, 0, 1, 4)
+        product_form.addLayout(actions, current_row, 0, 1, 4)
         product_layout.addLayout(product_form)
         grid.addWidget(product_panel, 1, 1)
         grid.setColumnStretch(0, 1)
@@ -1090,22 +1097,33 @@ class QtSpedApp(QMainWindow):
         self.product_page_fields = self.create_line_fields(
             (
                 "id",
+                "chave_nfe_origem",
                 "codigo_fornecedor",
                 "codigo_empresa",
                 "descricao",
                 "ean",
                 "ncm",
                 "cest",
+                "origem_entrada",
+                "cfop_saida_fornecedor",
                 "cfop_entrada",
                 "cfop_saida",
+                "natureza_receita_entrada",
                 "c_classtrib",
                 "c_benef",
+                "origem_saida",
+                "cst_icms_saida",
+                "cfop_saida_empresa",
+                "aliquota_icms_saida",
                 "cst_icms",
                 "aliquota_icms",
                 "cst_ipi",
                 "aliquota_ipi",
                 "cst_pis",
+                "cst_pis_saida",
                 "cst_cofins",
+                "cst_cofins_saida",
+                "natureza_receita_saida",
                 "aliquota_pis",
                 "aliquota_cofins",
                 "bc_st",
@@ -1120,30 +1138,41 @@ class QtSpedApp(QMainWindow):
         self.product_page_filter_supplier_combo = QComboBox()
         self.product_page_table = self.create_data_table(
             [
+                "Status",
                 "ID",
                 "Empresa",
                 "Fornecedor",
-                "Classificacao",
+                "Classificação",
                 "Cod. Forn.",
                 "Cod. Empresa",
-                "Descricao",
+                "Descrição",
                 "EAN",
                 "NCM",
                 "CEST",
-                "CFOP Entrada",
-                "CFOP Saida",
-                "cClassTrib",
-                "cBenef",
-                "CST ICMS",
-                "% ICMS",
+                "Origem (entrada)",
+                "CST ICMS (entrada)",
+                "CFOP saída fornecedor",
+                "% ICMS (entrada)",
+                "CFOP entrada empresa",
                 "CST IPI",
                 "% IPI",
-                "CST PIS",
-                "CST COFINS",
+                "CST PIS (entrada)",
                 "% PIS",
+                "CST COFINS (entrada)",
                 "% COFINS",
+                "Natureza da receita",
                 "MVA",
-                "% ICMS ST",
+                "Valor ICMS-ST",
+                "cClassTrib",
+                "cBenef",
+                "Origem (saída)",
+                "CST ICMS (saída)",
+                "CFOP saída empresa",
+                "% ICMS (saída)",
+                "CST PIS (saída)",
+                "CST COFINS (saída)",
+                "Natureza da receita",
+                "Chave NFe origem",
             ]
         )
         self.product_page_table.setObjectName("produtos")
@@ -1217,39 +1246,85 @@ class QtSpedApp(QMainWindow):
         form.addWidget(self.product_page_supplier_combo, 0, 1, 1, 3)
         form.addWidget(QLabel("Classificacao do Produto"), 1, 0)
         form.addWidget(self.product_page_type_combo, 1, 1, 1, 3)
-        product_fields = [
+        gerais_fields = [
+            ("chave_nfe_origem", "Chave NFe origem"),
             ("codigo_fornecedor", "Cod. Produto Fornecedor"),
             ("codigo_empresa", "Cod. Produto Empresa"),
             ("descricao", "Descricao"),
             ("ean", "EAN"),
             ("ncm", "NCM"),
             ("cest", "CEST"),
-            ("cfop_entrada", "CFOP Entrada"),
-            ("cfop_saida", "CFOP Saida"),
             ("c_classtrib", "cClassTrib"),
             ("c_benef", "cBenef"),
-            ("cst_icms", "CST ICMS"),
-            ("aliquota_icms", "% ICMS"),
+        ]
+        entrada_fields = [
+            ("origem_entrada", "Origem (entrada)"),
+            ("cst_icms", "CST ICMS (entrada)"),
+            ("cfop_saida_fornecedor", "CFOP saida fornecedor"),
+            ("aliquota_icms", "% ICMS (entrada)"),
+            ("cfop_entrada", "CFOP entrada empresa"),
             ("cst_ipi", "CST IPI"),
             ("aliquota_ipi", "% IPI"),
-            ("cst_pis", "CST PIS"),
-            ("cst_cofins", "CST COFINS"),
+            ("cst_pis", "CST PIS (entrada)"),
             ("aliquota_pis", "% PIS"),
+            ("cst_cofins", "CST COFINS (entrada)"),
             ("aliquota_cofins", "% COFINS"),
+            ("natureza_receita_entrada", "Natureza da receita"),
             ("mva", "MVA"),
-            ("aliquota_icms_st", "% ICMS ST"),
+            ("valor_icms_st", "Valor ICMS-ST"),
         ]
-        for index, (key, label) in enumerate(product_fields):
-            row = 2 + index // 2
+        saida_fields = [
+            ("origem_saida", "Origem (saida)"),
+            ("cst_icms_saida", "CST ICMS (saida)"),
+            ("cfop_saida_empresa", "CFOP saida empresa"),
+            ("aliquota_icms_saida", "% ICMS (saida)"),
+            ("cst_pis_saida", "CST PIS (saida)"),
+            ("cst_cofins_saida", "CST COFINS (saida)"),
+            ("natureza_receita_saida", "Natureza da receita"),
+        ]
+        current_row = 2
+        gerais_label = QLabel("Dados Gerais")
+        gerais_label.setObjectName("sectionTitle")
+        form.addWidget(gerais_label, current_row, 0, 1, 4)
+        current_row += 1
+        for index, (key, label) in enumerate(gerais_fields):
+            row = current_row + (index // 2)
             column = 0 if index % 2 == 0 else 2
             form.addWidget(QLabel(label), row, column)
             form.addWidget(self.product_page_fields[key], row, column + 1)
+        current_row += (len(gerais_fields) + 1) // 2 + 1
+
+        trib_tabs = QTabWidget()
+        entrada_tab = QWidget()
+        entrada_grid = QGridLayout(entrada_tab)
+        entrada_grid.setHorizontalSpacing(8)
+        entrada_grid.setVerticalSpacing(6)
+        for index, (key, label) in enumerate(entrada_fields):
+            row = index // 2
+            column = 0 if index % 2 == 0 else 2
+            entrada_grid.addWidget(QLabel(label), row, column)
+            entrada_grid.addWidget(self.product_page_fields[key], row, column + 1)
+
+        saida_tab = QWidget()
+        saida_grid = QGridLayout(saida_tab)
+        saida_grid.setHorizontalSpacing(8)
+        saida_grid.setVerticalSpacing(6)
+        for index, (key, label) in enumerate(saida_fields):
+            row = index // 2
+            column = 0 if index % 2 == 0 else 2
+            saida_grid.addWidget(QLabel(label), row, column)
+            saida_grid.addWidget(self.product_page_fields[key], row, column + 1)
+
+        trib_tabs.addTab(entrada_tab, "Entrada")
+        trib_tabs.addTab(saida_tab, "Saida")
+        form.addWidget(trib_tabs, current_row, 0, 1, 4)
+        current_row += 1
         actions = QHBoxLayout()
         actions.addStretch()
         actions.addWidget(self.create_button("Salvar Alteracoes", self.save_product_page, primary=True))
         actions.addWidget(self.create_button("Novo", self.clear_product_page_form))
         actions.addWidget(self.create_button("Excluir", self.delete_product_page))
-        form.addLayout(actions, 12, 0, 1, 4)
+        form.addLayout(actions, current_row, 0, 1, 4)
         form_layout.addLayout(form)
         form_layout.addStretch()
         self.product_page_tabs.addTab(form_tab, "Cadastro / Edicao")
@@ -1354,6 +1429,8 @@ class QtSpedApp(QMainWindow):
         fields = {key: QLineEdit() for key in keys}
         if "id" in fields:
             fields["id"].setReadOnly(True)
+        if "chave_nfe_origem" in fields:
+            fields["chave_nfe_origem"].setReadOnly(True)
         if "cnpj" in fields:
             fields["cnpj"].setInputMask("00.000.000/0000-00;_")
         if "inscricao_estadual" in fields:
@@ -2434,8 +2511,17 @@ class QtSpedApp(QMainWindow):
         selected = table.selectionModel().selectedRows()
         if not selected:
             return 0
-        item = table.item(selected[0].row(), 0)
+        id_column = self.get_table_id_column_index(table)
+        item = table.item(selected[0].row(), id_column)
         return int(item.text()) if item and item.text().isdigit() else 0
+
+    def get_table_id_column_index(self, table: QTableWidget) -> int:
+        for index in range(table.columnCount()):
+            header_item = table.horizontalHeaderItem(index)
+            header_text = str(header_item.text() if header_item else "").strip().lower()
+            if header_text == "id":
+                return index
+        return 0
 
     def run_guarded_ui_operation(self, operation_key: str, message: str, callback: Callable[[], None]) -> None:
         running_operations = getattr(self, "_running_ui_operations", set())
@@ -2630,6 +2716,7 @@ class QtSpedApp(QMainWindow):
             self.product_page_table,
             [
                 [
+                    row.get("status_produto", ""),
                     int(row["id"]),
                     row.get("empresa_nome", ""),
                     row.get("fornecedor_nome", ""),
@@ -2640,20 +2727,30 @@ class QtSpedApp(QMainWindow):
                     row.get("ean", ""),
                     row.get("ncm", ""),
                     row.get("cest", ""),
-                    row.get("cfop_entrada", ""),
-                    row.get("cfop_saida", ""),
-                    row.get("c_classtrib", ""),
-                    row.get("c_benef", ""),
+                    row.get("origem_entrada", ""),
                     row.get("cst_icms", ""),
+                    row.get("cfop_saida_fornecedor", ""),
                     row.get("aliquota_icms", ""),
+                    row.get("cfop_entrada", ""),
                     row.get("cst_ipi", ""),
                     row.get("aliquota_ipi", ""),
                     row.get("cst_pis", ""),
-                    row.get("cst_cofins", ""),
                     row.get("aliquota_pis", ""),
+                    row.get("cst_cofins", ""),
                     row.get("aliquota_cofins", ""),
+                    row.get("natureza_receita_entrada", ""),
                     row.get("mva", ""),
-                    row.get("aliquota_icms_st", ""),
+                    row.get("valor_icms_st", ""),
+                    row.get("c_classtrib", ""),
+                    row.get("c_benef", ""),
+                    row.get("origem_saida", ""),
+                    row.get("cst_icms_saida", ""),
+                    row.get("cfop_saida_empresa", ""),
+                    row.get("aliquota_icms_saida", ""),
+                    row.get("cst_pis_saida", ""),
+                    row.get("cst_cofins_saida", ""),
+                    row.get("natureza_receita_saida", ""),
+                    row.get("chave_nfe_origem", ""),
                 ]
                 for row in rows
             ],
@@ -2707,8 +2804,9 @@ class QtSpedApp(QMainWindow):
         selected_company_id = int(self.product_page_filter_company_combo.currentData() or 0)
         selected_supplier_id = int(self.product_page_filter_supplier_combo.currentData() or 0)
         search_text = self.product_page_search_input.text().strip().lower() if hasattr(self, "product_page_search_input") else ""
+        id_column = self.get_table_id_column_index(self.product_page_table)
         for row_index in range(self.product_page_table.rowCount()):
-            row_id_item = self.product_page_table.item(row_index, 0)
+            row_id_item = self.product_page_table.item(row_index, id_column)
             row_id = int(row_id_item.text()) if row_id_item and row_id_item.text().isdigit() else 0
             row = self.product_page_rows.get(row_id, {})
             row_company_id = int(row.get("empresa_id") or 0)
@@ -2733,7 +2831,7 @@ class QtSpedApp(QMainWindow):
         total_products = len(visible_rows)
         class_counter: dict[str, int] = {}
         for row_index in visible_rows:
-            class_item = self.product_page_table.item(row_index, 3)
+            class_item = self.product_page_table.item(row_index, 4)
             class_name = (class_item.text().strip() if class_item else "") or "Sem classificacao"
             class_counter[class_name] = class_counter.get(class_name, 0) + 1
         total_classes = len(class_counter)
@@ -2765,7 +2863,7 @@ class QtSpedApp(QMainWindow):
         if not selected_rows:
             self.product_page_type_combo.setCurrentIndex(0)
             return
-        classification_text = (self.product_page_table.item(selected_rows[0].row(), 3).text() if self.product_page_table.item(selected_rows[0].row(), 3) else "").strip()
+        classification_text = (self.product_page_table.item(selected_rows[0].row(), 4).text() if self.product_page_table.item(selected_rows[0].row(), 4) else "").strip()
         combo_index = self.product_page_type_combo.findText(classification_text)
         self.product_page_type_combo.setCurrentIndex(combo_index if combo_index >= 0 else 0)
 
@@ -2948,10 +3046,29 @@ class QtSpedApp(QMainWindow):
                     row.get("descricao", ""),
                     row.get("tipo_produto", ""),
                     row.get("ncm", ""),
-                    row.get("cfop_entrada", ""),
-                    row.get("cfop_saida", ""),
+                    row.get("origem_entrada", ""),
                     row.get("cst_icms", ""),
+                    row.get("cfop_saida_fornecedor", ""),
                     row.get("aliquota_icms", ""),
+                    row.get("cfop_entrada", ""),
+                    row.get("cst_ipi", ""),
+                    row.get("aliquota_ipi", ""),
+                    row.get("cst_pis", ""),
+                    row.get("aliquota_pis", ""),
+                    row.get("cst_cofins", ""),
+                    row.get("aliquota_cofins", ""),
+                    row.get("natureza_receita_entrada", ""),
+                    row.get("mva", ""),
+                    row.get("valor_icms_st", ""),
+                    row.get("c_classtrib", ""),
+                    row.get("c_benef", ""),
+                    row.get("origem_saida", ""),
+                    row.get("cst_icms_saida", ""),
+                    row.get("cfop_saida_empresa", ""),
+                    row.get("aliquota_icms_saida", ""),
+                    row.get("cst_pis_saida", ""),
+                    row.get("cst_cofins_saida", ""),
+                    row.get("natureza_receita_saida", ""),
                 ]
                 for row in products
             ],
@@ -3097,8 +3214,9 @@ class QtSpedApp(QMainWindow):
             self.refresh_catalog_products(self.selected_catalog_id(self.catalog_supplier_table))
 
     def select_table_row_by_id(self, table: QTableWidget, row_id: int) -> None:
+        id_column = self.get_table_id_column_index(table)
         for row_index in range(table.rowCount()):
-            item = table.item(row_index, 0)
+            item = table.item(row_index, id_column)
             if item and item.text() == str(row_id):
                 table.selectRow(row_index)
                 return
@@ -4716,7 +4834,7 @@ class QtSpedApp(QMainWindow):
 
     def normalize_search_text(self, value: object) -> str:
         text = str(value or "").lower()
-        replacements = {"á": "a", "à": "a", "ã": "a", "â": "a", "é": "e", "ê": "e", "í": "i", "ó": "o", "ô": "o", "õ": "o", "ú": "u", "ç": "c"}
+        replacements = {"Ã¡": "a", "Ã ": "a", "Ã£": "a", "Ã¢": "a", "Ã©": "e", "Ãª": "e", "Ã­": "i", "Ã³": "o", "Ã´": "o", "Ãµ": "o", "Ãº": "u", "Ã§": "c"}
         for source, target in replacements.items():
             text = text.replace(source, target)
         return " ".join(text.split())
@@ -5417,7 +5535,11 @@ class QtSpedApp(QMainWindow):
             if selected_filter.startswith("Arquivo CSV") or output_path.suffix.lower() == ".csv":
                 if output_path.suffix.lower() != ".csv":
                     output_path = output_path.with_suffix(".csv")
-                write_simple_csv_file(output_path, headers, rows)
+                csv_rows = [
+                    row + [row_origin_keys[index] if index < len(row_origin_keys) else ""]
+                    for index, row in enumerate(rows)
+                ]
+                write_simple_csv_file(output_path, headers, csv_rows)
             else:
                 if output_path.suffix.lower() != ".xlsx":
                     output_path = output_path.with_suffix(".xlsx")
@@ -5582,16 +5704,28 @@ class QtSpedApp(QMainWindow):
             else:
                 if output_path.suffix.lower() != ".xlsx":
                     output_path = output_path.with_suffix(".xlsx")
-                supplier_index = headers.index("Fornecedor") if "Fornecedor" in headers else 2
-                grouped: dict[str, list[list[object]]] = {}
-                for row in rows:
-                    supplier_name = str(row[supplier_index]).strip() or "Sem Fornecedor"
-                    grouped.setdefault(supplier_name, []).append(row)
                 sheets: list[tuple[str, list[str], list[list[object]], dict[str, object]]] = []
-                for supplier_name, supplier_rows in sorted(grouped.items(), key=lambda item: item[0].upper()):
-                    sheet_name = self.slugify_filename(supplier_name).upper()[:31] or "FORNECEDOR"
-                    sheets.append((sheet_name, headers, supplier_rows, {"include_total": False}))
-                sheets.insert(0, ("RESUMO_GERAL", headers, rows, {"include_total": False}))
+                sheets.append(("BASE_COMPLETA", headers, rows, {"include_total": False}))
+
+                fornecedor_index = headers.index("Fornecedor") if "Fornecedor" in headers else -1
+                if fornecedor_index >= 0:
+                    grouped_rows: dict[str, list[list[object]]] = {}
+                    for row in rows:
+                        supplier_name = str(row[fornecedor_index] if fornecedor_index < len(row) else "").strip() or "FORNECEDOR_SEM_NOME"
+                        grouped_rows.setdefault(supplier_name, []).append(row)
+
+                    used_sheet_names: set[str] = {"BASE_COMPLETA"}
+                    for supplier_name, supplier_rows in grouped_rows.items():
+                        sheet_name = supplier_name[:31] or "FORNECEDOR"
+                        if sheet_name in used_sheet_names:
+                            suffix = 2
+                            base_name = sheet_name[:28]
+                            while f"{base_name}_{suffix}" in used_sheet_names:
+                                suffix += 1
+                            sheet_name = f"{base_name}_{suffix}"
+                        used_sheet_names.add(sheet_name)
+                        sheets.append((sheet_name, headers, supplier_rows, {"include_total": False}))
+
                 write_simple_excel_workbook(output_path, sheets)
             self.handle_export_success("Exportacao Produtos", output_path, "Exportacao concluida")
         except Exception as exc:
@@ -5781,7 +5915,11 @@ class QtSpedApp(QMainWindow):
         output_path = Path(output)
         try:
             if output_path.suffix.lower() == ".csv":
-                write_simple_csv_file(output_path, headers, rows)
+                csv_rows = [
+                    row + [row_origin_keys[index] if index < len(row_origin_keys) else ""]
+                    for index, row in enumerate(rows)
+                ]
+                write_simple_csv_file(output_path, headers, csv_rows)
             else:
                 if output_path.suffix.lower() != ".xlsx":
                     output_path = output_path.with_suffix(".xlsx")
@@ -8099,3 +8237,5 @@ class QtSpedApp(QMainWindow):
             sorted_invoice_details,
             operation_type,
         )
+
+
