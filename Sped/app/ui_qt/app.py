@@ -751,6 +751,7 @@ class QtSpedApp(QMainWindow):
                     ("Fornecedores", 10),
                     ("Classificacao do Produto", 11),
                     ("Produtos", 12),
+                    ("NCM", 18),
                     ("Limpeza Duplicados", 15),
                 ),
             ),
@@ -826,6 +827,7 @@ class QtSpedApp(QMainWindow):
         self.stack.addWidget(self.build_duplicates_cleanup_page())
         self.stack.addWidget(self.build_nfe_key_extract_page())
         self.stack.addWidget(self.build_entry_exit_page())
+        self.stack.addWidget(self.build_catalog_ncm_page())
         content_layout.addWidget(self.stack, 1)
         shell.addWidget(content, 1)
         self.setCentralWidget(root)
@@ -1166,6 +1168,55 @@ class QtSpedApp(QMainWindow):
             self.delete_type_page,
         )
         self.type_page_table.itemSelectionChanged.connect(self.handle_type_page_select)
+        return page
+
+    def build_catalog_ncm_page(self) -> QWidget:
+        page = self.create_single_catalog_page("NCM")
+        import_panel = self.create_panel()
+        import_layout = QHBoxLayout(import_panel)
+        import_layout.setContentsMargins(12, 10, 12, 10)
+        self.ncm_import_path_input = QLineEdit()
+        self.ncm_import_path_input.setPlaceholderText("Selecione a planilha de regras fiscais por NCM")
+        import_layout.addWidget(QLabel("Planilha"))
+        import_layout.addWidget(self.ncm_import_path_input, 1)
+        import_layout.addWidget(self.create_button("Selecionar", self.select_ncm_import_file))
+        import_layout.addWidget(self.create_button("Importar Planilha", self.import_ncm_rules_from_excel, primary=True))
+        page.layout().addWidget(import_panel)
+
+        ncm_keys = (
+            "id", "atividade", "regime_tributario", "uf", "data_vigencia", "ncm", "descricao", "cest",
+            "aliquota_ipi", "cst_ipi", "ex_tipi", "cst_pis_cofins_entrada", "cst_pis_cofins_saida",
+            "codigo_sped", "aliquota_pis", "aliquota_cofins", "base_legal_pis_cofins", "cfop_entrada", "cfop_saida",
+            "cst_csosn", "ad_rem_icms", "aliquota_icms", "reducao_bc_icms", "reducao_bc_icms_st",
+            "aliquota_icms_st", "aliquota_red_bc_icms", "mva", "fcp", "codigo_beneficio_fiscal",
+            "antecipado", "percentual_diferimento", "percentual_isencao", "codigo_anp", "base_legal_icms",
+        )
+        self.ncm_fields = self.create_line_fields(ncm_keys)
+        self.ncm_table = self.create_data_table([
+            "ID", "Atividade", "Regime", "UF", "Vigencia", "NCM", "Descricao", "CEST", "% IPI",
+            "CST IPI", "EX", "CST PIS/COFINS Entrada", "CST PIS/COFINS Saida", "Codigo SPED",
+            "% PIS", "% COFINS", "Base Legal PIS/COFINS", "CFOP Entrada", "CFOP Saida", "CST/CSOSN", "AD REM ICMS",
+            "% ICMS", "% Red BC ICMS", "% Red BC ICMS ST", "% ICMS ST", "% Aliq Red BC ICMS",
+            "MVA", "FCP", "Cod. Beneficio Fiscal", "Antecipado", "% Diferimento", "% Isencao",
+            "Codigo ANP", "Base Legal ICMS",
+        ])
+        self.ncm_table.setObjectName("ncm")
+        ncm_form_fields = [
+            ("atividade", "Atividade"), ("regime_tributario", "Regime tributario"), ("uf", "UF"),
+            ("data_vigencia", "Data vigencia"), ("ncm", "NCM"), ("descricao", "Descricao"),
+            ("cest", "CEST"), ("aliquota_ipi", "% IPI"), ("cst_ipi", "CST IPI"), ("ex_tipi", "EX"),
+            ("cst_pis_cofins_entrada", "CST PIS/COFINS entrada"), ("cst_pis_cofins_saida", "CST PIS/COFINS saida"),
+            ("codigo_sped", "Codigo SPED"), ("aliquota_pis", "% PIS"), ("aliquota_cofins", "% COFINS"),
+            ("base_legal_pis_cofins", "Base legal PIS/COFINS"), ("cfop_entrada", "CFOP entrada"), ("cfop_saida", "CFOP saida"), ("cst_csosn", "CST/CSOSN"),
+            ("ad_rem_icms", "AD REM ICMS"), ("aliquota_icms", "% ICMS"), ("reducao_bc_icms", "% Red BC ICMS"),
+            ("reducao_bc_icms_st", "% Red BC ICMS ST"), ("aliquota_icms_st", "% ICMS ST"),
+            ("aliquota_red_bc_icms", "% Aliq Red BC ICMS"), ("mva", "MVA"), ("fcp", "FCP"),
+            ("codigo_beneficio_fiscal", "Cod. Beneficio Fiscal"), ("antecipado", "Antecipado"),
+            ("percentual_diferimento", "% Diferimento"), ("percentual_isencao", "% Isencao"),
+            ("codigo_anp", "Codigo ANP"), ("base_legal_icms", "Base legal ICMS"),
+        ]
+        self.add_single_catalog_form(page, self.ncm_table, self.ncm_fields, ncm_form_fields, self.save_ncm_rule, self.clear_ncm_form, self.delete_ncm_rule)
+        self.ncm_table.itemSelectionChanged.connect(self.handle_ncm_select)
         return page
 
     def build_catalog_product_page(self) -> QWidget:
@@ -2638,6 +2689,8 @@ class QtSpedApp(QMainWindow):
                 self.refresh_type_page()
             elif title == "Produtos":
                 self.refresh_product_page()
+            elif title == "NCM":
+                self.refresh_ncm_page()
             else:
                 self.refresh_catalog()
             self.statusBar().showMessage("Consulta carregada.")
@@ -2790,6 +2843,102 @@ class QtSpedApp(QMainWindow):
         if row_id and QMessageBox.question(self, "Classificacao do Produto", "Excluir esta classificacao? Produtos vinculados ficarao sem classificacao.") == QMessageBox.Yes:
             self.mysql_repo.delete_product_type(row_id)
             self.refresh_type_page()
+
+    def refresh_ncm_page(self) -> None:
+        self.mysql_repo.ensure_schema()
+        rows = self.mysql_repo.list_ncm_catalog(self.environment)
+        self.ncm_page_rows = {int(row["id"]): row for row in rows}
+        self.set_table_rows(
+            self.ncm_table,
+            [
+                [
+                    int(row["id"]),
+                    row.get("atividade", ""),
+                    row.get("regime_tributario", ""),
+                    row.get("uf", ""),
+                    row.get("data_vigencia", ""),
+                    row.get("ncm", ""),
+                    row.get("descricao", ""),
+                    row.get("cest", ""),
+                    row.get("aliquota_ipi", ""),
+                    row.get("cst_ipi", ""),
+                    row.get("ex_tipi", ""),
+                    row.get("cst_pis_cofins_entrada", ""),
+                    row.get("cst_pis_cofins_saida", ""),
+                    row.get("codigo_sped", ""),
+                    row.get("aliquota_pis", ""),
+                    row.get("aliquota_cofins", ""),
+                    row.get("base_legal_pis_cofins", ""),
+                    row.get("cfop_entrada", ""),
+                    row.get("cfop_saida", ""),
+                    row.get("cst_csosn", ""),
+                    row.get("ad_rem_icms", ""),
+                    row.get("aliquota_icms", ""),
+                    row.get("reducao_bc_icms", ""),
+                    row.get("reducao_bc_icms_st", ""),
+                    row.get("aliquota_icms_st", ""),
+                    row.get("aliquota_red_bc_icms", ""),
+                    row.get("mva", ""),
+                    row.get("fcp", ""),
+                    row.get("codigo_beneficio_fiscal", ""),
+                    row.get("antecipado", ""),
+                    row.get("percentual_diferimento", ""),
+                    row.get("percentual_isencao", ""),
+                    row.get("codigo_anp", ""),
+                    row.get("base_legal_icms", ""),
+                ]
+                for row in rows
+            ],
+        )
+
+    def handle_ncm_select(self) -> None:
+        row = getattr(self, "ncm_page_rows", {}).get(self.selected_catalog_id(self.ncm_table), {})
+        self.fill_line_fields(self.ncm_fields, row)
+
+    def clear_ncm_form(self) -> None:
+        self.fill_line_fields(self.ncm_fields, {})
+
+    def save_ncm_rule(self) -> None:
+        try:
+            payload = self.line_field_payload(self.ncm_fields)
+            row_before = int(payload.get("id") or 0)
+            row_id = self.mysql_repo.save_ncm_rule(self.environment, payload)
+            self.refresh_ncm_page()
+            self.select_table_row_by_id(self.ncm_table, row_id)
+            action = "atualizada" if row_before else "cadastrada"
+            QMessageBox.information(self, "NCM", f"Regra NCM {action} com sucesso.")
+        except Exception as exc:
+            QMessageBox.critical(self, "NCM", str(exc))
+
+    def delete_ncm_rule(self) -> None:
+        row_id = self.selected_catalog_id(self.ncm_table)
+        if row_id and QMessageBox.question(self, "NCM", "Excluir esta regra de NCM?") == QMessageBox.Yes:
+            self.mysql_repo.delete_ncm_rule(row_id)
+            self.refresh_ncm_page()
+
+    def select_ncm_import_file(self) -> None:
+        file_path, _ = QFileDialog.getOpenFileName(self, "Selecionar planilha de NCM", "", "Planilhas Excel (*.xlsx *.xlsm)")
+        if file_path:
+            self.ncm_import_path_input.setText(file_path)
+
+    def import_ncm_rules_from_excel(self) -> None:
+        path = Path(self.ncm_import_path_input.text().strip())
+        if not path.exists():
+            QMessageBox.warning(self, "NCM", "Selecione uma planilha valida para importar.")
+            return
+        try:
+            QApplication.setOverrideCursor(Qt.WaitCursor)
+            stats = self.mysql_repo.import_ncm_rules_from_excel(self.environment, path)
+            self.refresh_ncm_page()
+            QMessageBox.information(
+                self,
+                "NCM",
+                f"Importacao concluida.\nLinhas processadas: {stats['rows']}\nIgnoradas: {stats['ignored']}",
+            )
+        except Exception as exc:
+            QMessageBox.critical(self, "NCM", str(exc))
+        finally:
+            QApplication.restoreOverrideCursor()
 
     def refresh_product_page(self) -> None:
         self.mysql_repo.ensure_schema()

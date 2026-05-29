@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import sys
 import traceback
+from datetime import date, datetime
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 
@@ -277,6 +278,39 @@ class MysqlCadastroRepository:
             if not column_exists("cad_produtos_fornecedor", "chave_nfe_origem"):
                 cursor.execute("ALTER TABLE cad_produtos_fornecedor ADD COLUMN chave_nfe_origem VARCHAR(44) NOT NULL DEFAULT '' AFTER codigo_empresa")
 
+        if column_exists("ncm", "id"):
+            if index_exists("ncm", "uq_ncm_regra"):
+                cursor.execute("ALTER TABLE ncm DROP INDEX uq_ncm_regra")
+            if not column_exists("ncm", "cfop_entrada"):
+                after_column = "base_legal_pis_cofins" if column_exists("ncm", "base_legal_pis_cofins") else "id"
+                cursor.execute(f"ALTER TABLE ncm ADD COLUMN cfop_entrada VARCHAR(20) NOT NULL DEFAULT '' AFTER {after_column}")
+            if not column_exists("ncm", "cfop_saida"):
+                cursor.execute("ALTER TABLE ncm ADD COLUMN cfop_saida VARCHAR(20) NOT NULL DEFAULT '' AFTER cfop_entrada")
+            if column_exists("ncm", "cfop"):
+                cursor.execute(
+                    """
+                    UPDATE ncm
+                    SET cfop_entrada = CASE
+                            WHEN TRIM(COALESCE(cfop_entrada, '')) = '' THEN TRIM(SUBSTRING_INDEX(COALESCE(cfop, ''), '/', 1))
+                            ELSE cfop_entrada
+                        END,
+                        cfop_saida = CASE
+                            WHEN TRIM(COALESCE(cfop_saida, '')) = '' AND LOCATE('/', COALESCE(cfop, '')) > 0 THEN TRIM(SUBSTRING_INDEX(COALESCE(cfop, ''), '/', -1))
+                            ELSE cfop_saida
+                        END
+                    """
+                )
+            if not index_exists("ncm", "uq_ncm_regra"):
+                cursor.execute(
+                    """
+                    ALTER TABLE ncm
+                    ADD UNIQUE KEY uq_ncm_regra (
+                        ambiente, uf, regime_tributario, data_vigencia, ncm, cest,
+                        cfop_entrada, cfop_saida, cst_csosn, codigo_beneficio_fiscal, ex_tipi
+                    )
+                    """
+                )
+
     def _only_digits(self, value: object) -> str:
         return "".join(char for char in str(value or "") if char.isdigit())
 
@@ -290,6 +324,23 @@ class MysqlCadastroRepository:
             return str(Decimal(text))
         except InvalidOperation:
             return "0"
+
+    def _date_text(self, value: object) -> str | None:
+        if value is None:
+            return None
+        if isinstance(value, datetime):
+            return value.date().isoformat()
+        if isinstance(value, date):
+            return value.isoformat()
+        text = str(value or "").strip()
+        if not text:
+            return None
+        for fmt in ("%d/%m/%Y", "%Y-%m-%d", "%d-%m-%Y"):
+            try:
+                return datetime.strptime(text, fmt).date().isoformat()
+            except ValueError:
+                continue
+        return None
 
     def _trim_text(self, value: object, max_length: int) -> str:
         return str(value or "").strip()[:max_length]
@@ -491,6 +542,226 @@ class MysqlCadastroRepository:
 
     def delete_product_type(self, type_id: int) -> None:
         self._delete_by_id("cad_tipos_produto", type_id)
+
+    NCM_FIELDS = [
+        "atividade",
+        "regime_tributario",
+        "uf",
+        "data_vigencia",
+        "ncm",
+        "descricao",
+        "cest",
+        "aliquota_ipi",
+        "cst_ipi",
+        "ex_tipi",
+        "cst_pis_cofins_entrada",
+        "cst_pis_cofins_saida",
+        "codigo_sped",
+        "aliquota_pis",
+        "aliquota_cofins",
+        "base_legal_pis_cofins",
+        "cfop_entrada",
+        "cfop_saida",
+        "cst_csosn",
+        "ad_rem_icms",
+        "aliquota_icms",
+        "reducao_bc_icms",
+        "reducao_bc_icms_st",
+        "aliquota_icms_st",
+        "aliquota_red_bc_icms",
+        "mva",
+        "fcp",
+        "codigo_beneficio_fiscal",
+        "antecipado",
+        "percentual_diferimento",
+        "percentual_isencao",
+        "codigo_anp",
+        "base_legal_icms",
+    ]
+
+    NCM_NUMERIC_FIELDS = {
+        "aliquota_ipi",
+        "aliquota_pis",
+        "aliquota_cofins",
+        "aliquota_icms",
+        "reducao_bc_icms",
+        "reducao_bc_icms_st",
+        "aliquota_icms_st",
+        "aliquota_red_bc_icms",
+        "mva",
+        "fcp",
+        "percentual_diferimento",
+        "percentual_isencao",
+    }
+
+    def _ncm_values(self, environment: str, data: dict[str, object]) -> tuple[object, ...]:
+        values: list[object] = [environment]
+        for field in self.NCM_FIELDS:
+            value = data.get(field, "")
+            if field == "data_vigencia":
+                values.append(self._date_text(value))
+            elif field == "ncm":
+                values.append(self._only_digits(value)[:20])
+            elif field == "uf":
+                values.append(self._trim_text(value, 2).upper())
+            elif field in self.NCM_NUMERIC_FIELDS:
+                values.append(self._decimal_text(value))
+            elif field in {"base_legal_pis_cofins", "base_legal_icms"}:
+                values.append(str(value or "").strip())
+            else:
+                limits = {
+                    "descricao": 255,
+                    "atividade": 80,
+                    "regime_tributario": 80,
+                    "cest": 20,
+                    "cst_ipi": 10,
+                    "ex_tipi": 20,
+                    "cst_pis_cofins_entrada": 20,
+                    "cst_pis_cofins_saida": 20,
+                    "codigo_sped": 40,
+                    "cfop_entrada": 20,
+                    "cfop_saida": 20,
+                    "cst_csosn": 20,
+                    "ad_rem_icms": 40,
+                    "codigo_beneficio_fiscal": 40,
+                    "antecipado": 10,
+                    "codigo_anp": 40,
+                }
+                values.append(self._trim_text(value, limits.get(field, 80)))
+        return tuple(values)
+
+    def list_ncm_catalog(self, environment: str) -> list[dict[str, object]]:
+        connection = self.get_connection()
+        try:
+            cursor = connection.cursor(dictionary=True)
+            cursor.execute(
+                """
+                SELECT *
+                FROM ncm
+                WHERE ambiente = %s
+                ORDER BY ncm, uf, regime_tributario, data_vigencia, id
+                """,
+                (environment,),
+            )
+            return [dict(row) for row in cursor.fetchall()]
+        finally:
+            connection.close()
+
+    def save_ncm_rule(self, environment: str, data: dict[str, object]) -> int:
+        rule_id = int(data.get("id") or 0)
+        values = self._ncm_values(environment, data)
+        if not values[5]:
+            raise ValueError("Informe o NCM.")
+        connection = self.get_connection()
+        try:
+            cursor = connection.cursor()
+            assignments = ", ".join(f"{field} = %s" for field in ["ambiente", *self.NCM_FIELDS])
+            if rule_id:
+                cursor.execute(
+                    f"UPDATE ncm SET {assignments} WHERE id = %s",
+                    (*values, rule_id),
+                )
+                connection.commit()
+                return rule_id
+            placeholders = ", ".join(["%s"] * len(values))
+            columns = ", ".join(["ambiente", *self.NCM_FIELDS])
+            cursor.execute(f"INSERT INTO ncm ({columns}) VALUES ({placeholders})", values)
+            connection.commit()
+            return int(cursor.lastrowid)
+        finally:
+            connection.close()
+
+    def delete_ncm_rule(self, rule_id: int) -> None:
+        self._delete_by_id("ncm", rule_id)
+
+    def import_ncm_rules_from_excel(self, environment: str, excel_path: Path) -> dict[str, int]:
+        from app.parsers.excel_parser import get_first_xlsx_sheet_name, read_xlsx_sheet_rows
+
+        sheet_name = get_first_xlsx_sheet_name(excel_path)
+        rows = read_xlsx_sheet_rows(excel_path, sheet_name)
+        if len(rows) < 7:
+            raise ValueError("Planilha de NCM sem linhas suficientes para importacao.")
+
+        def row_value(row_index: int, column_index: int) -> str:
+            row = rows[row_index] if row_index < len(rows) else []
+            return str(row[column_index] if column_index < len(row) else "").strip()
+
+        atividade = row_value(1, 1)
+        regime = row_value(2, 1)
+        uf = row_value(3, 1).upper()[:2]
+        data_vigencia = row_value(4, 1)
+        header_row = 6
+        headers = [str(value or "").strip().upper() for value in rows[header_row - 1]]
+        header_map = {
+            "NCM": "ncm",
+            "DESCRIÇÃO": "descricao",
+            "CEST": "cest",
+            "ALÍQUOTA IPI": "aliquota_ipi",
+            "CST IPI": "cst_ipi",
+            "EX": "ex_tipi",
+            "CST PIS/COFINS ENTRADA": "cst_pis_cofins_entrada",
+            "CST PIS/COFINS SAÍDA": "cst_pis_cofins_saida",
+            "CÓDIGO SPED": "codigo_sped",
+            "ALÍQUOTA PIS": "aliquota_pis",
+            "ALÍQUOTA COFINS": "aliquota_cofins",
+            "BASE LEGAL PIS/COFINS": "base_legal_pis_cofins",
+            "CFOP": "cfop",
+            "CST/CSOSN": "cst_csosn",
+            "AD REM ICMS": "ad_rem_icms",
+            "ALÍQUOTA ICMS": "aliquota_icms",
+            "% RED. BASE DE CÁLCULO ICMS": "reducao_bc_icms",
+            "% RED. BASE DE CÁLCULO ICMS ST": "reducao_bc_icms_st",
+            "ALÍQUOTA ICMS ST": "aliquota_icms_st",
+            "% ALÍQUOTA RED. BASE DE CÁLCULO ICMS": "aliquota_red_bc_icms",
+            "MVA": "mva",
+            "FCP": "fcp",
+            "CÓD. BENEFÍCIO FISCAL": "codigo_beneficio_fiscal",
+            "ANTECIPADO": "antecipado",
+            "PERCENTUAL DIFERIMENTO": "percentual_diferimento",
+            "PERCENTUAL ISENÇÃO": "percentual_isencao",
+            "CÓDIGO ANP": "codigo_anp",
+            "BASE LEGAL ICMS": "base_legal_icms",
+        }
+        fields_by_index = {index: header_map[header] for index, header in enumerate(headers) if header in header_map}
+        stats = {"rows": 0, "inserted": 0, "updated": 0, "ignored": 0}
+        connection = self.get_connection()
+        try:
+            cursor = connection.cursor()
+            columns = ["ambiente", *self.NCM_FIELDS]
+            placeholders = ", ".join(["%s"] * len(columns))
+            update_assignments = ", ".join(f"{field} = VALUES({field})" for field in self.NCM_FIELDS)
+            sql = (
+                f"INSERT INTO ncm ({', '.join(columns)}) VALUES ({placeholders}) "
+                f"ON DUPLICATE KEY UPDATE {update_assignments}"
+            )
+            values_list: list[tuple[object, ...]] = []
+            for row in rows[header_row:]:
+                payload = {
+                    "atividade": atividade,
+                    "regime_tributario": regime,
+                    "uf": uf,
+                    "data_vigencia": data_vigencia,
+                }
+                for index, field in fields_by_index.items():
+                    raw_value = row[index] if index < len(row) else ""
+                    if field == "cfop":
+                        cfop_parts = [part.strip() for part in str(raw_value or "").split("/", 1)]
+                        payload["cfop_entrada"] = cfop_parts[0] if cfop_parts else ""
+                        payload["cfop_saida"] = cfop_parts[1] if len(cfop_parts) > 1 else ""
+                    else:
+                        payload[field] = raw_value
+                if not self._only_digits(payload.get("ncm", "")):
+                    stats["ignored"] += 1
+                    continue
+                values_list.append(self._ncm_values(environment, payload))
+                stats["rows"] += 1
+            if values_list:
+                cursor.executemany(sql, values_list)
+                connection.commit()
+                stats["inserted"] = int(cursor.rowcount or 0)
+            return stats
+        finally:
+            connection.close()
 
     def ensure_product_type(self, environment: str, type_name: str, description: str = "") -> int:
         normalized_name = str(type_name or "").strip()
@@ -1217,7 +1488,7 @@ class MysqlCadastroRepository:
             connection.close()
 
     def _delete_by_id(self, table_name: str, row_id: int) -> None:
-        allowed_tables = {"cad_empresas", "cad_fornecedores", "cad_tipos_produto", "cad_produtos_fornecedor"}
+        allowed_tables = {"cad_empresas", "cad_fornecedores", "cad_tipos_produto", "cad_produtos_fornecedor", "ncm"}
         if table_name not in allowed_tables:
             raise ValueError("Tabela nao permitida para exclusao.")
         connection = self.get_connection()
