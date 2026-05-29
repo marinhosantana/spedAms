@@ -26,6 +26,13 @@ from app.services.tax_rules import (
 )
 
 
+MAX_INF_CPL_SIMPLES_CREDIT_RATE = Decimal("5")
+
+
+def is_valid_inf_cpl_simples_credit_rate(value: Decimal) -> bool:
+    return Decimal("0") < value <= MAX_INF_CPL_SIMPLES_CREDIT_RATE
+
+
 def get_xml_local_name(tag: str) -> str:
     if "}" in tag:
         return tag.rsplit("}", 1)[-1]
@@ -69,41 +76,47 @@ def extract_simples_credit_rate_from_inf_cpl(root: ET.Element, namespace: dict[s
     normalized_text = normalize_text(text).lower()
     if "credito" not in normalized_text or "icms" not in normalized_text:
         return Decimal("0")
-    marker_match = re.search(r"\[ALIQUOTA_CREDITO_ICMS\]", text, flags=re.IGNORECASE)
+    searchable_text = normalize_text(text).upper()
+    marker_match = re.search(r"\[ALIQUOTA_CREDITO_ICMS\]", searchable_text, flags=re.IGNORECASE)
     if marker_match:
-        nearby_text = text[max(0, marker_match.start() - 80): marker_match.end() + 80]
+        nearby_text = searchable_text[max(0, marker_match.start() - 80): marker_match.end() + 80]
         percent_values = re.findall(r"(\d+(?:[,.]\d+)?)\s*%", nearby_text)
         if percent_values:
             after_marker = nearby_text[nearby_text.upper().find("[ALIQUOTA_CREDITO_ICMS]"):]
             after_values = re.findall(r"(\d+(?:[,.]\d+)?)\s*%", after_marker)
-            return parse_decimal(after_values[0] if after_values else percent_values[-1])
+            value = parse_decimal(after_values[0] if after_values else percent_values[-1])
+            return value if is_valid_inf_cpl_simples_credit_rate(value) else Decimal("0")
         after_marker = nearby_text[nearby_text.upper().find("[ALIQUOTA_CREDITO_ICMS]"):]
         before_marker = nearby_text[:nearby_text.upper().find("[ALIQUOTA_CREDITO_ICMS]")]
         after_numbers = re.findall(r"(\d+(?:[,.]\d+)?)", after_marker)
         before_numbers = re.findall(r"(\d+(?:[,.]\d+)?)", before_marker)
         if after_numbers:
-            return parse_decimal(after_numbers[0])
+            value = parse_decimal(after_numbers[0])
+            return value if is_valid_inf_cpl_simples_credit_rate(value) else Decimal("0")
         if before_numbers:
-            return parse_decimal(before_numbers[-1])
+            value = parse_decimal(before_numbers[-1])
+            return value if is_valid_inf_cpl_simples_credit_rate(value) else Decimal("0")
     patterns = (
         r"\[ALIQUOTA_CREDITO_ICMS\]\s*(\d+(?:[,.]\d+)?)\s*%",
         r"ALIQUOTA[\s_-]*CREDITO[\s_-]*ICMS[^\d]{0,40}(\d+(?:[,.]\d+)?)\s*%",
-        r"PERCENTUAL\s+DE[^\d]{0,100}(\d+(?:[,.]\d+)?)\s*%",
-        r"(?:ALIQUOTA|ALÍQUOTA|ALIQ|PERCENTUAL)[^\d]{0,60}(\d+(?:[,.]\d+)?)\s*(?:%|POR\s*CENTO)?",
+        r"CREDITO[^\d]{0,80}ICMS[^\d]{0,80}(?:ALIQUOTA|ALIQ|PERCENTUAL)[^\d]{0,40}(\d+(?:[,.]\d+)?)\s*%",
+        r"(?:ALIQUOTA|ALIQ|PERCENTUAL)[^\d]{0,80}CREDITO[^\d]{0,80}ICMS[^\d]{0,40}(\d+(?:[,.]\d+)?)\s*%",
+        r"PERCENTUAL\s+DE[^\d]{0,60}CREDITO[^\d]{0,60}ICMS[^\d]{0,40}(\d+(?:[,.]\d+)?)\s*%",
     )
     for pattern in patterns:
-        match = re.search(pattern, text, flags=re.IGNORECASE)
+        match = re.search(pattern, searchable_text, flags=re.IGNORECASE)
         if match:
-            return parse_decimal(match.group(1))
-    percent_values = re.findall(r"(\d+(?:[,.]\d+)?)\s*%", text)
-    if percent_values:
-        return parse_decimal(percent_values[0])
-    for match in re.finditer(r"(\d+(?:[,.]\d+)?)", text):
-        prefix = text[max(0, match.start() - 12): match.start()].upper()
-        value = parse_decimal(match.group(1))
-        if "R$" in prefix or "VALOR" in prefix or value <= Decimal("0") or value > Decimal("30"):
+            value = parse_decimal(match.group(1))
+            return value if is_valid_inf_cpl_simples_credit_rate(value) else Decimal("0")
+    for match in re.finditer(r"(\d+(?:[,.]\d+)?)\s*%", searchable_text):
+        nearby_text = searchable_text[max(0, match.start() - 120): match.end() + 120]
+        if "IBPT" in nearby_text or "TRIBUTO" in nearby_text:
             continue
-        return value
+        if "CREDITO" not in nearby_text or "ICMS" not in nearby_text:
+            continue
+        value = parse_decimal(match.group(1))
+        if is_valid_inf_cpl_simples_credit_rate(value):
+            return value
     return Decimal("0")
 
 

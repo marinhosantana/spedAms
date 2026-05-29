@@ -1118,15 +1118,20 @@ class MysqlCadastroRepository:
         from datetime import datetime
         if not product_ids:
             raise ValueError("Nenhum produto selecionado para backup.")
+        unique_ids = sorted({int(product_id) for product_id in product_ids if int(product_id or 0)})
         connection = self.get_connection()
         try:
             cursor = connection.cursor(dictionary=True)
-            placeholders = ", ".join(["%s"] * len(product_ids))
-            cursor.execute(
-                f"SELECT * FROM cad_produtos_fornecedor WHERE id IN ({placeholders}) ORDER BY id",
-                tuple(product_ids),
-            )
-            rows = [dict(row) for row in cursor.fetchall()]
+            rows: list[dict[str, object]] = []
+            chunk_size = 800
+            for index in range(0, len(unique_ids), chunk_size):
+                chunk = unique_ids[index:index + chunk_size]
+                placeholders = ", ".join(["%s"] * len(chunk))
+                cursor.execute(
+                    f"SELECT * FROM cad_produtos_fornecedor WHERE id IN ({placeholders}) ORDER BY id",
+                    tuple(chunk),
+                )
+                rows.extend(dict(row) for row in cursor.fetchall())
         finally:
             connection.close()
         backup_dir = self.config_path.parent / "backups"

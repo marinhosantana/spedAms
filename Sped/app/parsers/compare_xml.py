@@ -9,6 +9,13 @@ from app.models import CompareXmlInvoice, CompareXmlItem
 from app.services.tax_rules import normalize_text
 
 
+COMPARE_MAX_INF_CPL_SIMPLES_CREDIT_RATE = 5.0
+
+
+def compare_valid_inf_cpl_simples_credit_rate(value: float) -> bool:
+    return 0 < value <= COMPARE_MAX_INF_CPL_SIMPLES_CREDIT_RATE
+
+
 def compare_clean(value: object) -> str:
     return str(value or "").strip()
 
@@ -53,41 +60,47 @@ def compare_extract_simples_credit_rate(text: object) -> float:
     normalized_text = normalize_text(raw_text).lower()
     if "credito" not in normalized_text or "icms" not in normalized_text:
         return 0.0
-    marker_match = re.search(r"\[ALIQUOTA_CREDITO_ICMS\]", raw_text, flags=re.IGNORECASE)
+    searchable_text = normalize_text(raw_text).upper()
+    marker_match = re.search(r"\[ALIQUOTA_CREDITO_ICMS\]", searchable_text, flags=re.IGNORECASE)
     if marker_match:
-        nearby_text = raw_text[max(0, marker_match.start() - 80): marker_match.end() + 80]
+        nearby_text = searchable_text[max(0, marker_match.start() - 80): marker_match.end() + 80]
         percent_values = re.findall(r"(\d+(?:[,.]\d+)?)\s*%", nearby_text)
         if percent_values:
             after_marker = nearby_text[nearby_text.upper().find("[ALIQUOTA_CREDITO_ICMS]"):]
             after_values = re.findall(r"(\d+(?:[,.]\d+)?)\s*%", after_marker)
-            return compare_to_float(after_values[0] if after_values else percent_values[-1])
+            value = compare_to_float(after_values[0] if after_values else percent_values[-1])
+            return value if compare_valid_inf_cpl_simples_credit_rate(value) else 0.0
         after_marker = nearby_text[nearby_text.upper().find("[ALIQUOTA_CREDITO_ICMS]"):]
         before_marker = nearby_text[:nearby_text.upper().find("[ALIQUOTA_CREDITO_ICMS]")]
         after_numbers = re.findall(r"(\d+(?:[,.]\d+)?)", after_marker)
         before_numbers = re.findall(r"(\d+(?:[,.]\d+)?)", before_marker)
         if after_numbers:
-            return compare_to_float(after_numbers[0])
+            value = compare_to_float(after_numbers[0])
+            return value if compare_valid_inf_cpl_simples_credit_rate(value) else 0.0
         if before_numbers:
-            return compare_to_float(before_numbers[-1])
+            value = compare_to_float(before_numbers[-1])
+            return value if compare_valid_inf_cpl_simples_credit_rate(value) else 0.0
     patterns = (
         r"\[ALIQUOTA_CREDITO_ICMS\]\s*(\d+(?:[,.]\d+)?)\s*%",
         r"ALIQUOTA[\s_-]*CREDITO[\s_-]*ICMS[^\d]{0,40}(\d+(?:[,.]\d+)?)\s*%",
-        r"PERCENTUAL\s+DE[^\d]{0,100}(\d+(?:[,.]\d+)?)\s*%",
-        r"(?:ALIQUOTA|ALÍQUOTA|ALIQ|PERCENTUAL)[^\d]{0,60}(\d+(?:[,.]\d+)?)\s*(?:%|POR\s*CENTO)?",
+        r"CREDITO[^\d]{0,80}ICMS[^\d]{0,80}(?:ALIQUOTA|ALIQ|PERCENTUAL)[^\d]{0,40}(\d+(?:[,.]\d+)?)\s*%",
+        r"(?:ALIQUOTA|ALIQ|PERCENTUAL)[^\d]{0,80}CREDITO[^\d]{0,80}ICMS[^\d]{0,40}(\d+(?:[,.]\d+)?)\s*%",
+        r"PERCENTUAL\s+DE[^\d]{0,60}CREDITO[^\d]{0,60}ICMS[^\d]{0,40}(\d+(?:[,.]\d+)?)\s*%",
     )
     for pattern in patterns:
-        match = re.search(pattern, raw_text, flags=re.IGNORECASE)
+        match = re.search(pattern, searchable_text, flags=re.IGNORECASE)
         if match:
-            return compare_to_float(match.group(1))
-    percent_values = re.findall(r"(\d+(?:[,.]\d+)?)\s*%", raw_text)
-    if percent_values:
-        return compare_to_float(percent_values[0])
-    for match in re.finditer(r"(\d+(?:[,.]\d+)?)", raw_text):
-        prefix = raw_text[max(0, match.start() - 12): match.start()].upper()
-        value = compare_to_float(match.group(1))
-        if "R$" in prefix or "VALOR" in prefix or value <= 0 or value > 30:
+            value = compare_to_float(match.group(1))
+            return value if compare_valid_inf_cpl_simples_credit_rate(value) else 0.0
+    for match in re.finditer(r"(\d+(?:[,.]\d+)?)\s*%", searchable_text):
+        nearby_text = searchable_text[max(0, match.start() - 120): match.end() + 120]
+        if "IBPT" in nearby_text or "TRIBUTO" in nearby_text:
             continue
-        return value
+        if "CREDITO" not in nearby_text or "ICMS" not in nearby_text:
+            continue
+        value = compare_to_float(match.group(1))
+        if compare_valid_inf_cpl_simples_credit_rate(value):
+            return value
     return 0.0
 
 

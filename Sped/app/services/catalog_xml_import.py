@@ -10,6 +10,14 @@ from app.repositories.mysql_cadastro import MysqlCadastroRepository
 from app.services.path_selection import parse_selected_paths
 
 
+MAX_SQL_IN_ITEMS = 800
+MAX_IMPORT_REVIEW_DETAIL_ROWS = 2000
+
+
+def _chunks(values: list[object], size: int = MAX_SQL_IN_ITEMS) -> list[list[object]]:
+    return [values[index:index + size] for index in range(0, len(values), size)]
+
+
 def _normalize_name(value: object, fallback: str) -> str:
     text = str(value or "").strip()
     return text or fallback
@@ -41,11 +49,38 @@ def _digits_only(value: object) -> str:
 NUMERIC_COMPARE_FIELDS = {
     "aliquota_icms",
     "reducao_bc_icms",
+    "aliquota_ipi",
     "aliquota_pis",
     "aliquota_cofins",
+    "aliquota_pis_cofins",
     "bc_st",
+    "mva",
     "valor_icms_st",
     "aliquota_icms_st",
+}
+
+
+NUMERIC_UPDATE_FIELDS = set(NUMERIC_COMPARE_FIELDS)
+
+
+TEXT_DIGITS_UPDATE_FIELDS = {
+    "ncm",
+    "cest",
+    "cfop_saida_fornecedor",
+}
+
+
+TEXT_LIMITS_UPDATE_FIELDS = {
+    "chave_nfe_origem": 44,
+    "descricao": 255,
+    "origem_entrada": 4,
+    "c_classtrib": 20,
+    "c_benef": 20,
+    "cst_icms": 4,
+    "cst_ipi": 4,
+    "cst_pis": 4,
+    "cst_cofins": 4,
+    "cst_pis_cofins": 20,
 }
 
 
@@ -239,6 +274,268 @@ def _mark_preview_existing_rows(
         progress_callback(3, 3, "Conferencia de cadastros concluida.")
 
 
+def _load_existing_products_for_preview(
+    repository: MysqlCadastroRepository,
+    environment: str,
+    rows: list[CatalogImportPreviewRow],
+    progress_callback: Callable[[int, int, str], None] | None = None,
+) -> tuple[
+    list[tuple[CatalogImportPreviewRow, int]],
+    dict[tuple[int, str], list[dict[str, object]]],
+    dict[tuple[int, str], list[dict[str, object]]],
+]:
+    if not rows:
+        return [], {}, {}
+    if progress_callback is not None:
+        progress_callback(0, 4, "Localizando empresas da previa...")
+
+    company_cnpjs = {_digits_only(row.key_token.split("|", 2)[0]) for row in rows}
+    company_cnpjs.discard("")
+    company_names = {row.empresa.upper() for row in rows if row.empresa.strip()}
+    company_by_cnpj: dict[str, int] = {}
+    company_by_name: dict[str, int] = {}
+
+    connection = repository.get_connection()
+    try:
+        cursor = connection.cursor(dictionary=True)
+        company_conditions: list[str] = []
+        company_params: list[object] = [environment]
+        if company_cnpjs:
+            company_conditions.append(f"cnpj IN ({_placeholders(company_cnpjs)})")
+            company_params.extend(sorted(company_cnpjs))
+        if company_names:
+            company_conditions.append(f"UPPER(nome) IN ({_placeholders(company_names)})")
+            company_params.extend(sorted(company_names))
+        if company_conditions:
+            cursor.execute(
+                f"""
+                SELECT id, cnpj, UPPER(nome) AS nome_key
+                FROM cad_empresas
+                WHERE ambiente = %s
+                  AND ({' OR '.join(company_conditions)})
+                """,
+                company_params,
+            )
+            for company in cursor.fetchall():
+                company_id = int(company["id"])
+                cnpj = _digits_only(company.get("cnpj", ""))
+                name = str(company.get("nome_key", "") or "").strip().upper()
+                if cnpj:
+                    company_by_cnpj.setdefault(cnpj, company_id)
+                if name:
+                    company_by_name.setdefault(name, company_id)
+
+        company_id_by_row: dict[int, int] = {}
+        for row in rows:
+            company_cnpj = _digits_only(row.key_token.split("|", 2)[0])
+            company_id = company_by_cnpj.get(company_cnpj) or company_by_name.get(row.empresa.upper())
+            if company_id:
+                company_id_by_row[id(row)] = company_id
+
+        if progress_callback is not None:
+            progress_callback(1, 4, "Localizando fornecedores da previa...")
+
+        company_ids = set(company_id_by_row.values())
+        supplier_cnpjs = {_digits_only(row.key_token.split("|", 2)[1]) for row in rows if id(row) in company_id_by_row}
+        supplier_cnpjs.discard("")
+        supplier_names = {row.fornecedor.upper() for row in rows if id(row) in company_id_by_row and row.fornecedor.strip()}
+        supplier_by_key: dict[tuple[int, str], int] = {}
+        if company_ids and (supplier_cnpjs or supplier_names):
+            supplier_conditions: list[str] = []
+            supplier_params: list[object] = sorted(company_ids)
+            if supplier_cnpjs:
+                supplier_conditions.append(f"cnpj IN ({_placeholders(supplier_cnpjs)})")
+                supplier_params.extend(sorted(supplier_cnpjs))
+            if supplier_names:
+                supplier_conditions.append(f"UPPER(nome) IN ({_placeholders(supplier_names)})")
+                supplier_params.extend(sorted(supplier_names))
+            cursor.execute(
+                f"""
+                SELECT id, empresa_id, cnpj, UPPER(nome) AS nome_key
+                FROM cad_fornecedores
+                WHERE empresa_id IN ({_placeholders(company_ids)})
+                  AND ({' OR '.join(supplier_conditions)})
+                """,
+                supplier_params,
+            )
+            for supplier in cursor.fetchall():
+                supplier_id = int(supplier["id"])
+                company_id = int(supplier["empresa_id"])
+                cnpj = _digits_only(supplier.get("cnpj", ""))
+                name = str(supplier.get("nome_key", "") or "").strip().upper()
+                if cnpj:
+                    supplier_by_key.setdefault((company_id, f"cnpj:{cnpj}"), supplier_id)
+                if name:
+                    supplier_by_key.setdefault((company_id, f"name:{name}"), supplier_id)
+
+        resolved_rows: list[tuple[CatalogImportPreviewRow, int]] = []
+        for row in rows:
+            company_id = company_id_by_row.get(id(row))
+            if not company_id:
+                continue
+            supplier_cnpj = _digits_only(row.key_token.split("|", 2)[1])
+            supplier_id = supplier_by_key.get((company_id, f"cnpj:{supplier_cnpj}")) or supplier_by_key.get((company_id, f"name:{row.fornecedor.upper()}"))
+            if supplier_id:
+                resolved_rows.append((row, supplier_id))
+
+        if progress_callback is not None:
+            progress_callback(2, 4, "Carregando produtos existentes em lote...")
+
+        supplier_ids = {supplier_id for _row, supplier_id in resolved_rows}
+        eans = {row.ean for row, _supplier_id in resolved_rows if row.ean}
+        codes = {row.codigo_fornecedor for row, _supplier_id in resolved_rows if row.codigo_fornecedor}
+        products_by_ean: dict[tuple[int, str], list[dict[str, object]]] = {}
+        products_by_code: dict[tuple[int, str], list[dict[str, object]]] = {}
+        if supplier_ids and (eans or codes):
+            loaded_product_ids: set[int] = set()
+
+            def add_loaded_products(product_rows: list[dict[str, object]]) -> None:
+                for product_row in product_rows:
+                    product = dict(product_row)
+                    product_id = int(product.get("id") or 0)
+                    if product_id in loaded_product_ids:
+                        continue
+                    loaded_product_ids.add(product_id)
+                    supplier_id = int(product["fornecedor_id"])
+                    ean = repository._only_digits(product.get("ean", ""))
+                    code = str(product.get("codigo_fornecedor", "") or "").strip()
+                    if ean:
+                        products_by_ean.setdefault((supplier_id, ean), []).append(product)
+                    if code:
+                        products_by_code.setdefault((supplier_id, code), []).append(product)
+
+            supplier_id_list = sorted(supplier_ids)
+            for supplier_chunk in _chunks(supplier_id_list):
+                for ean_chunk in _chunks(sorted(eans)):
+                    cursor.execute(
+                        f"""
+                        SELECT *
+                        FROM cad_produtos_fornecedor
+                        WHERE fornecedor_id IN ({_placeholders(supplier_chunk)})
+                          AND ean IN ({_placeholders(ean_chunk)})
+                        ORDER BY id
+                        """,
+                        [*supplier_chunk, *ean_chunk],
+                    )
+                    add_loaded_products([dict(row) for row in cursor.fetchall()])
+                for code_chunk in _chunks(sorted(codes)):
+                    cursor.execute(
+                        f"""
+                        SELECT *
+                        FROM cad_produtos_fornecedor
+                        WHERE fornecedor_id IN ({_placeholders(supplier_chunk)})
+                          AND codigo_fornecedor IN ({_placeholders(code_chunk)})
+                        ORDER BY id
+                        """,
+                        [*supplier_chunk, *code_chunk],
+                    )
+                    add_loaded_products([dict(row) for row in cursor.fetchall()])
+    finally:
+        connection.close()
+
+    if progress_callback is not None:
+        progress_callback(3, 4, "Produtos existentes carregados.")
+    return resolved_rows, products_by_ean, products_by_code
+
+
+def collect_catalog_import_existing_product_ids(
+    repository: MysqlCadastroRepository,
+    environment: str,
+    preview_rows: list[CatalogImportPreviewRow],
+    progress_callback: Callable[[int, int, str], None] | None = None,
+) -> list[int]:
+    resolved_rows, products_by_ean, products_by_code = _load_existing_products_for_preview(
+        repository,
+        environment,
+        preview_rows,
+        progress_callback,
+    )
+    product_ids: set[int] = set()
+    for row, supplier_id in resolved_rows:
+        products = products_by_ean.get((supplier_id, row.ean), []) if row.ean else []
+        if not products and row.codigo_fornecedor:
+            products = products_by_code.get((supplier_id, row.codigo_fornecedor), [])
+        for product in products:
+            product_id = int(product.get("id") or 0)
+            if product_id:
+                product_ids.add(product_id)
+    return sorted(product_ids)
+
+
+def build_catalog_import_existing_review(
+    repository: MysqlCadastroRepository,
+    environment: str,
+    preview_rows: list[CatalogImportPreviewRow],
+    update_fields: set[str] | None = None,
+    progress_callback: Callable[[int, int, str], None] | None = None,
+) -> tuple[list[list[str]], list[list[str]], list[int]]:
+    selected_fields = set(update_fields or UPDATABLE_PRODUCT_FIELDS)
+    resolved_rows, products_by_ean, products_by_code = _load_existing_products_for_preview(
+        repository,
+        environment,
+        preview_rows,
+        progress_callback,
+    )
+    changes: list[list[str]] = []
+    duplicate_rows: list[list[str]] = []
+    product_ids: set[int] = set()
+    seen_duplicates: set[tuple[object, ...]] = set()
+    hidden_changes = 0
+    hidden_duplicates = 0
+    total = len(resolved_rows)
+    for index, (row, supplier_id) in enumerate(resolved_rows, start=1):
+        if progress_callback is not None and (index == 1 or index == total or index % 100 == 0):
+            progress_callback(index, total, f"Conferindo existentes ({index}/{total})")
+        products = products_by_ean.get((supplier_id, row.ean), []) if row.ean else []
+        if not products and row.codigo_fornecedor:
+            products = products_by_code.get((supplier_id, row.codigo_fornecedor), [])
+        if not products:
+            continue
+        for product in products:
+            product_id = int(product.get("id") or 0)
+            if product_id:
+                product_ids.add(product_id)
+        duplicate_products = products
+        if len(duplicate_products) <= 1 and row.codigo_fornecedor:
+            duplicate_products = products_by_code.get((supplier_id, row.codigo_fornecedor), [])
+        if len(duplicate_products) > 1:
+            for dup in duplicate_products:
+                duplicate_item = (
+                    row.xml_file,
+                    str(supplier_id),
+                    row.codigo_fornecedor,
+                    row.ean,
+                    str(dup.get("id", "")),
+                    str(dup.get("descricao", "")),
+                    "chave duplicada no cadastro",
+                )
+                if duplicate_item not in seen_duplicates:
+                    seen_duplicates.add(duplicate_item)
+                    if len(duplicate_rows) < MAX_IMPORT_REVIEW_DETAIL_ROWS:
+                        duplicate_rows.append(list(duplicate_item))
+                    else:
+                        hidden_duplicates += 1
+        existing = products[0]
+        new_map = _payload_from_preview_row(row)
+        for field_name in UPDATABLE_PRODUCT_FIELDS:
+            if field_name not in selected_fields:
+                continue
+            old_value = existing.get(field_name, "")
+            new_value = new_map.get(field_name, "")
+            if _should_ignore_blank_text_update(field_name, old_value, new_value):
+                continue
+            if not _values_equal(field_name, old_value, new_value):
+                if len(changes) < MAX_IMPORT_REVIEW_DETAIL_ROWS:
+                    changes.append([row.xml_file, row.codigo_fornecedor, field_name, str(old_value), str(new_value), _change_reason(field_name, old_value, new_value)])
+                else:
+                    hidden_changes += 1
+    if hidden_duplicates:
+        duplicate_rows.append(["...", "", "", "", "", "", f"{hidden_duplicates} duplicidade(s) omitida(s) para preservar desempenho da tela."])
+    if hidden_changes:
+        changes.append(["...", "", "", "", "", f"{hidden_changes} mudanca(s) omitida(s) para preservar desempenho da tela."])
+    return changes, duplicate_rows, sorted(product_ids)
+
+
 def _supplier_product_values(repository: MysqlCadastroRepository, supplier_id: int, data: dict[str, object]) -> tuple[object, ...]:
     cst_pis = repository._trim_text(data.get("cst_pis", data.get("cst_pis_cofins", "")), 4)
     cst_cofins = repository._trim_text(data.get("cst_cofins", data.get("cst_pis_cofins", "")), 4)
@@ -320,6 +617,22 @@ def _payload_from_preview_row(row: CatalogImportPreviewRow) -> dict[str, object]
     }
 
 
+def _normalize_product_update_value(repository: MysqlCadastroRepository, field_name: str, value: object) -> object:
+    if field_name in NUMERIC_UPDATE_FIELDS:
+        return repository._decimal_text(value)
+    if field_name in TEXT_DIGITS_UPDATE_FIELDS:
+        return repository._only_digits(value)[:10 if field_name.startswith("cfop") else 20]
+    if field_name in TEXT_LIMITS_UPDATE_FIELDS:
+        return repository._trim_text(value, TEXT_LIMITS_UPDATE_FIELDS[field_name])
+    return value
+
+
+def _should_ignore_blank_text_update(field_name: str, current_value: object, new_value: object) -> bool:
+    if field_name in NUMERIC_UPDATE_FIELDS:
+        return False
+    return bool(str(current_value or "").strip()) and not str(new_value or "").strip()
+
+
 def _change_reason(field_name: str, left: object, right: object) -> str:
     if field_name in NUMERIC_COMPARE_FIELDS:
         return "valor numerico diferente"
@@ -328,17 +641,26 @@ def _change_reason(field_name: str, left: object, right: object) -> str:
 
 UPDATABLE_PRODUCT_FIELDS = [
     "descricao",
+    "chave_nfe_origem",
     "ncm",
     "cest",
+    "origem_entrada",
+    "cfop_saida_fornecedor",
     "c_classtrib",
+    "c_benef",
     "cst_icms",
     "reducao_bc_icms",
     "aliquota_icms",
+    "cst_ipi",
+    "aliquota_ipi",
     "cst_pis",
     "cst_cofins",
+    "cst_pis_cofins",
+    "aliquota_pis_cofins",
     "aliquota_pis",
     "aliquota_cofins",
     "bc_st",
+    "mva",
     "valor_icms_st",
     "aliquota_icms_st",
 ]
@@ -485,6 +807,15 @@ def import_catalogs_from_preview(
         "products_skipped_existing": 0,
     }
     skipped_rows: list[list[str]] = []
+    hidden_skipped_rows = 0
+
+    def add_skipped_row(row_data: list[str]) -> None:
+        nonlocal hidden_skipped_rows
+        if len(skipped_rows) < MAX_IMPORT_REVIEW_DETAIL_ROWS:
+            skipped_rows.append(row_data)
+        else:
+            hidden_skipped_rows += 1
+
     company_cache: dict[tuple[str, str, str], int] = {}
     supplier_cache: dict[tuple[int, str, str], int] = {}
     selected_fields = set(update_fields or UPDATABLE_PRODUCT_FIELDS)
@@ -522,39 +853,52 @@ def import_catalogs_from_preview(
         connection = repository.get_connection()
         try:
             cursor = connection.cursor(dictionary=True)
-            product_conditions: list[str] = []
-            product_params: list[object] = sorted(supplier_ids)
-            if eans:
-                product_conditions.append(f"ean IN ({_placeholders(eans)})")
-                product_params.extend(sorted(eans))
-            if codes:
-                product_conditions.append(f"codigo_fornecedor IN ({_placeholders(codes)})")
-                product_params.extend(sorted(codes))
-            cursor.execute(
-                f"""
-                SELECT *
-                FROM cad_produtos_fornecedor
-                WHERE fornecedor_id IN ({_placeholders(supplier_ids)})
-                  AND ({' OR '.join(product_conditions)})
-                """,
-                product_params,
-            )
-            for existing in cursor.fetchall():
-                product = dict(existing)
-                product_id = int(product["id"])
-                supplier_id = int(product["fornecedor_id"])
-                existing_by_id[product_id] = product
-                existing_ean = repository._only_digits(product.get("ean", ""))
-                existing_code = str(product.get("codigo_fornecedor", "") or "").strip()
-                if existing_ean:
-                    existing_by_ean.setdefault((supplier_id, existing_ean), product_id)
-                if existing_code:
-                    existing_by_code.setdefault((supplier_id, existing_code), product_id)
+            loaded_product_ids: set[int] = set()
+
+            def add_existing_products(product_rows: list[dict[str, object]]) -> None:
+                for existing in product_rows:
+                    product = dict(existing)
+                    product_id = int(product["id"])
+                    if product_id in loaded_product_ids:
+                        continue
+                    loaded_product_ids.add(product_id)
+                    supplier_id = int(product["fornecedor_id"])
+                    existing_by_id[product_id] = product
+                    existing_ean = repository._only_digits(product.get("ean", ""))
+                    existing_code = str(product.get("codigo_fornecedor", "") or "").strip()
+                    if existing_ean:
+                        existing_by_ean.setdefault((supplier_id, existing_ean), product_id)
+                    if existing_code:
+                        existing_by_code.setdefault((supplier_id, existing_code), product_id)
+
+            for supplier_chunk in _chunks(sorted(supplier_ids)):
+                for ean_chunk in _chunks(sorted(eans)):
+                    cursor.execute(
+                        f"""
+                        SELECT *
+                        FROM cad_produtos_fornecedor
+                        WHERE fornecedor_id IN ({_placeholders(supplier_chunk)})
+                          AND ean IN ({_placeholders(ean_chunk)})
+                        """,
+                        [*supplier_chunk, *ean_chunk],
+                    )
+                    add_existing_products([dict(row) for row in cursor.fetchall()])
+                for code_chunk in _chunks(sorted(codes)):
+                    cursor.execute(
+                        f"""
+                        SELECT *
+                        FROM cad_produtos_fornecedor
+                        WHERE fornecedor_id IN ({_placeholders(supplier_chunk)})
+                          AND codigo_fornecedor IN ({_placeholders(code_chunk)})
+                        """,
+                        [*supplier_chunk, *code_chunk],
+                    )
+                    add_existing_products([dict(row) for row in cursor.fetchall()])
         finally:
             connection.close()
 
     insert_values: list[tuple[object, ...]] = []
-    update_values: list[tuple[object, ...]] = []
+    update_values: list[tuple[int, dict[str, object]]] = []
     staged_by_ean = dict(existing_by_ean)
     staged_by_code = dict(existing_by_code)
     for index, (row, supplier_id, payload) in enumerate(resolved_rows, start=1):
@@ -567,29 +911,28 @@ def import_catalogs_from_preview(
             existing_id = staged_by_code.get((supplier_id, normalized_code))
         existing_product = existing_by_id.get(existing_id or 0)
         if existing_id is not None and existing_product is None:
-            skipped_rows.append([row.xml_file, row.codigo_fornecedor, row.ean, row.descricao, "Sem alteracao", "Produto repetido na previa; item ja preparado para cadastro."])
+            add_skipped_row([row.xml_file, row.codigo_fornecedor, row.ean, row.descricao, "Sem alteracao", "Produto repetido na previa; item ja preparado para cadastro."])
             continue
         if existing_id and not allow_update_existing:
             stats["products_skipped_existing"] += 1
-            skipped_rows.append([row.xml_file, row.codigo_fornecedor, row.ean, row.descricao, "Ignorado", "Produto ja existe e atualizacao de existentes nao foi autorizada."])
+            add_skipped_row([row.xml_file, row.codigo_fornecedor, row.ean, row.descricao, "Ignorado", "Produto ja existe e atualizacao de existentes nao foi autorizada."])
             continue
         if existing_product and allow_update_existing:
-            if existing_product.get("tipo_produto_id") is not None:
-                payload["tipo_produto_id"] = existing_product.get("tipo_produto_id")
+            changed_values: dict[str, object] = {}
             for field_name in UPDATABLE_PRODUCT_FIELDS:
-                if field_name not in selected_fields or _values_equal(field_name, existing_product.get(field_name, ""), payload.get(field_name, "")):
-                    payload[field_name] = existing_product.get(field_name, payload[field_name])
-            changed_fields = [
-                field_name
-                for field_name in UPDATABLE_PRODUCT_FIELDS
-                if _values_equal(field_name, existing_product.get(field_name, ""), payload.get(field_name, ""))
-                is False
-            ]
-            if not changed_fields:
-                skipped_rows.append([row.xml_file, row.codigo_fornecedor, row.ean, row.descricao, "Sem alteracao", "Item existente sem diferenca real nos campos selecionados."])
+                if field_name not in selected_fields:
+                    continue
+                current_value = existing_product.get(field_name, "")
+                new_value = payload.get(field_name, "")
+                if _should_ignore_blank_text_update(field_name, current_value, new_value):
+                    continue
+                if _values_equal(field_name, current_value, new_value):
+                    continue
+                changed_values[field_name] = _normalize_product_update_value(repository, field_name, new_value)
+            if not changed_values:
+                add_skipped_row([row.xml_file, row.codigo_fornecedor, row.ean, row.descricao, "Sem alteracao", "Item existente sem diferenca real nos campos selecionados."])
                 continue
-            values = _supplier_product_values(repository, supplier_id, payload)
-            update_values.append((*values, existing_id))
+            update_values.append((int(existing_id), changed_values))
             stats["products_updated"] += 1
         else:
             values = _supplier_product_values(repository, supplier_id, payload)
@@ -608,19 +951,16 @@ def import_catalogs_from_preview(
         try:
             cursor = connection.cursor()
             if update_values:
-                cursor.executemany(
-                    """
-                    UPDATE cad_produtos_fornecedor
-                    SET fornecedor_id = %s, tipo_produto_id = %s, codigo_fornecedor = %s, codigo_empresa = %s,
-                        chave_nfe_origem = %s, descricao = %s, ean = %s, ean_unico = %s, ncm = %s, cest = %s, origem_entrada = %s, cfop_saida_fornecedor = %s, cfop_entrada = %s, cfop_saida = %s, origem_saida = %s, c_classtrib = %s, c_benef = %s,
-                        cst_icms = %s, reducao_bc_icms = %s, aliquota_icms = %s, cst_ipi = %s, aliquota_ipi = %s,
-                        cst_pis_cofins = %s, aliquota_pis_cofins = %s, cst_pis = %s, cst_cofins = %s,
-                        aliquota_pis = %s, aliquota_cofins = %s, bc_st = %s, mva = %s,
-                        valor_icms_st = %s, aliquota_icms_st = %s
-                    WHERE id = %s
-                    """,
-                    update_values,
-                )
+                update_groups: dict[tuple[str, ...], list[tuple[object, ...]]] = {}
+                for product_id, changed_values in update_values:
+                    field_names = tuple(changed_values)
+                    update_groups.setdefault(field_names, []).append((*changed_values.values(), product_id))
+                for field_names, grouped_values in update_groups.items():
+                    assignments = ", ".join(f"{field_name} = %s" for field_name in field_names)
+                    cursor.executemany(
+                        f"UPDATE cad_produtos_fornecedor SET {assignments} WHERE id = %s",
+                        grouped_values,
+                    )
             if insert_values:
                 cursor.executemany(
                     """
@@ -643,6 +983,8 @@ def import_catalogs_from_preview(
             raise
         finally:
             connection.close()
+    if hidden_skipped_rows:
+        add_skipped_row(["...", "", "", "", "Resumo", f"{hidden_skipped_rows} linha(s) omitida(s) para preservar desempenho da tela."])
     stats["skipped_rows"] = skipped_rows  # type: ignore[assignment]
     return stats
 
@@ -651,48 +993,34 @@ def build_catalog_import_change_rows(
     repository: MysqlCadastroRepository,
     environment: str,
     preview_rows: list[CatalogImportPreviewRow],
+    update_fields: set[str] | None = None,
+    progress_callback: Callable[[int, int, str], None] | None = None,
 ) -> list[list[str]]:
     changes: list[list[str]] = []
-    company_cache: dict[tuple[str, str], int | None] = {}
-    supplier_cache: dict[tuple[int, str, str], int | None] = {}
-    for row in preview_rows:
-        recipient_cnpj, issuer_cnpj, _ = row.key_token.split("|", 2)
-        company_key = (row.empresa.upper(), recipient_cnpj)
-        if company_key not in company_cache:
-            company_cache[company_key] = repository.find_company_id(environment, row.empresa, recipient_cnpj)
-        company_id = company_cache[company_key]
-        if not company_id:
+    selected_fields = set(update_fields or UPDATABLE_PRODUCT_FIELDS)
+    resolved_rows, products_by_ean, products_by_code = _load_existing_products_for_preview(
+        repository,
+        environment,
+        preview_rows,
+        progress_callback,
+    )
+    for index, (row, supplier_id) in enumerate(resolved_rows, start=1):
+        if progress_callback is not None and (index == 1 or index == len(preview_rows) or index % 50 == 0):
+            progress_callback(index, len(preview_rows), f"Conferindo mudancas ({index}/{len(preview_rows)})")
+        products = products_by_ean.get((supplier_id, row.ean), []) if row.ean else []
+        if not products and row.codigo_fornecedor:
+            products = products_by_code.get((supplier_id, row.codigo_fornecedor), [])
+        if not products:
             continue
-        supplier_key = (company_id, row.fornecedor.upper(), issuer_cnpj)
-        if supplier_key not in supplier_cache:
-            supplier_cache[supplier_key] = repository.find_supplier_id(company_id, row.fornecedor, issuer_cnpj)
-        supplier_id = supplier_cache[supplier_key]
-        if not supplier_id:
-            continue
-        existing = repository.find_supplier_product_by_key(supplier_id, row.ean, row.codigo_fornecedor)
-        if not existing:
-            continue
-        current_map = {
-            "descricao": str(existing.get("descricao", "")),
-            "ncm": str(existing.get("ncm", "")),
-            "cest": str(existing.get("cest", "")),
-            "c_classtrib": str(existing.get("c_classtrib", "")),
-            "cst_icms": str(existing.get("cst_icms", "")),
-            "reducao_bc_icms": str(existing.get("reducao_bc_icms", "")),
-            "aliquota_icms": str(existing.get("aliquota_icms", "")),
-        }
-        new_map = {
-            "descricao": row.descricao,
-            "ncm": row.ncm,
-            "cest": row.cest,
-            "c_classtrib": row.c_classtrib,
-            "cst_icms": row.cst_icms,
-            "cfop_saida_fornecedor": row.cfop_saida_fornecedor,
-            "reducao_bc_icms": row.reducao_bc_icms,
-            "aliquota_icms": row.aliquota_icms,
-        }
-        for field_name, old_value in current_map.items():
-            new_value = new_map[field_name]
+        existing = products[0]
+        new_map = _payload_from_preview_row(row)
+        for field_name in UPDATABLE_PRODUCT_FIELDS:
+            if field_name not in selected_fields:
+                continue
+            old_value = existing.get(field_name, "")
+            new_value = new_map.get(field_name, "")
+            if _should_ignore_blank_text_update(field_name, old_value, new_value):
+                continue
             if not _values_equal(field_name, old_value, new_value):
                 changes.append([row.xml_file, row.codigo_fornecedor, field_name, str(old_value), str(new_value), _change_reason(field_name, old_value, new_value)])
     return changes
@@ -702,25 +1030,23 @@ def build_catalog_import_duplicate_rows(
     repository: MysqlCadastroRepository,
     environment: str,
     preview_rows: list[CatalogImportPreviewRow],
+    progress_callback: Callable[[int, int, str], None] | None = None,
 ) -> list[list[str]]:
     rows: list[list[str]] = []
-    company_cache: dict[tuple[str, str], int | None] = {}
-    supplier_cache: dict[tuple[int, str, str], int | None] = {}
-    for row in preview_rows:
-        recipient_cnpj, issuer_cnpj, _ = row.key_token.split("|", 2)
-        company_key = (row.empresa.upper(), recipient_cnpj)
-        if company_key not in company_cache:
-            company_cache[company_key] = repository.find_company_id(environment, row.empresa, recipient_cnpj)
-        company_id = company_cache[company_key]
-        if not company_id:
+    resolved_rows, products_by_ean, products_by_code = _load_existing_products_for_preview(
+        repository,
+        environment,
+        preview_rows,
+        progress_callback,
+    )
+    for index, (row, supplier_id) in enumerate(resolved_rows, start=1):
+        if progress_callback is not None and (index == 1 or index == len(preview_rows) or index % 50 == 0):
+            progress_callback(index, len(preview_rows), f"Conferindo duplicidades ({index}/{len(preview_rows)})")
+        duplicates = products_by_ean.get((supplier_id, row.ean), []) if row.ean else []
+        if len(duplicates) <= 1 and row.codigo_fornecedor:
+            duplicates = products_by_code.get((supplier_id, row.codigo_fornecedor), [])
+        if len(duplicates) <= 1:
             continue
-        supplier_key = (company_id, row.fornecedor.upper(), issuer_cnpj)
-        if supplier_key not in supplier_cache:
-            supplier_cache[supplier_key] = repository.find_supplier_id(company_id, row.fornecedor, issuer_cnpj)
-        supplier_id = supplier_cache[supplier_key]
-        if not supplier_id:
-            continue
-        duplicates = repository.find_supplier_product_duplicates(supplier_id, row.ean, row.codigo_fornecedor)
         for dup in duplicates:
             rows.append(
                 [

@@ -50,8 +50,7 @@ from app.services.app_config_service import load_app_config
 from app.services.catalog_xml_import import (
     CatalogImportPreviewRow,
     UPDATABLE_PRODUCT_FIELDS,
-    build_catalog_import_change_rows,
-    build_catalog_import_duplicate_rows,
+    build_catalog_import_existing_review,
     build_catalog_import_preview,
     import_catalogs_from_preview,
 )
@@ -100,6 +99,8 @@ COLORS = {
     "warn": "#b56b12",
     "bad": "#b42318",
 }
+
+CATALOG_IMPORT_POPUP_ROW_LIMIT = 2000
 
 
 class CompareWorker(QObject):
@@ -244,6 +245,80 @@ class SpedReprocessWorker(QObject):
             self.finished.emit(generated_files)
         except Exception as exc:
             self.write_audit_log("REPROCESSAMENTO_ERRO", str(exc))
+            self.failed.emit(str(exc))
+
+
+class CatalogImportPreviewWorker(QObject):
+    finished = Signal(list, dict)
+    failed = Signal(str)
+    progress = Signal(int, int, str)
+
+    def __init__(self, repository: MysqlCadastroRepository, environment: str, source_value: str) -> None:
+        super().__init__()
+        self.repository = repository
+        self.environment = environment
+        self.source_value = source_value
+
+    def run(self) -> None:
+        try:
+            preview_rows, stats = build_catalog_import_preview(
+                self.repository,
+                self.environment,
+                self.source_value,
+                progress_callback=self.progress.emit,
+            )
+            self.finished.emit(preview_rows, stats)
+        except Exception as exc:
+            self.failed.emit(str(exc))
+
+
+class CatalogImportWorker(QObject):
+    finished = Signal(dict, list, list, str)
+    failed = Signal(str)
+    progress = Signal(int, int, str)
+
+    def __init__(
+        self,
+        repository: MysqlCadastroRepository,
+        environment: str,
+        preview_rows: list[CatalogImportPreviewRow],
+        allow_update_existing: bool,
+        update_fields: set[str],
+    ) -> None:
+        super().__init__()
+        self.repository = repository
+        self.environment = environment
+        self.preview_rows = preview_rows
+        self.allow_update_existing = allow_update_existing
+        self.update_fields = update_fields
+
+    def run(self) -> None:
+        try:
+            duplicate_rows: list[list[object]] = []
+            change_rows: list[list[object]] = []
+            backup_path = ""
+            if self.allow_update_existing:
+                self.progress.emit(0, 3, "Conferindo produtos existentes em lote...")
+                change_rows, duplicate_rows, product_ids_to_backup = build_catalog_import_existing_review(
+                    self.repository,
+                    self.environment,
+                    self.preview_rows,
+                    self.update_fields,
+                    self.progress.emit,
+                )
+                if product_ids_to_backup:
+                    self.progress.emit(2, 3, "Criando backup de seguranca dos produtos existentes...")
+                    backup_path = str(self.repository.backup_supplier_products_by_ids(product_ids_to_backup))
+            stats = import_catalogs_from_preview(
+                self.repository,
+                self.environment,
+                self.preview_rows,
+                allow_update_existing=self.allow_update_existing,
+                progress_callback=self.progress.emit,
+                update_fields=self.update_fields,
+            )
+            self.finished.emit(stats, duplicate_rows, change_rows, backup_path)
+        except Exception as exc:
             self.failed.emit(str(exc))
 
 
@@ -3525,8 +3600,13 @@ class QtSpedApp(QMainWindow):
             self.catalog_import_sources_input.setText(format_selected_paths(append_unique_paths(current_paths, [Path(directory)])))
 
     def import_catalogs_from_xml_sources(self) -> None:
+        if getattr(self, "catalog_import_thread", None) is not None:
+            QMessageBox.information(self, "Importacao XML Cadastros", "Ja existe uma operacao de importacao em andamento.")
+            return
         if not getattr(self, "catalog_import_preview_rows", []):
+            QMessageBox.information(self, "Importacao XML Cadastros", "Gere a previa antes de importar.")
             self.build_catalog_import_preview_ui()
+            return
         preview_rows = getattr(self, "catalog_import_preview_rows", [])
         if not preview_rows:
             QMessageBox.warning(self, "Importacao XML Cadastros", "Nao ha itens na previa para importar.")
@@ -3541,43 +3621,49 @@ class QtSpedApp(QMainWindow):
             )
             allow_update_existing = answer == QMessageBox.Yes
         selected_update_fields = set(UPDATABLE_PRODUCT_FIELDS)
-        duplicate_rows: list[list[object]] = []
-        change_rows: list[list[object]] = []
         if allow_update_existing:
             selected_update_fields = self.ask_catalog_import_update_fields()
             if not selected_update_fields:
                 QMessageBox.information(self, "Importacao XML Cadastros", "Nenhum campo selecionado para atualizacao.")
                 return
-            change_rows = build_catalog_import_change_rows(self.mysql_repo, self.environment, preview_rows)
-            duplicate_rows = build_catalog_import_duplicate_rows(self.mysql_repo, self.environment, preview_rows)
-            if not change_rows:
-                QMessageBox.information(self, "Importacao XML Cadastros", "Nao ha atualizacao. Nenhum campo mudou nos itens existentes.")
-                return
-            product_ids_to_backup: list[int] = []
-            for row in preview_rows:
-                recipient_cnpj, issuer_cnpj, _ = row.key_token.split("|", 2)
-                company_id = self.mysql_repo.find_company_id(self.environment, row.empresa, recipient_cnpj)
-                if not company_id:
-                    continue
-                supplier_id = self.mysql_repo.find_supplier_id(company_id, row.fornecedor, issuer_cnpj)
-                if not supplier_id:
-                    continue
-                existing = self.mysql_repo.find_supplier_product_by_key(supplier_id, row.ean, row.codigo_fornecedor)
-                if existing and int(existing.get("id") or 0):
-                    product_ids_to_backup.append(int(existing.get("id")))
-            if product_ids_to_backup:
-                backup_path = self.mysql_repo.backup_supplier_products_by_ids(sorted(set(product_ids_to_backup)))
-                self.statusBar().showMessage(f"Backup de seguranca criado: {backup_path}")
+        self.catalog_import_progress.setValue(0)
+        self.catalog_import_status.setText("Iniciando importacao dos cadastros...")
+        self.statusBar().showMessage("Importando cadastros via XML...")
+        QApplication.setOverrideCursor(Qt.WaitCursor)
+
+        self.catalog_import_thread = QThread(self)
+        self.catalog_import_worker = CatalogImportWorker(
+            self.mysql_repo,
+            self.environment,
+            preview_rows,
+            allow_update_existing,
+            selected_update_fields,
+        )
+        self.catalog_import_worker.moveToThread(self.catalog_import_thread)
+        self.catalog_import_thread.started.connect(self.catalog_import_worker.run)
+        self.catalog_import_worker.progress.connect(self.update_catalog_import_progress)
+        self.catalog_import_worker.finished.connect(self.render_catalog_import_results)
+        self.catalog_import_worker.failed.connect(self.handle_catalog_import_error)
+        self.catalog_import_worker.finished.connect(self.catalog_import_thread.quit)
+        self.catalog_import_worker.failed.connect(self.catalog_import_thread.quit)
+        self.catalog_import_thread.finished.connect(self.catalog_import_worker.deleteLater)
+        self.catalog_import_thread.finished.connect(self.catalog_import_thread.deleteLater)
+        self.catalog_import_thread.finished.connect(lambda: setattr(self, "catalog_import_worker", None))
+        self.catalog_import_thread.finished.connect(lambda: setattr(self, "catalog_import_thread", None))
+        self.catalog_import_thread.start()
+
+    def render_catalog_import_results(self, stats: dict[str, int], duplicate_rows: list[list[object]], change_rows: list[list[object]], backup_path: str) -> None:
+        def limited_rows(rows: list[list[object]], headers: list[str]) -> list[list[object]]:
+            if len(rows) <= CATALOG_IMPORT_POPUP_ROW_LIMIT:
+                return rows
+            hidden = len(rows) - CATALOG_IMPORT_POPUP_ROW_LIMIT
+            message_row = [""] * max(1, len(headers))
+            message_row[-1] = f"{hidden} linha(s) omitida(s) para preservar desempenho da tela."
+            return [*rows[:CATALOG_IMPORT_POPUP_ROW_LIMIT], message_row]
+
         try:
-            QApplication.setOverrideCursor(Qt.WaitCursor)
-            stats = import_catalogs_from_preview(
-                self.mysql_repo,
-                self.environment,
-                preview_rows,
-                allow_update_existing=allow_update_existing,
-                progress_callback=self.update_catalog_import_progress,
-                update_fields=selected_update_fields,
-            )
+            if backup_path:
+                self.statusBar().showMessage(f"Backup de seguranca criado: {backup_path}")
             summary = (
                 f"Registros na previa: {stats['rows_total']}\n"
                 f"Empresas processadas: {stats['companies_processed']} | Fornecedores processados: {stats['suppliers_processed']}\n"
@@ -3592,22 +3678,30 @@ class QtSpedApp(QMainWindow):
             QMessageBox.information(self, "Importacao XML Cadastros", summary)
             groups: list[tuple[str, list[str], list[list[object]]]] = []
             if duplicate_rows:
-                groups.append(("Duplicidades no cadastro", ["XML", "Fornecedor ID", "Codigo Forn.", "EAN", "Produto ID", "Descricao", "Motivo"], duplicate_rows))
+                headers = ["XML", "Fornecedor ID", "Codigo Forn.", "EAN", "Produto ID", "Descricao", "Motivo"]
+                groups.append(("Duplicidades no cadastro", headers, limited_rows(duplicate_rows, headers)))
             if change_rows:
-                groups.append(("Mudancas detectadas", ["XML", "Codigo", "Campo", "Valor Atual", "Valor Novo", "Motivo"], change_rows))
+                headers = ["XML", "Codigo", "Campo", "Valor Atual", "Valor Novo", "Motivo"]
+                groups.append(("Mudancas detectadas", headers, limited_rows(change_rows, headers)))
             if self.catalog_import_skipped_product_rows:
                 ignored_rows = [row for row in self.catalog_import_skipped_product_rows if str(row[4]).strip().lower() == "ignorado"]
                 unchanged_rows = [row for row in self.catalog_import_skipped_product_rows if str(row[4]).strip().lower() == "sem alteracao"]
                 if ignored_rows:
-                    groups.append(("Ignorados", ["XML", "Codigo", "EAN", "Descricao", "Status", "Motivo"], ignored_rows))
+                    headers = ["XML", "Codigo", "EAN", "Descricao", "Status", "Motivo"]
+                    groups.append(("Ignorados", headers, limited_rows(ignored_rows, headers)))
                 if unchanged_rows:
-                    groups.append(("Sem alteracao", ["XML", "Codigo", "EAN", "Descricao", "Status", "Motivo"], unchanged_rows))
+                    headers = ["XML", "Codigo", "EAN", "Descricao", "Status", "Motivo"]
+                    groups.append(("Sem alteracao", headers, limited_rows(unchanged_rows, headers)))
             if groups:
                 self.open_multi_table_popup("Resultado consolidado da importacao", groups, width=1560, height=720)
-        except Exception as exc:
-            self.catalog_import_status.setText(f"Falha na importacao: {exc}")
+        finally:
+            QApplication.restoreOverrideCursor()
+
+    def handle_catalog_import_error(self, error_text: str) -> None:
+        try:
+            self.catalog_import_status.setText(f"Falha na importacao: {error_text}")
             self.statusBar().showMessage("Falha na importacao de cadastros via XML.")
-            QMessageBox.critical(self, "Importacao XML Cadastros", str(exc))
+            QMessageBox.critical(self, "Importacao XML Cadastros", error_text)
         finally:
             QApplication.restoreOverrideCursor()
 
@@ -3625,17 +3719,26 @@ class QtSpedApp(QMainWindow):
         checks: dict[str, QCheckBox] = {}
         labels = {
             "descricao": "Descricao",
+            "chave_nfe_origem": "Chave NF-e origem",
             "ncm": "NCM",
             "cest": "CEST",
+            "origem_entrada": "Origem (entrada)",
+            "cfop_saida_fornecedor": "CFOP saida fornecedor",
             "c_classtrib": "cClassTrib",
+            "c_benef": "cBenef",
             "cst_icms": "CST ICMS",
             "reducao_bc_icms": "% Red BC ICMS",
             "aliquota_icms": "% ICMS",
+            "cst_ipi": "CST IPI",
+            "aliquota_ipi": "% IPI",
             "cst_pis": "CST PIS",
             "cst_cofins": "CST COFINS",
+            "cst_pis_cofins": "CST PIS/COFINS",
+            "aliquota_pis_cofins": "% PIS/COFINS",
             "aliquota_pis": "% PIS",
             "aliquota_cofins": "% COFINS",
             "bc_st": "BC ST",
+            "mva": "MVA",
             "valor_icms_st": "Valor ICMS ST",
             "aliquota_icms_st": "% ICMS ST",
         }
@@ -3674,19 +3777,39 @@ class QtSpedApp(QMainWindow):
         return {field for field, check in checks.items() if check.isChecked()}
 
     def build_catalog_import_preview_ui(self) -> None:
+        if getattr(self, "catalog_import_thread", None) is not None:
+            QMessageBox.information(self, "Importacao XML Cadastros", "Ja existe uma operacao de importacao em andamento.")
+            return
         source_value = self.catalog_import_sources_input.text().strip()
         if not source_value:
             QMessageBox.warning(self, "Importacao XML Cadastros", "Selecione XML(s) ou uma pasta com XMLs.")
             return
+        self.catalog_import_preview_rows = []
+        self.catalog_import_ignored_rows = []
+        self.catalog_import_ignored_button.setEnabled(False)
+        self.set_table_rows(self.catalog_import_preview_table, [])
+        self.catalog_import_progress.setValue(0)
+        self.catalog_import_status.setText("Iniciando leitura dos XMLs...")
+        self.statusBar().showMessage("Gerando previa da importacao XML...")
+        QApplication.setOverrideCursor(Qt.WaitCursor)
+
+        self.catalog_import_thread = QThread(self)
+        self.catalog_import_worker = CatalogImportPreviewWorker(self.mysql_repo, self.environment, source_value)
+        self.catalog_import_worker.moveToThread(self.catalog_import_thread)
+        self.catalog_import_thread.started.connect(self.catalog_import_worker.run)
+        self.catalog_import_worker.progress.connect(self.update_catalog_import_progress)
+        self.catalog_import_worker.finished.connect(self.render_catalog_import_preview_results)
+        self.catalog_import_worker.failed.connect(self.handle_catalog_import_preview_error)
+        self.catalog_import_worker.finished.connect(self.catalog_import_thread.quit)
+        self.catalog_import_worker.failed.connect(self.catalog_import_thread.quit)
+        self.catalog_import_thread.finished.connect(self.catalog_import_worker.deleteLater)
+        self.catalog_import_thread.finished.connect(self.catalog_import_thread.deleteLater)
+        self.catalog_import_thread.finished.connect(lambda: setattr(self, "catalog_import_worker", None))
+        self.catalog_import_thread.finished.connect(lambda: setattr(self, "catalog_import_thread", None))
+        self.catalog_import_thread.start()
+
+    def render_catalog_import_preview_results(self, preview_rows: list[CatalogImportPreviewRow], stats: dict[str, int]) -> None:
         try:
-            QApplication.setOverrideCursor(Qt.WaitCursor)
-            self.catalog_import_progress.setValue(0)
-            preview_rows, stats = build_catalog_import_preview(
-                self.mysql_repo,
-                self.environment,
-                source_value,
-                progress_callback=self.update_catalog_import_progress,
-            )
             self.catalog_import_preview_rows = preview_rows
             self.catalog_import_ignored_rows = list(stats.get("ignored_rows", [])) if isinstance(stats, dict) else []
             self.catalog_import_ignored_button.setEnabled(bool(self.catalog_import_ignored_rows))
@@ -3724,8 +3847,11 @@ class QtSpedApp(QMainWindow):
                 f"produtos na previa {stats['products_previewed']} | sem chave {stats['products_skipped_without_key']}."
             )
             self.statusBar().showMessage("Previa da importacao concluida.")
-        except Exception as exc:
-            error_text = str(exc)
+        finally:
+            QApplication.restoreOverrideCursor()
+
+    def handle_catalog_import_preview_error(self, error_text: str) -> None:
+        try:
             if "duplicate entry" in error_text.lower() and "cad_produtos_fornecedor" in error_text.lower():
                 friendly = (
                     "Foram encontrados registros duplicados antigos no cadastro de produtos por fornecedor.\n"
@@ -3775,7 +3901,6 @@ class QtSpedApp(QMainWindow):
         else:
             self.catalog_import_progress.setValue(int((current / total) * 100))
         self.catalog_import_status.setText(message)
-        QApplication.processEvents()
 
     def select_single_file(self, field: QLineEdit, title: str, file_filter: str) -> None:
         file_path, _ = QFileDialog.getOpenFileName(self, title, "", file_filter)
@@ -6311,7 +6436,18 @@ class QtSpedApp(QMainWindow):
         width: int = 1280,
         height: int = 720,
     ) -> None:
-        non_empty_sections = [(name, headers, rows) for name, headers, rows in sections if rows]
+        row_limit = 5000
+        non_empty_sections = []
+        for name, headers, rows in sections:
+            if not rows:
+                continue
+            display_rows = rows
+            if len(rows) > row_limit:
+                omitted = len(rows) - row_limit
+                message_row = [""] * max(1, len(headers))
+                message_row[-1] = f"{omitted} linha(s) omitida(s) para preservar desempenho da tela."
+                display_rows = [*rows[:row_limit], message_row]
+            non_empty_sections.append((name, headers, display_rows))
         if not non_empty_sections:
             QMessageBox.warning(self, title, "Nao ha dados para os filtros atuais.")
             return
