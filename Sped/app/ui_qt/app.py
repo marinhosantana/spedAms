@@ -5579,7 +5579,7 @@ class QtSpedApp(QMainWindow):
         output, selected_filter = QFileDialog.getSaveFileName(
             self,
             "Salvar consulta filtrada",
-            "consulta_entradas_filtrada.xlsx",
+            self.build_export_filename_with_company("consulta_entradas_filtrada.xlsx"),
             "Arquivo Excel (*.xlsx);;Arquivo CSV (*.csv)",
         )
         if not output:
@@ -5704,10 +5704,11 @@ class QtSpedApp(QMainWindow):
         if not rows:
             QMessageBox.warning(self, "Exportar consulta", "Nao ha dados filtrados para exportar.")
             return
+        selected_company_id = int(self.product_page_filter_company_combo.currentData() or 0) if hasattr(self, "product_page_filter_company_combo") else 0
         output, selected_filter = QFileDialog.getSaveFileName(
             self,
             "Salvar produtos filtrados",
-            "produtos_filtrado.xlsx",
+            self.build_export_filename_with_company("produtos_filtrado.xlsx", selected_company_id),
             "Arquivo Excel (*.xlsx);;Arquivo CSV (*.csv)",
         )
         if not output:
@@ -5749,7 +5750,11 @@ class QtSpedApp(QMainWindow):
             self.handle_export_failure("Exportacao Produtos", "produtos", exc)
 
     def export_sale_filter(self) -> None:
-        self.export_consultation_rows(self.filtered_sale_rows, "consulta_saidas_filtrada.xlsx", "Consulta Saidas")
+        self.export_consultation_rows(
+            self.filtered_sale_rows,
+            self.build_export_filename_with_company("consulta_saidas_filtrada.xlsx"),
+            "Consulta Saidas",
+        )
 
     def export_contrib_filter(self, operation_type: str) -> None:
         rows = self.filtered_contrib_entry_rows if operation_type == "Entrada" else self.filtered_contrib_sale_rows
@@ -6214,6 +6219,28 @@ class QtSpedApp(QMainWindow):
         normalized = self.normalize_search_text(value).replace(" ", "_")
         cleaned = "".join(char for char in normalized if char.isalnum() or char in {"_", "-"}).strip("_")
         return cleaned or "popup"
+
+    def build_export_filename_with_company(self, base_name: str, preferred_company_id: int = 0) -> str:
+        stem = Path(str(base_name or "").strip() or "exportacao").stem
+        suffix = Path(str(base_name or "").strip() or "exportacao.xlsx").suffix or ".xlsx"
+        try:
+            companies = self.mysql_repo.list_companies(self.environment)
+        except Exception:
+            companies = []
+        selected_row: dict[str, object] | None = None
+        if preferred_company_id:
+            selected_row = next((row for row in companies if int(row.get("id") or 0) == int(preferred_company_id)), None)
+        if selected_row is None and len(companies) == 1:
+            selected_row = companies[0]
+        if not selected_row:
+            return f"{self.slugify_filename(stem)}{suffix}"
+        company_name = str(selected_row.get("nome", "")).strip()
+        company_cnpj = self.digits_only(str(selected_row.get("cnpj", "")).strip())
+        if not company_name and not company_cnpj:
+            return f"{self.slugify_filename(stem)}{suffix}"
+        company_part = self.slugify_filename(company_name) if company_name else "empresa"
+        cnpj_part = company_cnpj or "sem_cnpj"
+        return f"{self.slugify_filename(stem)}_{company_part}_{cnpj_part}{suffix}"
 
     def get_filtered_launch_details(self) -> list[dict[str, object]]:
         return self.get_launch_details_from_rows(self.filtered_entry_rows, "Entrada")
