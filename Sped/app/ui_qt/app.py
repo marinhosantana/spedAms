@@ -8,7 +8,7 @@ from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Callable
 
-from PySide6.QtCore import QObject, QThread, Qt, Signal
+from PySide6.QtCore import QObject, QThread, QTimer, Qt, Signal
 from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (
     QAbstractItemView,
@@ -318,6 +318,28 @@ class CatalogImportWorker(QObject):
                 update_fields=self.update_fields,
             )
             self.finished.emit(stats, duplicate_rows, change_rows, backup_path)
+        except Exception as exc:
+            self.failed.emit(str(exc))
+
+
+class ProductCatalogWorker(QObject):
+    finished = Signal(object)
+    failed = Signal(str)
+
+    def __init__(self, repository: MysqlCadastroRepository, environment: str) -> None:
+        super().__init__()
+        self.repository = repository
+        self.environment = environment
+
+    def run(self) -> None:
+        try:
+            self.repository.ensure_schema()
+            payload = {
+                "products": self.repository.list_products_catalog(self.environment),
+                "suppliers": self.repository.list_suppliers_catalog(self.environment),
+                "types": self.repository.list_product_types(self.environment),
+            }
+            self.finished.emit(payload)
         except Exception as exc:
             self.failed.emit(str(exc))
 
@@ -993,6 +1015,7 @@ class QtSpedApp(QMainWindow):
                 "aliquota_icms",
                 "cst_ipi",
                 "aliquota_ipi",
+                "cst_pis_cofins",
                 "cst_pis",
                 "cst_pis_saida",
                 "cst_cofins",
@@ -1064,7 +1087,7 @@ class QtSpedApp(QMainWindow):
         product_title = QLabel("Produtos do Fornecedor")
         product_title.setObjectName("sectionTitle")
         product_layout.addWidget(product_title)
-        self.catalog_product_table = self.create_data_table(["ID", "Cod. Forn.", "Cod. Empresa", "Descricao", "Classificacao", "NCM", "Origem (entrada)", "CST ICMS (entrada)", "% Red BC ICMS", "CFOP saida fornecedor", "% ICMS (entrada)", "CFOP entrada empresa", "CST IPI", "% IPI", "CST PIS (entrada)", "% PIS", "CST COFINS (entrada)", "% COFINS", "Natureza da receita", "MVA", "Valor ICMS-ST", "cClassTrib", "cBenef", "Origem (saida)", "CST ICMS (saida)", "CFOP saida empresa", "% ICMS (saida)", "CST PIS (saida)", "CST COFINS (saida)", "Natureza da receita"])
+        self.catalog_product_table = self.create_data_table(["ID", "Cod. Forn.", "Cod. Empresa", "Descricao", "Classificacao", "NCM", "Origem (entrada)", "CST ICMS (entrada)", "% Red BC ICMS", "CFOP saida fornecedor", "% ICMS (entrada)", "CFOP entrada empresa", "CST IPI", "% IPI", "CST PIS (entrada)", "CST PIS_COFINS (ENTRADA EMPRESA)", "% PIS", "CST COFINS (entrada)", "% COFINS", "Natureza da receita", "MVA", "Valor ICMS-ST", "cClassTrib", "cBenef", "Origem (saida)", "CST ICMS (saida)", "CFOP saida empresa", "% ICMS (saida)", "CST PIS (saida)", "CST COFINS (saida)", "Natureza da receita"])
         self.catalog_product_table.setColumnWidth(0, 55)
         self.catalog_product_table.setColumnWidth(1, 90)
         self.catalog_product_table.setColumnWidth(2, 100)
@@ -1080,7 +1103,7 @@ class QtSpedApp(QMainWindow):
         product_form.addWidget(self.catalog_product_type_combo, 0, 1, 1, 3)
         grouped_product_labels = [
             ("Dados Gerais", [("codigo_fornecedor", "Cod. Produto Fornecedor"), ("codigo_empresa", "Cod. Produto Empresa"), ("descricao", "Descricao"), ("ean", "EAN"), ("ncm", "NCM"), ("cest", "CEST")]),
-            ("Tributacao Entrada", [("origem_entrada", "Origem (entrada)"), ("cst_icms", "CST ICMS (entrada)"), ("reducao_bc_icms", "% Red BC ICMS"), ("cfop_saida_fornecedor", "CFOP saida fornecedor"), ("aliquota_icms", "% ICMS (entrada)"), ("cfop_entrada", "CFOP entrada empresa"), ("cst_ipi", "CST IPI"), ("aliquota_ipi", "% IPI"), ("cst_pis", "CST PIS (entrada)"), ("aliquota_pis", "% PIS"), ("cst_cofins", "CST COFINS (entrada)"), ("aliquota_cofins", "% COFINS"), ("natureza_receita_entrada", "Natureza da receita"), ("mva", "MVA"), ("valor_icms_st", "Valor ICMS-ST"), ("c_classtrib", "cClassTrib"), ("c_benef", "cBenef")]),
+            ("Tributacao Entrada", [("origem_entrada", "Origem (entrada)"), ("cst_icms", "CST ICMS (entrada)"), ("reducao_bc_icms", "% Red BC ICMS"), ("cfop_saida_fornecedor", "CFOP saida fornecedor"), ("aliquota_icms", "% ICMS (entrada)"), ("cfop_entrada", "CFOP entrada empresa"), ("cst_ipi", "CST IPI"), ("aliquota_ipi", "% IPI"), ("cst_pis", "CST PIS (entrada)"), ("cst_pis_cofins", "CST PIS_COFINS (ENTRADA EMPRESA)"), ("aliquota_pis", "% PIS"), ("cst_cofins", "CST COFINS (entrada)"), ("aliquota_cofins", "% COFINS"), ("natureza_receita_entrada", "Natureza da receita"), ("mva", "MVA"), ("valor_icms_st", "Valor ICMS-ST"), ("c_classtrib", "cClassTrib"), ("c_benef", "cBenef")]),
             ("Dados de Saida", [("origem_saida", "Origem (saida)"), ("cst_icms_saida", "CST ICMS (saida)"), ("cfop_saida_empresa", "CFOP saida empresa"), ("aliquota_icms_saida", "% ICMS (saida)"), ("cst_pis_saida", "CST PIS (saida)"), ("cst_cofins_saida", "CST COFINS (saida)"), ("natureza_receita_saida", "Natureza da receita")]),
         ]
         current_row = 1
@@ -1247,6 +1270,7 @@ class QtSpedApp(QMainWindow):
                 "aliquota_icms",
                 "cst_ipi",
                 "aliquota_ipi",
+                "cst_pis_cofins",
                 "cst_pis",
                 "cst_pis_saida",
                 "cst_cofins",
@@ -1287,6 +1311,7 @@ class QtSpedApp(QMainWindow):
                 "CST IPI",
                 "% IPI",
                 "CST PIS (entrada)",
+                "CST PIS_COFINS (ENTRADA EMPRESA)",
                 "% PIS",
                 "CST COFINS (entrada)",
                 "% COFINS",
@@ -1337,7 +1362,12 @@ class QtSpedApp(QMainWindow):
         actions = QHBoxLayout()
         actions.addWidget(self.create_button("Exportar", self.export_product_page_filtered))
         actions.addWidget(self.create_button("Limpar Consulta", self.clear_product_page_consultation))
-        actions.addWidget(self.create_button("Atualizar", lambda: self.run_guarded_ui_operation("refresh_product_page", "Atualizando produtos...", self.refresh_product_page), primary=True))
+        self.product_page_refresh_button = self.create_button(
+            "Atualizar",
+            self.start_refresh_product_page_fast,
+            primary=True,
+        )
+        actions.addWidget(self.product_page_refresh_button)
         actions.addWidget(self.create_button("Editar Selecionado", self.edit_product_page_selected))
         actions.addWidget(self.create_button("Excluir", self.delete_product_page))
         actions.addStretch()
@@ -1397,6 +1427,7 @@ class QtSpedApp(QMainWindow):
             ("cst_ipi", "CST IPI"),
             ("aliquota_ipi", "% IPI"),
             ("cst_pis", "CST PIS (entrada)"),
+            ("cst_pis_cofins", "CST PIS_COFINS (ENTRADA EMPRESA)"),
             ("aliquota_pis", "% PIS"),
             ("cst_cofins", "CST COFINS (entrada)"),
             ("aliquota_cofins", "% COFINS"),
@@ -2625,7 +2656,8 @@ class QtSpedApp(QMainWindow):
                     else:
                         item.setTextAlignment(Qt.AlignCenter)
                     table.setItem(row_index, column_index, item)
-            if table.objectName() != "catalog_import_preview" or len(rows) <= 1000:
+            # Evita recalculo pesado de largura no refresh de Produtos.
+            if table.objectName() not in {"catalog_import_preview", "produtos"} or len(rows) <= 1000:
                 self.apply_table_column_policy(table)
         finally:
             table.setUpdatesEnabled(True)
@@ -2703,9 +2735,12 @@ class QtSpedApp(QMainWindow):
             combo.addItem(str(row.get("nome", "")), int(row["id"]))
 
     def fill_supplier_combo(self, combo: QComboBox) -> None:
+        self.fill_supplier_combo_from_rows(combo, self.mysql_repo.list_suppliers_catalog(self.environment))
+
+    def fill_supplier_combo_from_rows(self, combo: QComboBox, rows: list[dict[str, object]]) -> None:
         combo.clear()
         self.catalog_supplier_company_by_id = {}
-        for row in self.mysql_repo.list_suppliers_catalog(self.environment):
+        for row in rows:
             self.catalog_supplier_company_by_id[int(row["id"])] = int(row.get("empresa_id") or 0)
             combo.addItem(f"{row.get('empresa_nome', '')} / {row.get('nome', '')}", int(row["id"]))
 
@@ -2715,9 +2750,11 @@ class QtSpedApp(QMainWindow):
         combo.addItem("Simples Nacional", "SIMPLES_NACIONAL")
 
     def fill_type_combo(self, combo: QComboBox) -> None:
+        self.fill_type_combo_from_rows(combo, self.mysql_repo.list_product_types(self.environment))
+
+    def fill_type_combo_from_rows(self, combo: QComboBox, rows: list[dict[str, object]]) -> None:
         combo.clear()
         combo.addItem("", 0)
-        rows = self.mysql_repo.list_product_types(self.environment)
         for row in rows:
             combo.addItem(str(row.get("nome", "")), int(row["id"]))
 
@@ -2971,6 +3008,7 @@ class QtSpedApp(QMainWindow):
                     row.get("cst_ipi", ""),
                     row.get("aliquota_ipi", ""),
                     row.get("cst_pis", ""),
+                    row.get("cst_pis_cofins", ""),
                     row.get("aliquota_pis", ""),
                     row.get("cst_cofins", ""),
                     row.get("aliquota_cofins", ""),
@@ -2993,6 +3031,214 @@ class QtSpedApp(QMainWindow):
         )
         self.populate_product_filter_combos(rows)
         self.apply_product_page_filters()
+
+    def refresh_product_page_fast(self) -> None:
+        self.fill_supplier_combo(self.product_page_supplier_combo)
+        self.fill_type_combo(self.product_page_type_combo)
+        rows = self.mysql_repo.list_products_catalog(self.environment)
+        self.product_page_rows = {int(row["id"]): row for row in rows}
+        self.set_table_rows(
+            self.product_page_table,
+            [
+                [
+                    row.get("status_produto", ""),
+                    int(row["id"]),
+                    row.get("empresa_nome", ""),
+                    row.get("fornecedor_nome", ""),
+                    row.get("fornecedor_uf", ""),
+                    row.get("tipo_produto", ""),
+                    row.get("codigo_fornecedor", ""),
+                    row.get("codigo_empresa", ""),
+                    row.get("descricao", ""),
+                    row.get("ean", ""),
+                    row.get("ncm", ""),
+                    row.get("cest", ""),
+                    row.get("origem_entrada", ""),
+                    row.get("cst_icms", ""),
+                    row.get("reducao_bc_icms", ""),
+                    row.get("cfop_saida_fornecedor", ""),
+                    row.get("aliquota_icms", ""),
+                    row.get("cfop_entrada", ""),
+                    row.get("cst_ipi", ""),
+                    row.get("aliquota_ipi", ""),
+                    row.get("cst_pis", ""),
+                    row.get("cst_pis_cofins", ""),
+                    row.get("aliquota_pis", ""),
+                    row.get("cst_cofins", ""),
+                    row.get("aliquota_cofins", ""),
+                    row.get("natureza_receita_entrada", ""),
+                    row.get("mva", ""),
+                    row.get("valor_icms_st", ""),
+                    row.get("c_classtrib", ""),
+                    row.get("c_benef", ""),
+                    row.get("origem_saida", ""),
+                    row.get("cst_icms_saida", ""),
+                    row.get("cfop_saida_empresa", ""),
+                    row.get("aliquota_icms_saida", ""),
+                    row.get("cst_pis_saida", ""),
+                    row.get("cst_cofins_saida", ""),
+                    row.get("natureza_receita_saida", ""),
+                    row.get("chave_nfe_origem", ""),
+                ]
+                for row in rows
+            ],
+        )
+        self.populate_product_filter_combos(rows)
+        self.apply_product_page_filters()
+
+    def start_refresh_product_page_fast(self) -> None:
+        if getattr(self, "product_page_refresh_thread", None) is not None:
+            self.statusBar().showMessage("Aguarde a consulta atual terminar.")
+            return
+        if hasattr(self, "product_page_refresh_button"):
+            self.product_page_refresh_button.setEnabled(False)
+        self.statusBar().showMessage("Atualizando produtos...")
+        QApplication.setOverrideCursor(Qt.WaitCursor)
+        QApplication.processEvents()
+        self.product_page_refresh_thread = QThread(self)
+        self.product_page_refresh_worker = ProductCatalogWorker(self.mysql_repo, self.environment)
+        self.product_page_refresh_worker.moveToThread(self.product_page_refresh_thread)
+        self.product_page_refresh_thread.started.connect(self.product_page_refresh_worker.run)
+        self.product_page_refresh_worker.finished.connect(self.handle_product_page_refresh_finished)
+        self.product_page_refresh_worker.failed.connect(self.handle_product_page_refresh_failed)
+        self.product_page_refresh_worker.finished.connect(self.product_page_refresh_thread.quit)
+        self.product_page_refresh_worker.failed.connect(self.product_page_refresh_thread.quit)
+        self.product_page_refresh_thread.finished.connect(self.product_page_refresh_worker.deleteLater)
+        self.product_page_refresh_thread.finished.connect(self.product_page_refresh_thread.deleteLater)
+        self.product_page_refresh_thread.finished.connect(lambda: setattr(self, "product_page_refresh_worker", None))
+        self.product_page_refresh_thread.finished.connect(lambda: setattr(self, "product_page_refresh_thread", None))
+        self.product_page_refresh_thread.start()
+
+    def handle_product_page_refresh_finished(self, payload: object) -> None:
+        try:
+            data = payload if isinstance(payload, dict) else {}
+            rows = list(data.get("products", []))
+            supplier_rows = list(data.get("suppliers", []))
+            type_rows = list(data.get("types", []))
+            self.fill_supplier_combo_from_rows(self.product_page_supplier_combo, supplier_rows)
+            self.fill_type_combo_from_rows(self.product_page_type_combo, type_rows)
+            self.product_page_rows = {int(row["id"]): row for row in rows}
+            table_rows = [
+                [
+                    row.get("status_produto", ""),
+                    int(row["id"]),
+                    row.get("empresa_nome", ""),
+                    row.get("fornecedor_nome", ""),
+                    row.get("fornecedor_uf", ""),
+                    row.get("tipo_produto", ""),
+                    row.get("codigo_fornecedor", ""),
+                    row.get("codigo_empresa", ""),
+                    row.get("descricao", ""),
+                    row.get("ean", ""),
+                    row.get("ncm", ""),
+                    row.get("cest", ""),
+                    row.get("origem_entrada", ""),
+                    row.get("cst_icms", ""),
+                    row.get("reducao_bc_icms", ""),
+                    row.get("cfop_saida_fornecedor", ""),
+                    row.get("aliquota_icms", ""),
+                    row.get("cfop_entrada", ""),
+                    row.get("cst_ipi", ""),
+                    row.get("aliquota_ipi", ""),
+                    row.get("cst_pis", ""),
+                    row.get("cst_pis_cofins", ""),
+                    row.get("aliquota_pis", ""),
+                    row.get("cst_cofins", ""),
+                    row.get("aliquota_cofins", ""),
+                    row.get("natureza_receita_entrada", ""),
+                    row.get("mva", ""),
+                    row.get("valor_icms_st", ""),
+                    row.get("c_classtrib", ""),
+                    row.get("c_benef", ""),
+                    row.get("origem_saida", ""),
+                    row.get("cst_icms_saida", ""),
+                    row.get("cfop_saida_empresa", ""),
+                    row.get("aliquota_icms_saida", ""),
+                    row.get("cst_pis_saida", ""),
+                    row.get("cst_cofins_saida", ""),
+                    row.get("natureza_receita_saida", ""),
+                    row.get("chave_nfe_origem", ""),
+                ]
+                for row in rows
+            ]
+            self._start_product_page_table_render(table_rows, rows)
+        except Exception as exc:
+            QMessageBox.critical(self, "Produtos", str(exc))
+            self.statusBar().showMessage("Falha na atualizacao de produtos.")
+
+    def handle_product_page_refresh_failed(self, error: str) -> None:
+        QMessageBox.critical(self, "Produtos", error)
+        self.statusBar().showMessage("Falha na atualizacao de produtos.")
+        if hasattr(self, "product_page_refresh_button"):
+            self.product_page_refresh_button.setEnabled(True)
+        QApplication.restoreOverrideCursor()
+        QApplication.processEvents()
+
+    def _start_product_page_table_render(self, table_rows: list[list[object]], source_rows: list[dict[str, object]]) -> None:
+        table = self.product_page_table
+        self._product_render_rows = table_rows
+        self._product_render_source_rows = source_rows
+        self._product_render_index = 0
+        self._product_render_chunk_size = 25
+        self._product_render_header_labels = [
+            (table.horizontalHeaderItem(index).text().strip().lower() if table.horizontalHeaderItem(index) else "")
+            for index in range(table.columnCount())
+        ]
+        self._product_render_sorting = table.isSortingEnabled()
+        if self._product_render_sorting:
+            table.setSortingEnabled(False)
+        table.setUpdatesEnabled(False)
+        table.setRowCount(len(table_rows))
+        self._product_rows_all_visible = True
+        QTimer.singleShot(0, self._continue_product_page_table_render)
+
+    def _continue_product_page_table_render(self) -> None:
+        table = self.product_page_table
+        rows = getattr(self, "_product_render_rows", [])
+        header_labels = getattr(self, "_product_render_header_labels", [])
+        start_index = int(getattr(self, "_product_render_index", 0))
+        chunk_size = int(getattr(self, "_product_render_chunk_size", 100))
+        end_index = min(start_index + chunk_size, len(rows))
+        for row_index in range(start_index, end_index):
+            row = rows[row_index]
+            for column_index, value in enumerate(row):
+                display_value = str(value)
+                header_label = header_labels[column_index] if column_index < len(header_labels) else ""
+                if header_label == "cnpj":
+                    display_value = self.format_cnpj(display_value)
+                elif header_label == "ie":
+                    display_value = self.format_ie(display_value)
+                item = QTableWidgetItem(display_value)
+                item.setForeground(QColor(COLORS["text"]))
+                if header_label in {"descricao", "produto"}:
+                    item.setTextAlignment(Qt.AlignVCenter | Qt.AlignLeft)
+                else:
+                    item.setTextAlignment(Qt.AlignCenter)
+                table.setItem(row_index, column_index, item)
+        self._product_render_index = end_index
+        if end_index < len(rows):
+            self.statusBar().showMessage(f"Atualizando produtos... ({end_index}/{len(rows)})")
+            QTimer.singleShot(1, self._continue_product_page_table_render)
+            return
+        try:
+            self.populate_product_filter_combos(getattr(self, "_product_render_source_rows", []))
+            self.apply_product_page_filters()
+            self.statusBar().showMessage("Produtos atualizados.")
+        except Exception as exc:
+            QMessageBox.critical(self, "Produtos", str(exc))
+            self.statusBar().showMessage("Falha na atualizacao de produtos.")
+        finally:
+            table.setUpdatesEnabled(True)
+            if bool(getattr(self, "_product_render_sorting", False)):
+                table.setSortingEnabled(True)
+            self._product_render_rows = []
+            self._product_render_source_rows = []
+            self._product_render_header_labels = []
+            self._product_render_index = 0
+            if hasattr(self, "product_page_refresh_button"):
+                self.product_page_refresh_button.setEnabled(True)
+            QApplication.restoreOverrideCursor()
+            QApplication.processEvents()
 
     def populate_product_filter_combos(self, rows: list[dict[str, object]]) -> None:
         selected_company_id = int(self.product_page_filter_company_combo.currentData() or 0)
@@ -3041,6 +3287,16 @@ class QtSpedApp(QMainWindow):
         selected_supplier_id = int(self.product_page_filter_supplier_combo.currentData() or 0)
         search_text = self.product_page_search_input.text().strip().lower() if hasattr(self, "product_page_search_input") else ""
         id_column = self.get_table_id_column_index(self.product_page_table)
+        if not selected_company_id and not selected_supplier_id and not search_text:
+            if bool(getattr(self, "_product_rows_all_visible", False)):
+                self.refresh_product_metrics()
+                return
+            for row_index in range(self.product_page_table.rowCount()):
+                self.product_page_table.setRowHidden(row_index, False)
+            self._product_rows_all_visible = True
+            self.refresh_product_metrics()
+            return
+        self._product_rows_all_visible = False
         for row_index in range(self.product_page_table.rowCount()):
             row_id_item = self.product_page_table.item(row_index, id_column)
             row_id = int(row_id_item.text()) if row_id_item and row_id_item.text().isdigit() else 0
@@ -3056,8 +3312,6 @@ class QtSpedApp(QMainWindow):
             )
             text_ok = not search_text or search_text in row_text
             self.product_page_table.setRowHidden(row_index, not (company_ok and supplier_ok and text_ok))
-        self.product_page_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeToContents)
-        self.product_page_table.resizeColumnsToContents()
         self.refresh_product_metrics()
 
     def refresh_product_metrics(self) -> None:
@@ -3292,6 +3546,7 @@ class QtSpedApp(QMainWindow):
                     row.get("cst_ipi", ""),
                     row.get("aliquota_ipi", ""),
                     row.get("cst_pis", ""),
+                    row.get("cst_pis_cofins", ""),
                     row.get("aliquota_pis", ""),
                     row.get("cst_cofins", ""),
                     row.get("aliquota_cofins", ""),
@@ -8566,5 +8821,7 @@ class QtSpedApp(QMainWindow):
             sorted_invoice_details,
             operation_type,
         )
+
+
 
 
