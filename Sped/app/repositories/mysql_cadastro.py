@@ -1103,7 +1103,7 @@ class MysqlCadastroRepository:
         cst_cofins = self._trim_text(data.get("cst_cofins", data.get("cst_pis_cofins", "")), 4)
         aliquota_pis = self._decimal_text(data.get("aliquota_pis", data.get("aliquota_pis_cofins", "")))
         aliquota_cofins = self._decimal_text(data.get("aliquota_cofins", data.get("aliquota_pis_cofins", "")))
-        cst_pis_cofins = self._trim_text(data.get("cst_pis_cofins", f"{cst_pis}/{cst_cofins}".strip("/")), 20)
+        cst_pis_cofins = self._trim_text(data.get("cst_pis_cofins", ""), 20)
         aliquota_pis_cofins = self._decimal_text(data.get("aliquota_pis_cofins", aliquota_pis))
 
         normalized_code = self._trim_text(data.get("codigo_fornecedor", ""), 80)

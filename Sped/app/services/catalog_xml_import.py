@@ -541,7 +541,7 @@ def _supplier_product_values(repository: MysqlCadastroRepository, supplier_id: i
     cst_cofins = repository._trim_text(data.get("cst_cofins", data.get("cst_pis_cofins", "")), 4)
     aliquota_pis = repository._decimal_text(data.get("aliquota_pis", data.get("aliquota_pis_cofins", "")))
     aliquota_cofins = repository._decimal_text(data.get("aliquota_cofins", data.get("aliquota_pis_cofins", "")))
-    cst_pis_cofins = repository._trim_text(data.get("cst_pis_cofins", f"{cst_pis}/{cst_cofins}".strip("/")), 20)
+    cst_pis_cofins = repository._trim_text(data.get("cst_pis_cofins", ""), 20)
     aliquota_pis_cofins = repository._decimal_text(data.get("aliquota_pis_cofins", aliquota_pis))
     normalized_ean = repository._only_digits(data.get("ean", ""))[:30]
     return (
@@ -608,7 +608,7 @@ def _payload_from_preview_row(row: CatalogImportPreviewRow) -> dict[str, object]
         "cst_cofins": row.cst_cofins,
         "aliquota_pis": row.aliquota_pis,
         "aliquota_cofins": row.aliquota_cofins,
-        "cst_pis_cofins": f"{row.cst_pis}/{row.cst_cofins}".strip("/"),
+        "cst_pis_cofins": "",
         "aliquota_pis_cofins": row.aliquota_pis,
         "bc_st": row.bc_st,
         "mva": row.mva,
