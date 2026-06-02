@@ -30,6 +30,7 @@ from PySide6.QtWidgets import (
     QMenu,
     QProgressBar,
     QPushButton,
+    QScrollArea,
     QSizePolicy,
     QStackedWidget,
     QTabWidget,
@@ -445,7 +446,7 @@ class QtSpedApp(QMainWindow):
         self.entry_exit_totals: dict[str, Decimal] = {}
 
         self.setWindowTitle(self.app_window_title)
-        self.resize(1360, 820)
+        self.resize(*self.initial_window_size(1360, 820))
         self.apply_styles()
         self.build_shell()
         self.show_page(0, "Dashboard")
@@ -464,6 +465,10 @@ class QtSpedApp(QMainWindow):
                 color: {COLORS["text"]};
                 font-family: Segoe UI;
                 font-size: 14px;
+            }}
+            QStackedWidget, QScrollArea#pageScroll, QWidget#pageScrollViewport, QWidget#scrollPage {{
+                background: {COLORS["bg"]};
+                border: 0;
             }}
             QMessageBox {{
                 background: {COLORS["panel"]};
@@ -624,6 +629,9 @@ class QtSpedApp(QMainWindow):
                 background: #ffffff;
                 top: -1px;
             }}
+            QTabWidget, QTabBar {{
+                background: {COLORS["bg"]};
+            }}
             QTabBar::tab {{
                 background: #edf3f7;
                 color: {COLORS["text"]};
@@ -644,6 +652,21 @@ class QtSpedApp(QMainWindow):
             QTabBar::tab:hover:!selected {{
                 background: #dbeafe;
                 color: {COLORS["text"]};
+            }}
+            QWidget#productFormTab QLineEdit, QWidget#productFormTab QComboBox {{
+                padding: 3px 8px;
+                min-height: 18px;
+                max-height: 28px;
+            }}
+            QWidget#productFormTab QLabel {{
+                font-size: 13px;
+            }}
+            QTabWidget#productTribTabs::pane {{
+                top: -1px;
+            }}
+            QTabWidget#productTribTabs QTabBar::tab {{
+                padding: 6px 14px;
+                min-width: 82px;
             }}
             QTableWidget {{
                 background: #ffffff;
@@ -716,6 +739,44 @@ class QtSpedApp(QMainWindow):
             }}
             """
         )
+
+    def available_screen_geometry(self):
+        screen = self.screen() or QApplication.primaryScreen()
+        if screen is None:
+            return None
+        return screen.availableGeometry()
+
+    def initial_window_size(self, preferred_width: int, preferred_height: int) -> tuple[int, int]:
+        geometry = self.available_screen_geometry()
+        if geometry is None:
+            return preferred_width, preferred_height
+        return (
+            min(preferred_width, max(720, int(geometry.width() * 0.92))),
+            min(preferred_height, max(560, int(geometry.height() * 0.88))),
+        )
+
+    def resize_dialog_to_screen(self, dialog: QDialog, preferred_width: int, preferred_height: int) -> None:
+        geometry = self.available_screen_geometry()
+        if geometry is None:
+            dialog.resize(preferred_width, preferred_height)
+            return
+        width = min(preferred_width, max(420, int(geometry.width() * 0.94)))
+        height = min(preferred_height, max(360, int(geometry.height() * 0.90)))
+        dialog.resize(width, height)
+
+    def make_scrollable_page(self, page: QWidget) -> QScrollArea:
+        scroll = QScrollArea()
+        scroll.setObjectName("pageScroll")
+        scroll.viewport().setObjectName("pageScrollViewport")
+        if not page.objectName():
+            page.setObjectName("scrollPage")
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        page.setAutoFillBackground(True)
+        scroll.setWidget(page)
+        return scroll
 
     def build_shell(self) -> None:
         root = QWidget()
@@ -831,25 +892,29 @@ class QtSpedApp(QMainWindow):
         content_layout.addLayout(header)
 
         self.stack = QStackedWidget()
-        self.stack.addWidget(self.build_dashboard_page())
-        self.stack.addWidget(self.build_entry_page())
-        self.stack.addWidget(self.build_sale_page())
-        self.stack.addWidget(self.build_contrib_page("Entrada"))
-        self.stack.addWidget(self.build_contrib_page("Saida"))
-        self.stack.addWidget(self.build_xml_page())
-        self.stack.addWidget(self.build_compare_page())
-        self.stack.addWidget(self.build_runtime_rules_page())
-        self.stack.addWidget(self.build_archives_page())
-        self.stack.addWidget(self.build_catalog_company_page())
-        self.stack.addWidget(self.build_catalog_supplier_page())
-        self.stack.addWidget(self.build_catalog_type_page())
-        self.stack.addWidget(self.build_catalog_product_page())
-        self.stack.addWidget(self.build_catalog_import_page())
-        self.stack.addWidget(self.build_settings_page())
-        self.stack.addWidget(self.build_duplicates_cleanup_page())
-        self.stack.addWidget(self.build_nfe_key_extract_page())
-        self.stack.addWidget(self.build_entry_exit_page())
-        self.stack.addWidget(self.build_catalog_ncm_page())
+        pages = (
+            self.build_dashboard_page(),
+            self.build_entry_page(),
+            self.build_sale_page(),
+            self.build_contrib_page("Entrada"),
+            self.build_contrib_page("Saida"),
+            self.build_xml_page(),
+            self.build_compare_page(),
+            self.build_runtime_rules_page(),
+            self.build_archives_page(),
+            self.build_catalog_company_page(),
+            self.build_catalog_supplier_page(),
+            self.build_catalog_type_page(),
+            self.build_catalog_product_page(),
+            self.build_catalog_import_page(),
+            self.build_settings_page(),
+            self.build_duplicates_cleanup_page(),
+            self.build_nfe_key_extract_page(),
+            self.build_entry_exit_page(),
+            self.build_catalog_ncm_page(),
+        )
+        for page in pages:
+            self.stack.addWidget(self.make_scrollable_page(page))
         content_layout.addWidget(self.stack, 1)
         shell.addWidget(content, 1)
         self.setCentralWidget(root)
@@ -1288,6 +1353,10 @@ class QtSpedApp(QMainWindow):
         self.product_page_type_combo = QComboBox()
         self.product_page_filter_company_combo = QComboBox()
         self.product_page_filter_supplier_combo = QComboBox()
+        for field in self.product_page_fields.values():
+            self.make_product_input_compact(field)
+        self.make_product_input_compact(self.product_page_supplier_combo)
+        self.make_product_input_compact(self.product_page_type_combo)
         self.product_page_table = self.create_data_table(
             [
                 "Status",
@@ -1396,12 +1465,13 @@ class QtSpedApp(QMainWindow):
         self.product_page_tabs.addTab(consult_tab, "Consulta")
 
         form_tab = QWidget()
+        form_tab.setObjectName("productFormTab")
         form_layout = QVBoxLayout(form_tab)
-        form_layout.setContentsMargins(10, 10, 10, 10)
-        form_layout.setSpacing(8)
+        form_layout.setContentsMargins(8, 6, 8, 6)
+        form_layout.setSpacing(5)
         form = QGridLayout()
         form.setHorizontalSpacing(8)
-        form.setVerticalSpacing(6)
+        form.setVerticalSpacing(4)
         form.addWidget(QLabel("Fornecedor"), 0, 0)
         form.addWidget(self.product_page_supplier_combo, 0, 1, 1, 3)
         form.addWidget(QLabel("Classificacao do Produto"), 1, 0)
@@ -1457,10 +1527,12 @@ class QtSpedApp(QMainWindow):
         current_row += (len(gerais_fields) + 1) // 2 + 1
 
         trib_tabs = QTabWidget()
+        trib_tabs.setObjectName("productTribTabs")
         entrada_tab = QWidget()
         entrada_grid = QGridLayout(entrada_tab)
+        entrada_grid.setContentsMargins(8, 6, 8, 6)
         entrada_grid.setHorizontalSpacing(8)
-        entrada_grid.setVerticalSpacing(6)
+        entrada_grid.setVerticalSpacing(4)
         for index, (key, label) in enumerate(entrada_fields):
             row = index // 2
             column = 0 if index % 2 == 0 else 2
@@ -1469,8 +1541,9 @@ class QtSpedApp(QMainWindow):
 
         saida_tab = QWidget()
         saida_grid = QGridLayout(saida_tab)
+        saida_grid.setContentsMargins(8, 6, 8, 6)
         saida_grid.setHorizontalSpacing(8)
-        saida_grid.setVerticalSpacing(6)
+        saida_grid.setVerticalSpacing(4)
         for index, (key, label) in enumerate(saida_fields):
             row = index // 2
             column = 0 if index % 2 == 0 else 2
@@ -2604,11 +2677,18 @@ class QtSpedApp(QMainWindow):
         layout.setContentsMargins(12, 10, 12, 10)
         key = QLabel(label)
         key.setObjectName("metricKey")
+        key.setWordWrap(True)
         value_label = QLabel(value)
         value_label.setObjectName("metricValue")
+        value_label.setWordWrap(True)
+        value_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
         layout.addWidget(key)
         layout.addWidget(value_label)
         return card, value_label
+
+    def make_product_input_compact(self, widget: QWidget) -> None:
+        widget.setMinimumHeight(24)
+        widget.setMaximumHeight(30)
 
     def add_path_row(self, layout: QGridLayout, row: int, label: str, field: QLineEdit, select_callback: Callable[[], None], clear_callback: Callable[[], None]) -> None:
         label_widget = QLabel(label)
@@ -4113,7 +4193,7 @@ class QtSpedApp(QMainWindow):
         dialog = QDialog(self)
         dialog.setWindowTitle("Selecionar Campos para Atualizacao")
         dialog.setObjectName("popupDialog")
-        dialog.resize(700, 520)
+        self.resize_dialog_to_screen(dialog, 700, 520)
         layout = QVBoxLayout(dialog)
         layout.setContentsMargins(16, 16, 16, 16)
         layout.setSpacing(10)
@@ -4673,7 +4753,7 @@ class QtSpedApp(QMainWindow):
         dialog = QDialog(self)
         dialog.setObjectName("popupDialog")
         dialog.setWindowTitle("Editar Regra Dinamica" if replace_rule_line else "Adicionar Regra Dinamica")
-        dialog.resize(980, 560)
+        self.resize_dialog_to_screen(dialog, 980, 560)
 
         container = QVBoxLayout(dialog)
         container.setContentsMargins(16, 16, 16, 16)
@@ -6558,7 +6638,7 @@ class QtSpedApp(QMainWindow):
         dialog = QDialog(self)
         dialog.setObjectName("popupDialog")
         dialog.setWindowTitle(title)
-        dialog.resize(width, height)
+        self.resize_dialog_to_screen(dialog, width, height)
         dialog.setStyleSheet(self.styleSheet())
         layout = QVBoxLayout(dialog)
         layout.setContentsMargins(12, 12, 12, 12)
@@ -6858,7 +6938,7 @@ class QtSpedApp(QMainWindow):
         dialog = QDialog(self)
         dialog.setObjectName("popupDialog")
         dialog.setWindowTitle(title)
-        dialog.resize(width, height)
+        self.resize_dialog_to_screen(dialog, width, height)
         dialog.setStyleSheet(self.styleSheet())
         layout = QVBoxLayout(dialog)
         layout.setContentsMargins(12, 12, 12, 12)
@@ -7278,7 +7358,7 @@ class QtSpedApp(QMainWindow):
         dialog = QDialog(self)
         dialog.setObjectName("popupDialog")
         dialog.setWindowTitle(title)
-        dialog.resize(1320, 760)
+        self.resize_dialog_to_screen(dialog, 1320, 760)
         dialog.setStyleSheet(self.styleSheet())
         layout = QVBoxLayout(dialog)
         layout.setContentsMargins(12, 12, 12, 12)
@@ -7434,7 +7514,7 @@ class QtSpedApp(QMainWindow):
         dialog = QDialog(self)
         dialog.setObjectName("popupDialog")
         dialog.setWindowTitle(title)
-        dialog.resize(1180, 700)
+        self.resize_dialog_to_screen(dialog, 1180, 700)
         dialog.setStyleSheet(self.styleSheet())
         layout = QVBoxLayout(dialog)
         layout.setContentsMargins(12, 12, 12, 12)
@@ -7756,7 +7836,7 @@ class QtSpedApp(QMainWindow):
         dialog = QDialog(self)
         dialog.setObjectName("popupDialog")
         dialog.setWindowTitle(title)
-        dialog.resize(1460, 760)
+        self.resize_dialog_to_screen(dialog, 1460, 760)
         dialog.setStyleSheet(self.styleSheet())
         layout = QVBoxLayout(dialog)
         layout.setContentsMargins(12, 12, 12, 12)
@@ -7982,7 +8062,7 @@ class QtSpedApp(QMainWindow):
         dialog = QDialog(self)
         dialog.setObjectName("popupDialog")
         dialog.setWindowTitle(title)
-        dialog.resize(1320, 760)
+        self.resize_dialog_to_screen(dialog, 1320, 760)
         dialog.setStyleSheet(self.styleSheet())
         layout = QVBoxLayout(dialog)
         layout.setContentsMargins(12, 12, 12, 12)
@@ -8264,7 +8344,7 @@ class QtSpedApp(QMainWindow):
         dialog = QDialog(self)
         dialog.setObjectName("popupDialog")
         dialog.setWindowTitle(f"Detalhamento - {operation_type}s")
-        dialog.resize(1420, 760)
+        self.resize_dialog_to_screen(dialog, 1420, 760)
         dialog.setStyleSheet(self.styleSheet())
         layout = QVBoxLayout(dialog)
         layout.setContentsMargins(12, 12, 12, 12)
@@ -8480,7 +8560,7 @@ class QtSpedApp(QMainWindow):
         dialog = QDialog(self)
         dialog.setObjectName("popupDialog")
         dialog.setWindowTitle(title)
-        dialog.resize(1220, 700)
+        self.resize_dialog_to_screen(dialog, 1220, 700)
         dialog.setStyleSheet(self.styleSheet())
         layout = QVBoxLayout(dialog)
         layout.setContentsMargins(12, 12, 12, 12)
@@ -8609,7 +8689,7 @@ class QtSpedApp(QMainWindow):
         dialog = QDialog(self)
         dialog.setObjectName("popupDialog")
         dialog.setWindowTitle(f"Espelho de Documentos Fiscais - {caption}")
-        dialog.resize(1380, 720)
+        self.resize_dialog_to_screen(dialog, 1380, 720)
         dialog.setStyleSheet(self.styleSheet())
         layout = QVBoxLayout(dialog)
         layout.setContentsMargins(12, 12, 12, 12)
