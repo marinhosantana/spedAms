@@ -8,7 +8,7 @@ from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Callable
 
-from PySide6.QtCore import QObject, QThread, QTimer, Qt, Signal
+from PySide6.QtCore import QAbstractTableModel, QModelIndex, QObject, QThread, QTimer, Qt, Signal
 from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (
     QAbstractItemView,
@@ -36,6 +36,7 @@ from PySide6.QtWidgets import (
     QTabWidget,
     QTableWidget,
     QTableWidgetItem,
+    QTableView,
     QTextEdit,
     QVBoxLayout,
     QWidget,
@@ -341,6 +342,70 @@ class ProductCatalogWorker(QObject):
                 "types": self.repository.list_product_types(self.environment),
             }
             self.finished.emit(payload)
+        except Exception as exc:
+            self.failed.emit(str(exc))
+
+
+class ProductTableModel(QAbstractTableModel):
+    def __init__(self, headers: list[str]) -> None:
+        super().__init__()
+        self.headers = headers
+        self.rows: list[list[object]] = []
+
+    def rowCount(self, parent: QModelIndex = QModelIndex()) -> int:
+        return 0 if parent.isValid() else len(self.rows)
+
+    def columnCount(self, parent: QModelIndex = QModelIndex()) -> int:
+        return 0 if parent.isValid() else len(self.headers)
+
+    def data(self, index: QModelIndex, role: int = Qt.DisplayRole) -> object:
+        if not index.isValid():
+            return None
+        if role == Qt.DisplayRole:
+            return str(self.rows[index.row()][index.column()])
+        if role == Qt.TextAlignmentRole:
+            header = self.headers[index.column()].strip().lower()
+            return Qt.AlignVCenter | Qt.AlignLeft if header in {"descrição", "descricao", "produto"} else Qt.AlignCenter
+        return None
+
+    def headerData(self, section: int, orientation: Qt.Orientation, role: int = Qt.DisplayRole) -> object:
+        if role == Qt.DisplayRole and orientation == Qt.Horizontal and 0 <= section < len(self.headers):
+            return self.headers[section]
+        return None
+
+    def set_rows(self, rows: list[list[object]]) -> None:
+        self.beginResetModel()
+        self.rows = rows
+        self.endResetModel()
+
+    def row_id(self, row_index: int) -> int:
+        if row_index < 0 or row_index >= len(self.rows):
+            return 0
+        value = self.rows[row_index][1] if len(self.rows[row_index]) > 1 else 0
+        return int(value) if str(value).isdigit() else 0
+
+
+class ProductReviewImportWorker(QObject):
+    finished = Signal(dict)
+    failed = Signal(str)
+    progress = Signal(int, int, str)
+
+    def __init__(self, repository: MysqlCadastroRepository, environment: str, company_id: int, excel_path: Path) -> None:
+        super().__init__()
+        self.repository = repository
+        self.environment = environment
+        self.company_id = company_id
+        self.excel_path = excel_path
+
+    def run(self) -> None:
+        try:
+            stats = self.repository.import_reviewed_products_from_excel(
+                self.environment,
+                self.company_id,
+                self.excel_path,
+                progress_callback=self.progress.emit,
+            )
+            self.finished.emit(stats)
         except Exception as exc:
             self.failed.emit(str(exc))
 
@@ -934,13 +999,16 @@ class QtSpedApp(QMainWindow):
             self.set_sidebar_collapsed(True)
             if title == "SPEDs Arquivados":
                 self.refresh_archives()
-            if title in {"Empresas", "Fornecedores", "Classificacao do Produto", "Produtos"}:
+            if title in {"Empresas", "Fornecedores", "Classificacao do Produto"}:
                 self.refresh_current_catalog_page()
+            if title == "Produtos":
+                QTimer.singleShot(100, self.start_refresh_product_page_fast)
             if title == "Limpeza Duplicados":
                 self.refresh_duplicates_cleanup_page()
             if title == "Consulta Saidas":
                 self.sync_sale_page_with_entry_cache()
-            self.statusBar().showMessage(f"{title} carregada.")
+            if title != "Produtos":
+                self.statusBar().showMessage(f"{title} carregada.")
         finally:
             QApplication.restoreOverrideCursor()
             self.setEnabled(True)
@@ -1357,48 +1425,47 @@ class QtSpedApp(QMainWindow):
             self.make_product_input_compact(field)
         self.make_product_input_compact(self.product_page_supplier_combo)
         self.make_product_input_compact(self.product_page_type_combo)
-        self.product_page_table = self.create_data_table(
-            [
-                "Status",
-                "ID",
-                "Empresa",
-                "Fornecedor",
-                "UF",
-                "Classificação",
-                "Cod. Forn.",
-                "Cod. Empresa",
-                "Descrição",
-                "EAN",
-                "NCM",
-                "CEST",
-                "Origem (entrada)",
-                "CST ICMS (entrada)",
-                "% Red BC ICMS",
-                "CFOP saída fornecedor",
-                "% ICMS (entrada)",
-                "CFOP entrada empresa",
-                "CST IPI",
-                "% IPI",
-                "CST PIS (entrada)",
-                "CST PIS_COFINS (ENTRADA EMPRESA)",
-                "% PIS",
-                "CST COFINS (entrada)",
-                "% COFINS",
-                "Natureza da receita",
-                "MVA",
-                "Valor ICMS-ST",
-                "cClassTrib",
-                "cBenef",
-                "Origem (saída)",
-                "CST ICMS (saída)",
-                "CFOP saída empresa",
-                "% ICMS (saída)",
-                "CST PIS (saída)",
-                "CST COFINS (saída)",
-                "Natureza da receita",
-                "Chave NFe origem",
-            ]
-        )
+        self.product_page_full_headers = [
+            "Status",
+            "ID",
+            "Empresa",
+            "Fornecedor",
+            "UF",
+            "Classificação",
+            "Cod. Forn.",
+            "Cod. Empresa",
+            "Descrição",
+            "EAN",
+            "NCM",
+            "CEST",
+            "Origem (entrada)",
+            "CST ICMS (entrada)",
+            "% Red BC ICMS",
+            "CFOP saída fornecedor",
+            "% ICMS (entrada)",
+            "CFOP entrada empresa",
+            "CST IPI",
+            "% IPI",
+            "CST PIS (entrada)",
+            "CST PIS_COFINS (ENTRADA EMPRESA)",
+            "% PIS",
+            "CST COFINS (entrada)",
+            "% COFINS",
+            "Natureza da receita",
+            "MVA",
+            "Valor ICMS-ST",
+            "cClassTrib",
+            "cBenef",
+            "Origem (saída)",
+            "CST ICMS (saída)",
+            "CFOP saída empresa",
+            "% ICMS (saída)",
+            "CST PIS (saída)",
+            "CST COFINS (saída)",
+            "Natureza da receita",
+            "Chave NFe origem",
+        ]
+        self.product_page_table = self.create_product_table_view(self.product_page_full_headers[:12])
         self.product_page_table.setObjectName("produtos")
         self.product_page_tabs = QTabWidget()
 
@@ -1487,23 +1554,25 @@ class QtSpedApp(QMainWindow):
             ("c_classtrib", "cClassTrib"),
             ("c_benef", "cBenef"),
         ]
-        entrada_fields = [
+        importacao_xml_fields = [
             ("origem_entrada", "Origem (entrada)"),
             ("cst_icms", "CST ICMS (entrada)"),
             ("reducao_bc_icms", "% Red BC ICMS"),
             ("cfop_saida_fornecedor", "CFOP saida fornecedor"),
             ("aliquota_icms", "% ICMS (entrada)"),
-            ("cfop_entrada", "CFOP entrada empresa"),
             ("cst_ipi", "CST IPI"),
             ("aliquota_ipi", "% IPI"),
             ("cst_pis", "CST PIS (entrada)"),
-            ("cst_pis_cofins", "CST PIS_COFINS (ENTRADA EMPRESA)"),
             ("aliquota_pis", "% PIS"),
             ("cst_cofins", "CST COFINS (entrada)"),
             ("aliquota_cofins", "% COFINS"),
-            ("natureza_receita_entrada", "Natureza da receita"),
             ("mva", "MVA"),
             ("valor_icms_st", "Valor ICMS-ST"),
+        ]
+        entrada_empresa_fields = [
+            ("cfop_entrada", "CFOP entrada empresa"),
+            ("cst_pis_cofins", "CST PIS_COFINS entrada empresa"),
+            ("natureza_receita_entrada", "Natureza da receita"),
         ]
         saida_fields = [
             ("origem_saida", "Origem (saida)"),
@@ -1528,16 +1597,27 @@ class QtSpedApp(QMainWindow):
 
         trib_tabs = QTabWidget()
         trib_tabs.setObjectName("productTribTabs")
-        entrada_tab = QWidget()
-        entrada_grid = QGridLayout(entrada_tab)
-        entrada_grid.setContentsMargins(8, 6, 8, 6)
-        entrada_grid.setHorizontalSpacing(8)
-        entrada_grid.setVerticalSpacing(4)
-        for index, (key, label) in enumerate(entrada_fields):
+        importacao_xml_tab = QWidget()
+        importacao_xml_grid = QGridLayout(importacao_xml_tab)
+        importacao_xml_grid.setContentsMargins(8, 6, 8, 6)
+        importacao_xml_grid.setHorizontalSpacing(8)
+        importacao_xml_grid.setVerticalSpacing(4)
+        for index, (key, label) in enumerate(importacao_xml_fields):
             row = index // 2
             column = 0 if index % 2 == 0 else 2
-            entrada_grid.addWidget(QLabel(label), row, column)
-            entrada_grid.addWidget(self.product_page_fields[key], row, column + 1)
+            importacao_xml_grid.addWidget(QLabel(label), row, column)
+            importacao_xml_grid.addWidget(self.product_page_fields[key], row, column + 1)
+
+        entrada_empresa_tab = QWidget()
+        entrada_empresa_grid = QGridLayout(entrada_empresa_tab)
+        entrada_empresa_grid.setContentsMargins(8, 6, 8, 6)
+        entrada_empresa_grid.setHorizontalSpacing(8)
+        entrada_empresa_grid.setVerticalSpacing(4)
+        for index, (key, label) in enumerate(entrada_empresa_fields):
+            row = index // 2
+            column = 0 if index % 2 == 0 else 2
+            entrada_empresa_grid.addWidget(QLabel(label), row, column)
+            entrada_empresa_grid.addWidget(self.product_page_fields[key], row, column + 1)
 
         saida_tab = QWidget()
         saida_grid = QGridLayout(saida_tab)
@@ -1550,12 +1630,25 @@ class QtSpedApp(QMainWindow):
             saida_grid.addWidget(QLabel(label), row, column)
             saida_grid.addWidget(self.product_page_fields[key], row, column + 1)
 
-        trib_tabs.addTab(entrada_tab, "Entrada")
-        trib_tabs.addTab(saida_tab, "Saida")
+        trib_tabs.addTab(importacao_xml_tab, "Importacao XML")
+        trib_tabs.addTab(entrada_empresa_tab, "Entrada Empresa")
+        trib_tabs.addTab(saida_tab, "Saida Empresa")
         form.addWidget(trib_tabs, current_row, 0, 1, 4)
+        current_row += 1
+        self.product_review_import_status = QLabel("Importe a planilha revisada selecionando a empresa e localizando por Fornecedor e Cod. Forn.")
+        self.product_review_import_status.setObjectName("muted")
+        form.addWidget(self.product_review_import_status, current_row, 0, 1, 4)
+        current_row += 1
+        self.product_review_import_progress = QProgressBar()
+        self.product_review_import_progress.setMinimum(0)
+        self.product_review_import_progress.setMaximum(100)
+        self.product_review_import_progress.setValue(0)
+        form.addWidget(self.product_review_import_progress, current_row, 0, 1, 4)
         current_row += 1
         actions = QHBoxLayout()
         actions.addStretch()
+        self.product_review_import_button = self.create_button("Importar Revisao", self.import_product_page_review_excel)
+        actions.addWidget(self.product_review_import_button)
         actions.addWidget(self.create_button("Salvar Alteracoes", self.save_product_page, primary=True))
         actions.addWidget(self.create_button("Novo", self.clear_product_page_form))
         actions.addWidget(self.create_button("Excluir", self.delete_product_page))
@@ -1564,7 +1657,7 @@ class QtSpedApp(QMainWindow):
         form_layout.addStretch()
         self.product_page_tabs.addTab(form_tab, "Cadastro / Edicao")
         page.layout().addWidget(self.product_page_tabs, 1)
-        self.product_page_table.itemSelectionChanged.connect(self.handle_product_page_select)
+        self.product_page_table.selectionModel().selectionChanged.connect(lambda _selected, _deselected: self.handle_product_page_select())
         return page
 
     def create_single_catalog_page(self, title: str) -> QWidget:
@@ -1910,6 +2003,48 @@ class QtSpedApp(QMainWindow):
         self.apply_table_column_policy(table)
         self.enable_table_sorting(table)
         return table
+
+    def create_product_table_view(self, headers: list[str]) -> QTableView:
+        table = QTableView()
+        table.setAlternatingRowColors(True)
+        table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        table.setSelectionMode(QAbstractItemView.SingleSelection)
+        table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        table.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOn)
+        table.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOn)
+        table.setHorizontalScrollMode(QAbstractItemView.ScrollPerPixel)
+        table.setVerticalScrollMode(QAbstractItemView.ScrollPerPixel)
+        table.setWordWrap(False)
+        table.verticalHeader().setVisible(False)
+        table.horizontalHeader().setSortIndicatorShown(False)
+        table.horizontalHeader().setSectionsClickable(False)
+        table.horizontalHeader().setMinimumSectionSize(70)
+        table.horizontalHeader().setStretchLastSection(False)
+        table.setModel(ProductTableModel(headers))
+        self.apply_product_table_column_widths(table)
+        return table
+
+    def apply_product_table_column_widths(self, table: QTableView) -> None:
+        base_widths = [90, 90, 230, 260, 70, 140, 110, 120, 360, 150, 110, 110]
+        available_width = max(0, table.viewport().width() - 6)
+        total_base_width = sum(base_widths)
+        if available_width > total_base_width:
+            extra_width = available_width - total_base_width
+            weights = [1, 1, 4, 5, 1, 2, 1, 1, 6, 2, 1, 1]
+            total_weight = sum(weights)
+            widths = [
+                base_width + int(extra_width * weight / total_weight)
+                for base_width, weight in zip(base_widths, weights)
+            ]
+        else:
+            widths = base_widths
+        for column_index, width in enumerate(widths):
+            table.setColumnWidth(column_index, width)
+
+    def resizeEvent(self, event: object) -> None:
+        super().resizeEvent(event)
+        if hasattr(self, "product_page_table"):
+            QTimer.singleShot(0, lambda: self.apply_product_table_column_widths(self.product_page_table))
 
     def configure_searchable_combo(self, combo: QComboBox, placeholder: str) -> None:
         combo.setEditable(True)
@@ -2790,7 +2925,16 @@ class QtSpedApp(QMainWindow):
             QApplication.restoreOverrideCursor()
             QApplication.processEvents()
 
+    def company_display_name(self, row: dict[str, object]) -> str:
+        company_name = str(row.get("nome", row.get("empresa_nome", "")) or "").strip()
+        company_cnpj = self.format_cnpj(str(row.get("cnpj", row.get("empresa_cnpj", "")) or ""))
+        return f"{company_name} - {company_cnpj}" if company_cnpj else company_name
+
     def refresh_current_catalog_page(self) -> None:
+        if self.page_title.text() == "Produtos":
+            self.start_refresh_product_page_fast()
+            return
+
         def refresh() -> None:
             title = self.page_title.text()
             if title == "Empresas":
@@ -2799,8 +2943,6 @@ class QtSpedApp(QMainWindow):
                 self.refresh_supplier_page()
             elif title == "Classificacao do Produto":
                 self.refresh_type_page()
-            elif title == "Produtos":
-                self.refresh_product_page()
             elif title == "NCM":
                 self.refresh_ncm_page()
             else:
@@ -2812,7 +2954,7 @@ class QtSpedApp(QMainWindow):
     def fill_company_combo(self, combo: QComboBox) -> None:
         combo.clear()
         for row in self.mysql_repo.list_companies(self.environment):
-            combo.addItem(str(row.get("nome", "")), int(row["id"]))
+            combo.addItem(self.company_display_name(row), int(row["id"]))
 
     def fill_supplier_combo(self, combo: QComboBox) -> None:
         self.fill_supplier_combo_from_rows(combo, self.mysql_repo.list_suppliers_catalog(self.environment))
@@ -3057,114 +3199,138 @@ class QtSpedApp(QMainWindow):
         finally:
             QApplication.restoreOverrideCursor()
 
-    def refresh_product_page(self) -> None:
-        self.mysql_repo.ensure_schema()
-        self.fill_supplier_combo(self.product_page_supplier_combo)
-        self.fill_type_combo(self.product_page_type_combo)
-        rows = self.mysql_repo.list_products_catalog(self.environment)
-        self.product_page_rows = {int(row["id"]): row for row in rows}
-        self.set_table_rows(
-            self.product_page_table,
-            [
-                [
-                    row.get("status_produto", ""),
-                    int(row["id"]),
-                    row.get("empresa_nome", ""),
-                    row.get("fornecedor_nome", ""),
-                    row.get("fornecedor_uf", ""),
-                    row.get("tipo_produto", ""),
-                    row.get("codigo_fornecedor", ""),
-                    row.get("codigo_empresa", ""),
-                    row.get("descricao", ""),
-                    row.get("ean", ""),
-                    row.get("ncm", ""),
-                    row.get("cest", ""),
-                    row.get("origem_entrada", ""),
-                    row.get("cst_icms", ""),
-                    row.get("reducao_bc_icms", ""),
-                    row.get("cfop_saida_fornecedor", ""),
-                    row.get("aliquota_icms", ""),
-                    row.get("cfop_entrada", ""),
-                    row.get("cst_ipi", ""),
-                    row.get("aliquota_ipi", ""),
-                    row.get("cst_pis", ""),
-                    row.get("cst_pis_cofins", ""),
-                    row.get("aliquota_pis", ""),
-                    row.get("cst_cofins", ""),
-                    row.get("aliquota_cofins", ""),
-                    row.get("natureza_receita_entrada", ""),
-                    row.get("mva", ""),
-                    row.get("valor_icms_st", ""),
-                    row.get("c_classtrib", ""),
-                    row.get("c_benef", ""),
-                    row.get("origem_saida", ""),
-                    row.get("cst_icms_saida", ""),
-                    row.get("cfop_saida_empresa", ""),
-                    row.get("aliquota_icms_saida", ""),
-                    row.get("cst_pis_saida", ""),
-                    row.get("cst_cofins_saida", ""),
-                    row.get("natureza_receita_saida", ""),
-                    row.get("chave_nfe_origem", ""),
-                ]
-                for row in rows
-            ],
+    def import_product_page_review_excel(self) -> None:
+        if getattr(self, "product_review_import_thread", None) is not None:
+            QMessageBox.information(self, "Importar Revisao de Produtos", "Ja existe uma importacao em andamento.")
+            return
+        selected_company = self.select_product_review_import_company()
+        if not selected_company:
+            return
+        company_id, company_name = selected_company
+        file_path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Selecionar planilha revisada de produtos",
+            "",
+            "Planilhas Excel (*.xlsx)",
         )
-        self.populate_product_filter_combos(rows)
-        self.apply_product_page_filters()
+        if not file_path:
+            return
+        if QMessageBox.question(
+            self,
+            "Importar Revisao de Produtos",
+            f'Esta rotina vai atualizar produtos da empresa "{company_name}" lendo a aba "BASE_COMPLETA" e localizando cada produto por Fornecedor e Cod. Forn. Deseja continuar?',
+        ) != QMessageBox.Yes:
+            return
+        if hasattr(self, "product_review_import_button"):
+            self.product_review_import_button.setEnabled(False)
+        if hasattr(self, "product_review_import_progress"):
+            self.product_review_import_progress.setValue(0)
+        if hasattr(self, "product_review_import_status"):
+            self.product_review_import_status.setText(f"Iniciando importacao para {company_name}...")
+        self.statusBar().showMessage("Importando revisao de produtos...")
+        self.product_review_import_thread = QThread(self)
+        self.product_review_import_worker = ProductReviewImportWorker(self.mysql_repo, self.environment, company_id, Path(file_path))
+        self.product_review_import_worker.moveToThread(self.product_review_import_thread)
+        self.product_review_import_thread.started.connect(self.product_review_import_worker.run)
+        self.product_review_import_worker.progress.connect(self.update_product_review_import_progress)
+        self.product_review_import_worker.finished.connect(self.handle_product_review_import_finished)
+        self.product_review_import_worker.failed.connect(self.handle_product_review_import_failed)
+        self.product_review_import_worker.finished.connect(self.product_review_import_thread.quit)
+        self.product_review_import_worker.failed.connect(self.product_review_import_thread.quit)
+        self.product_review_import_thread.finished.connect(self.product_review_import_worker.deleteLater)
+        self.product_review_import_thread.finished.connect(self.product_review_import_thread.deleteLater)
+        self.product_review_import_thread.finished.connect(lambda: setattr(self, "product_review_import_worker", None))
+        self.product_review_import_thread.finished.connect(lambda: setattr(self, "product_review_import_thread", None))
+        self.product_review_import_thread.start()
+
+    def select_product_review_import_company(self) -> tuple[int, str] | None:
+        try:
+            companies = self.mysql_repo.list_companies(self.environment)
+        except Exception as exc:
+            QMessageBox.critical(self, "Importar Revisao de Produtos", str(exc))
+            return None
+        if not companies:
+            QMessageBox.warning(self, "Importar Revisao de Produtos", "Nao ha empresas cadastradas para selecionar.")
+            return None
+
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Selecionar Empresa")
+        layout = QVBoxLayout(dialog)
+        layout.setContentsMargins(14, 14, 14, 14)
+        layout.setSpacing(10)
+        layout.addWidget(QLabel("Selecione a empresa que tera os produtos atualizados:"))
+        combo = QComboBox()
+        combo.setMinimumWidth(420)
+        self.configure_searchable_combo(combo, "Digite para localizar empresa")
+        for company in companies:
+            company_id = int(company.get("id") or 0)
+            company_name = str(company.get("nome", "") or "").strip()
+            if company_id and company_name:
+                combo.addItem(self.company_display_name(company), company_id)
+        layout.addWidget(combo)
+        actions = QHBoxLayout()
+        actions.addStretch()
+        cancel_button = self.create_button("Cancelar", dialog.reject)
+        confirm_button = self.create_button("Selecionar", dialog.accept, primary=True)
+        actions.addWidget(cancel_button)
+        actions.addWidget(confirm_button)
+        layout.addLayout(actions)
+        if dialog.exec() != QDialog.Accepted:
+            return None
+        selected_company_id = int(combo.currentData() or 0)
+        selected_company_name = combo.currentText().strip()
+        if not selected_company_id:
+            return None
+        return selected_company_id, selected_company_name
+
+    def update_product_review_import_progress(self, current: int, total: int, message: str) -> None:
+        if hasattr(self, "product_review_import_progress"):
+            value = 0 if total <= 0 else int((max(0, current) / max(1, total)) * 100)
+            self.product_review_import_progress.setValue(max(0, min(100, value)))
+        if hasattr(self, "product_review_import_status"):
+            self.product_review_import_status.setText(message)
+        self.statusBar().showMessage(message)
+
+    def handle_product_review_import_finished(self, stats: dict[str, object]) -> None:
+        if hasattr(self, "product_review_import_button"):
+            self.product_review_import_button.setEnabled(True)
+        if hasattr(self, "product_review_import_progress"):
+            self.product_review_import_progress.setValue(100)
+        log_path = str(stats.get("log_path", "") or "")
+        message = (
+            "Importacao concluida.\n"
+            f"Linhas processadas: {stats['rows']}\n"
+            f"Produtos atualizados: {stats['updated']}\n"
+            f"Valores alterados: {stats['changed_values']}\n"
+            f"Classificacoes criadas: {stats['created_types']}\n"
+            f"Produtos nao encontrados: {stats['missing_products']}\n"
+            f"Chaves duplicadas: {stats['duplicate_products']}\n"
+            f"Linhas ignoradas: {stats['ignored']}\n"
+            f"Erros: {stats['errors']}"
+        )
+        if log_path:
+            message += f"\n\nLog de alteracoes:\n{log_path}"
+        error_messages = list(stats.get("error_messages", [])) if isinstance(stats, dict) else []
+        if error_messages:
+            message += "\n\nPrimeiros erros:\n" + "\n".join(str(error) for error in error_messages)
+        if hasattr(self, "product_review_import_status"):
+            self.product_review_import_status.setText("Revisao importada. Use Consultar/Atualizar para recarregar a consulta quando precisar.")
+        QMessageBox.information(self, "Importar Revisao de Produtos", message)
+        self.statusBar().showMessage("Revisao de produtos importada. Consulta nao foi recarregada automaticamente.")
+
+    def handle_product_review_import_failed(self, error_text: str) -> None:
+        if hasattr(self, "product_review_import_button"):
+            self.product_review_import_button.setEnabled(True)
+        if hasattr(self, "product_review_import_status"):
+            self.product_review_import_status.setText(f"Falha na importacao: {error_text}")
+        QMessageBox.critical(self, "Importar Revisao de Produtos", error_text)
+        self.statusBar().showMessage("Falha na importacao da revisao de produtos.")
+
+    def refresh_product_page(self) -> None:
+        self.start_refresh_product_page_fast()
 
     def refresh_product_page_fast(self) -> None:
-        self.fill_supplier_combo(self.product_page_supplier_combo)
-        self.fill_type_combo(self.product_page_type_combo)
-        rows = self.mysql_repo.list_products_catalog(self.environment)
-        self.product_page_rows = {int(row["id"]): row for row in rows}
-        self.set_table_rows(
-            self.product_page_table,
-            [
-                [
-                    row.get("status_produto", ""),
-                    int(row["id"]),
-                    row.get("empresa_nome", ""),
-                    row.get("fornecedor_nome", ""),
-                    row.get("fornecedor_uf", ""),
-                    row.get("tipo_produto", ""),
-                    row.get("codigo_fornecedor", ""),
-                    row.get("codigo_empresa", ""),
-                    row.get("descricao", ""),
-                    row.get("ean", ""),
-                    row.get("ncm", ""),
-                    row.get("cest", ""),
-                    row.get("origem_entrada", ""),
-                    row.get("cst_icms", ""),
-                    row.get("reducao_bc_icms", ""),
-                    row.get("cfop_saida_fornecedor", ""),
-                    row.get("aliquota_icms", ""),
-                    row.get("cfop_entrada", ""),
-                    row.get("cst_ipi", ""),
-                    row.get("aliquota_ipi", ""),
-                    row.get("cst_pis", ""),
-                    row.get("cst_pis_cofins", ""),
-                    row.get("aliquota_pis", ""),
-                    row.get("cst_cofins", ""),
-                    row.get("aliquota_cofins", ""),
-                    row.get("natureza_receita_entrada", ""),
-                    row.get("mva", ""),
-                    row.get("valor_icms_st", ""),
-                    row.get("c_classtrib", ""),
-                    row.get("c_benef", ""),
-                    row.get("origem_saida", ""),
-                    row.get("cst_icms_saida", ""),
-                    row.get("cfop_saida_empresa", ""),
-                    row.get("aliquota_icms_saida", ""),
-                    row.get("cst_pis_saida", ""),
-                    row.get("cst_cofins_saida", ""),
-                    row.get("natureza_receita_saida", ""),
-                    row.get("chave_nfe_origem", ""),
-                ]
-                for row in rows
-            ],
-        )
-        self.populate_product_filter_combos(rows)
-        self.apply_product_page_filters()
+        self.start_refresh_product_page_fast()
 
     def start_refresh_product_page_fast(self) -> None:
         if getattr(self, "product_page_refresh_thread", None) is not None:
@@ -3173,7 +3339,6 @@ class QtSpedApp(QMainWindow):
         if hasattr(self, "product_page_refresh_button"):
             self.product_page_refresh_button.setEnabled(False)
         self.statusBar().showMessage("Atualizando produtos...")
-        QApplication.setOverrideCursor(Qt.WaitCursor)
         QApplication.processEvents()
         self.product_page_refresh_thread = QThread(self)
         self.product_page_refresh_worker = ProductCatalogWorker(self.mysql_repo, self.environment)
@@ -3198,7 +3363,7 @@ class QtSpedApp(QMainWindow):
             self.fill_supplier_combo_from_rows(self.product_page_supplier_combo, supplier_rows)
             self.fill_type_combo_from_rows(self.product_page_type_combo, type_rows)
             self.product_page_rows = {int(row["id"]): row for row in rows}
-            table_rows = [
+            full_table_rows = [
                 [
                     row.get("status_produto", ""),
                     int(row["id"]),
@@ -3241,17 +3406,39 @@ class QtSpedApp(QMainWindow):
                 ]
                 for row in rows
             ]
-            self._start_product_page_table_render(table_rows, rows)
+            self.product_page_search_text_by_id = {
+                int(row_values[1]): " ".join(str(value).lower() for value in row_values)
+                for row_values in full_table_rows
+            }
+            self.product_page_export_rows_by_id = {
+                int(row_values[1]): row_values
+                for row_values in full_table_rows
+            }
+            self.product_page_display_rows_by_id = {
+                int(row_values[1]): row_values[:12]
+                for row_values in full_table_rows
+            }
+            self.product_page_all_display_rows = [row_values[:12] for row_values in full_table_rows]
+            self.populate_product_filter_combos(rows)
+            self.apply_product_page_filters()
+            pending_select_id = int(getattr(self, "_product_page_pending_select_id", 0) or 0)
+            if pending_select_id:
+                self.select_product_page_row_by_id(pending_select_id)
+                self._product_page_pending_select_id = 0
+            self.statusBar().showMessage("Produtos atualizados.")
+            if hasattr(self, "product_page_refresh_button"):
+                self.product_page_refresh_button.setEnabled(True)
         except Exception as exc:
             QMessageBox.critical(self, "Produtos", str(exc))
             self.statusBar().showMessage("Falha na atualizacao de produtos.")
+            if hasattr(self, "product_page_refresh_button"):
+                self.product_page_refresh_button.setEnabled(True)
 
     def handle_product_page_refresh_failed(self, error: str) -> None:
         QMessageBox.critical(self, "Produtos", error)
         self.statusBar().showMessage("Falha na atualizacao de produtos.")
         if hasattr(self, "product_page_refresh_button"):
             self.product_page_refresh_button.setEnabled(True)
-        QApplication.restoreOverrideCursor()
         QApplication.processEvents()
 
     def _start_product_page_table_render(self, table_rows: list[list[object]], source_rows: list[dict[str, object]]) -> None:
@@ -3259,7 +3446,7 @@ class QtSpedApp(QMainWindow):
         self._product_render_rows = table_rows
         self._product_render_source_rows = source_rows
         self._product_render_index = 0
-        self._product_render_chunk_size = 25
+        self._product_render_chunk_size = 100
         self._product_render_header_labels = [
             (table.horizontalHeaderItem(index).text().strip().lower() if table.horizontalHeaderItem(index) else "")
             for index in range(table.columnCount())
@@ -3289,11 +3476,8 @@ class QtSpedApp(QMainWindow):
                 elif header_label == "ie":
                     display_value = self.format_ie(display_value)
                 item = QTableWidgetItem(display_value)
-                item.setForeground(QColor(COLORS["text"]))
                 if header_label in {"descricao", "produto"}:
                     item.setTextAlignment(Qt.AlignVCenter | Qt.AlignLeft)
-                else:
-                    item.setTextAlignment(Qt.AlignCenter)
                 table.setItem(row_index, column_index, item)
         self._product_render_index = end_index
         if end_index < len(rows):
@@ -3303,6 +3487,10 @@ class QtSpedApp(QMainWindow):
         try:
             self.populate_product_filter_combos(getattr(self, "_product_render_source_rows", []))
             self.apply_product_page_filters()
+            pending_select_id = int(getattr(self, "_product_page_pending_select_id", 0) or 0)
+            if pending_select_id:
+                self.select_product_page_row_by_id(pending_select_id)
+                self._product_page_pending_select_id = 0
             self.statusBar().showMessage("Produtos atualizados.")
         except Exception as exc:
             QMessageBox.critical(self, "Produtos", str(exc))
@@ -3317,28 +3505,27 @@ class QtSpedApp(QMainWindow):
             self._product_render_index = 0
             if hasattr(self, "product_page_refresh_button"):
                 self.product_page_refresh_button.setEnabled(True)
-            QApplication.restoreOverrideCursor()
             QApplication.processEvents()
 
     def populate_product_filter_combos(self, rows: list[dict[str, object]]) -> None:
         selected_company_id = int(self.product_page_filter_company_combo.currentData() or 0)
         selected_supplier_id = int(self.product_page_filter_supplier_combo.currentData() or 0)
 
-        companies: dict[int, str] = {}
+        companies: dict[int, dict[str, object]] = {}
         suppliers: dict[int, tuple[str, int]] = {}
         for row in rows:
             company_id = int(row.get("empresa_id") or 0)
             supplier_id = int(row.get("fornecedor_id") or 0)
             if company_id:
-                companies[company_id] = str(row.get("empresa_nome", ""))
+                companies[company_id] = {"empresa_nome": row.get("empresa_nome", ""), "empresa_cnpj": row.get("empresa_cnpj", "")}
             if supplier_id:
                 suppliers[supplier_id] = (str(row.get("fornecedor_nome", "")), company_id)
 
         self.product_page_filter_company_combo.blockSignals(True)
         self.product_page_filter_company_combo.clear()
         self.product_page_filter_company_combo.addItem("Todas Empresas", 0)
-        for company_id, company_name in sorted(companies.items(), key=lambda item: item[1].upper()):
-            self.product_page_filter_company_combo.addItem(company_name, company_id)
+        for company_id, company_row in sorted(companies.items(), key=lambda item: str(item[1].get("empresa_nome", "")).upper()):
+            self.product_page_filter_company_combo.addItem(self.company_display_name(company_row), company_id)
         self.select_combo_data(self.product_page_filter_company_combo, selected_company_id)
         self.product_page_filter_company_combo.blockSignals(False)
 
@@ -3366,43 +3553,46 @@ class QtSpedApp(QMainWindow):
         selected_company_id = int(self.product_page_filter_company_combo.currentData() or 0)
         selected_supplier_id = int(self.product_page_filter_supplier_combo.currentData() or 0)
         search_text = self.product_page_search_input.text().strip().lower() if hasattr(self, "product_page_search_input") else ""
-        id_column = self.get_table_id_column_index(self.product_page_table)
+        display_rows_by_id = getattr(self, "product_page_display_rows_by_id", {})
+        visible_ids: list[int] = []
+        visible_rows: list[list[object]] = []
         if not selected_company_id and not selected_supplier_id and not search_text:
-            if bool(getattr(self, "_product_rows_all_visible", False)):
-                self.refresh_product_metrics()
-                return
-            for row_index in range(self.product_page_table.rowCount()):
-                self.product_page_table.setRowHidden(row_index, False)
             self._product_rows_all_visible = True
+            visible_rows = list(getattr(self, "product_page_all_display_rows", []))
+            visible_ids = [int(row_values[1]) for row_values in visible_rows if len(row_values) > 1 and str(row_values[1]).isdigit()]
+            self.set_product_page_visible_rows(visible_rows, visible_ids)
             self.refresh_product_metrics()
             return
         self._product_rows_all_visible = False
-        for row_index in range(self.product_page_table.rowCount()):
-            row_id_item = self.product_page_table.item(row_index, id_column)
-            row_id = int(row_id_item.text()) if row_id_item and row_id_item.text().isdigit() else 0
-            row = self.product_page_rows.get(row_id, {})
+        for row_id, row in getattr(self, "product_page_rows", {}).items():
             row_company_id = int(row.get("empresa_id") or 0)
             row_supplier_id = int(row.get("fornecedor_id") or 0)
             company_ok = not selected_company_id or row_company_id == selected_company_id
             supplier_ok = not selected_supplier_id or row_supplier_id == selected_supplier_id
-            row_text = " ".join(
-                self.product_page_table.item(row_index, column_index).text().lower()
-                for column_index in range(self.product_page_table.columnCount())
-                if self.product_page_table.item(row_index, column_index) is not None
-            )
+            row_text = getattr(self, "product_page_search_text_by_id", {}).get(row_id, "")
             text_ok = not search_text or search_text in row_text
-            self.product_page_table.setRowHidden(row_index, not (company_ok and supplier_ok and text_ok))
+            if company_ok and supplier_ok and text_ok and row_id in display_rows_by_id:
+                visible_ids.append(row_id)
+                visible_rows.append(display_rows_by_id[row_id])
+        self.set_product_page_visible_rows(visible_rows, visible_ids)
         self.refresh_product_metrics()
+
+    def set_product_page_visible_rows(self, rows: list[list[object]], row_ids: list[int]) -> None:
+        model = self.product_page_table.model()
+        if isinstance(model, ProductTableModel):
+            model.set_rows(rows)
+            self.apply_product_table_column_widths(self.product_page_table)
+        self.product_page_visible_ids = row_ids
 
     def refresh_product_metrics(self) -> None:
         if not hasattr(self, "product_metric_labels"):
             return
-        visible_rows: list[int] = [row_index for row_index in range(self.product_page_table.rowCount()) if not self.product_page_table.isRowHidden(row_index)]
-        total_products = len(visible_rows)
+        visible_ids = list(getattr(self, "product_page_visible_ids", []))
+        total_products = len(visible_ids)
         class_counter: dict[str, int] = {}
-        for row_index in visible_rows:
-            class_item = self.product_page_table.item(row_index, 5)
-            class_name = (class_item.text().strip() if class_item else "") or "Sem classificacao"
+        for row_id in visible_ids:
+            row = getattr(self, "product_page_rows", {}).get(row_id, {})
+            class_name = str(row.get("tipo_produto", "") or "").strip() or "Sem classificacao"
             class_counter[class_name] = class_counter.get(class_name, 0) + 1
         total_classes = len(class_counter)
         top_class = "-"
@@ -3422,7 +3612,7 @@ class QtSpedApp(QMainWindow):
         self.product_metric_labels["scope"].setText(scope_text)
 
     def handle_product_page_select(self) -> None:
-        row = getattr(self, "product_page_rows", {}).get(self.selected_catalog_id(self.product_page_table), {})
+        row = getattr(self, "product_page_rows", {}).get(self.selected_product_page_id(), {})
         self.fill_line_fields(self.product_page_fields, row)
         self.select_combo_data(self.product_page_supplier_combo, int(row.get("fornecedor_id") or 0))
         type_id = int(row.get("tipo_produto_id") or 0)
@@ -3433,13 +3623,13 @@ class QtSpedApp(QMainWindow):
         if not selected_rows:
             self.product_page_type_combo.setCurrentIndex(0)
             return
-        classification_text = (self.product_page_table.item(selected_rows[0].row(), 5).text() if self.product_page_table.item(selected_rows[0].row(), 5) else "").strip()
+        classification_text = str(row.get("tipo_produto", "") or "").strip()
         combo_index = self.product_page_type_combo.findText(classification_text)
         self.product_page_type_combo.setCurrentIndex(combo_index if combo_index >= 0 else 0)
 
     def edit_product_page_selected(self) -> None:
         self.confirm_selected_for_edit(self.product_page_table)
-        if self.selected_catalog_id(self.product_page_table):
+        if self.selected_product_page_id():
             self.product_page_tabs.setCurrentIndex(1)
 
     def clear_product_page_form(self) -> None:
@@ -3464,18 +3654,36 @@ class QtSpedApp(QMainWindow):
             row_before = int(payload.get("id") or 0)
             payload["tipo_produto_id"] = self.product_page_type_combo.currentData()
             row_id = self.mysql_repo.save_supplier_product(supplier_id, payload)
-            self.refresh_product_page()
-            self.select_table_row_by_id(self.product_page_table, row_id)
+            self._product_page_pending_select_id = row_id
+            self.start_refresh_product_page_fast()
             action = "atualizado" if row_before else "cadastrado"
             QMessageBox.information(self, "Produtos", f"Produto {action} com sucesso.")
         except Exception as exc:
             QMessageBox.critical(self, "Produtos", str(exc))
 
     def delete_product_page(self) -> None:
-        row_id = self.selected_catalog_id(self.product_page_table)
+        row_id = self.selected_product_page_id()
         if row_id and QMessageBox.question(self, "Produtos", "Excluir este produto?") == QMessageBox.Yes:
             self.mysql_repo.delete_supplier_product(row_id)
-            self.refresh_product_page()
+            self.start_refresh_product_page_fast()
+
+    def selected_product_page_id(self) -> int:
+        selected_rows = self.product_page_table.selectionModel().selectedRows()
+        if not selected_rows:
+            return 0
+        model = self.product_page_table.model()
+        if isinstance(model, ProductTableModel):
+            return model.row_id(selected_rows[0].row())
+        return 0
+
+    def select_product_page_row_by_id(self, row_id: int) -> None:
+        model = self.product_page_table.model()
+        if not isinstance(model, ProductTableModel):
+            return
+        for row_index in range(model.rowCount()):
+            if model.row_id(row_index) == row_id:
+                self.product_page_table.selectRow(row_index)
+                return
 
     def select_combo_data(self, combo: QComboBox, value: int) -> None:
         index = combo.findData(value)
@@ -6295,21 +6503,13 @@ class QtSpedApp(QMainWindow):
             self.handle_export_failure("Exportar consulta", "consulta", exc)
 
     def export_product_page_filtered(self) -> None:
-        table = self.product_page_table
-        headers = [
-            table.horizontalHeaderItem(column_index).text() if table.horizontalHeaderItem(column_index) else f"Coluna {column_index + 1}"
-            for column_index in range(table.columnCount())
-        ]
+        headers = list(getattr(self, "product_page_full_headers", []))
         rows: list[list[object]] = []
-        for row_index in range(table.rowCount()):
-            if table.isRowHidden(row_index):
-                continue
-            rows.append(
-                [
-                    table.item(row_index, column_index).text() if table.item(row_index, column_index) else ""
-                    for column_index in range(table.columnCount())
-                ]
-            )
+        export_rows_by_id = getattr(self, "product_page_export_rows_by_id", {})
+        for row_id in getattr(self, "product_page_visible_ids", []):
+            export_row = export_rows_by_id.get(row_id)
+            if export_row:
+                rows.append(list(export_row))
         if not rows:
             QMessageBox.warning(self, "Exportar consulta", "Nao ha dados filtrados para exportar.")
             return

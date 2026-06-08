@@ -763,6 +763,279 @@ class MysqlCadastroRepository:
         finally:
             connection.close()
 
+    def import_reviewed_products_from_excel(
+        self,
+        environment: str,
+        company_id: int,
+        excel_path: Path,
+        progress_callback: object | None = None,
+    ) -> dict[str, object]:
+        from app.parsers.excel_parser import normalize_header, read_xlsx_sheet_rows
+        from app.exporters.workbook_exporter import write_simple_excel_workbook
+
+        def emit_progress(current: int, total: int, message: str) -> None:
+            if progress_callback is None:
+                return
+            try:
+                progress_callback(current, total, message)
+            except Exception:
+                pass
+
+        emit_progress(0, 1, "Lendo aba BASE_COMPLETA...")
+        rows = read_xlsx_sheet_rows(excel_path, "BASE_COMPLETA")
+        if len(rows) < 2:
+            raise ValueError('A aba "BASE_COMPLETA" nao possui linhas para importacao.')
+
+        header_index = -1
+        for index, row in enumerate(rows[:10]):
+            normalized_headers = {normalize_header(value) for value in row}
+            if {"FORNECEDOR", "CODFORN", "CLASSIFICACAO"}.issubset(normalized_headers):
+                header_index = index
+                break
+        if header_index < 0:
+            raise ValueError('Nao foi encontrado cabecalho valido na aba "BASE_COMPLETA".')
+
+        headers = [normalize_header(value) for value in rows[header_index]]
+        supplier_index = headers.index("FORNECEDOR") if "FORNECEDOR" in headers else -1
+        supplier_code_index = headers.index("CODFORN") if "CODFORN" in headers else -1
+        classification_index = headers.index("CLASSIFICACAO") if "CLASSIFICACAO" in headers else -1
+        if not company_id:
+            raise ValueError("Selecione a empresa que sera atualizada.")
+        if supplier_index < 0 or supplier_code_index < 0:
+            raise ValueError('As colunas "Fornecedor" e "Cod. Forn." sao obrigatorias para atualizar os produtos.')
+
+        field_by_header = {
+            "STATUS": "status_produto",
+            "CODEMPRESA": "codigo_empresa",
+            "DESCRICAO": "descricao",
+            "EAN": "ean",
+            "NCM": "ncm",
+            "CEST": "cest",
+            "ORIGEMENTRADA": "origem_entrada",
+            "CSTICMSENTRADA": "cst_icms",
+            "REDBCICMS": "reducao_bc_icms",
+            "CFOPSAIDAFORNECEDOR": "cfop_saida_fornecedor",
+            "ICMSENTRADA": "aliquota_icms",
+            "CFOPENTRADAEMPRESA": "cfop_entrada",
+            "CSTIPI": "cst_ipi",
+            "IPI": "aliquota_ipi",
+            "CSTPISENTRADA": "cst_pis",
+            "CSTPISCOFINSENTRADAEMPRESA": "cst_pis_cofins",
+            "PIS": "aliquota_pis",
+            "CSTCOFINSENTRADA": "cst_cofins",
+            "COFINS": "aliquota_cofins",
+            "MVA": "mva",
+            "VALORICMSST": "valor_icms_st",
+            "CCLASSTRIB": "c_classtrib",
+            "CBENEF": "c_benef",
+            "ORIGEMSAIDA": "origem_saida",
+            "CSTICMSSAIDA": "cst_icms_saida",
+            "CFOPSAIDAEMPRESA": "cfop_saida_empresa",
+            "ICMSSAIDA": "aliquota_icms_saida",
+            "CSTPISSAIDA": "cst_pis_saida",
+            "CSTCOFINSSAIDA": "cst_cofins_saida",
+            "CHAVENFEORIGEM": "chave_nfe_origem",
+        }
+        fields_by_index: dict[int, str] = {}
+        natureza_count = 0
+        for index, header in enumerate(headers):
+            if header == "NATUREZADARECEITA":
+                natureza_count += 1
+                fields_by_index[index] = "natureza_receita_entrada" if natureza_count == 1 else "natureza_receita_saida"
+            elif header in field_by_header:
+                fields_by_index[index] = field_by_header[header]
+
+        data_rows = rows[header_index + 1 :]
+
+        def row_value(row: list[str], column_index: int) -> str:
+            return str(row[column_index] if column_index >= 0 and column_index < len(row) else "").strip()
+
+        def match_key(supplier_name: object, supplier_code: object) -> tuple[str, str]:
+            return (
+                " ".join(str(supplier_name or "").split()).upper(),
+                " ".join(str(supplier_code or "").split()).upper(),
+            )
+
+        emit_progress(0, len(data_rows), "Carregando produtos existentes...")
+        connection = self.get_connection()
+        try:
+            cursor = connection.cursor(dictionary=True)
+            cursor.execute(
+                """
+                SELECT
+                    p.*,
+                    f.nome AS fornecedor_nome,
+                    e.nome AS empresa_nome,
+                    COALESCE(t.nome, '') AS tipo_produto,
+                    e.ambiente
+                FROM cad_produtos_fornecedor p
+                INNER JOIN cad_fornecedores f ON f.id = p.fornecedor_id
+                INNER JOIN cad_empresas e ON e.id = f.empresa_id
+                LEFT JOIN cad_tipos_produto t ON t.id = p.tipo_produto_id
+                WHERE e.ambiente = %s
+                  AND e.id = %s
+                """,
+                (environment, company_id),
+            )
+            existing_products_by_key: dict[tuple[str, str], list[dict[str, object]]] = {}
+            for existing_row in cursor.fetchall():
+                key = match_key(existing_row.get("fornecedor_nome", ""), existing_row.get("codigo_fornecedor", ""))
+                existing_products_by_key.setdefault(key, []).append(dict(existing_row))
+        finally:
+            connection.close()
+
+        type_cache = {str(row.get("nome", "")).strip().upper(): int(row["id"]) for row in self.list_product_types(environment)}
+        field_labels = {
+            "status_produto": "Status",
+            "codigo_fornecedor": "Cod. Forn.",
+            "codigo_empresa": "Cod. Empresa",
+            "descricao": "Descricao",
+            "ean": "EAN",
+            "ncm": "NCM",
+            "cest": "CEST",
+            "origem_entrada": "Origem (entrada)",
+            "cst_icms": "CST ICMS (entrada)",
+            "reducao_bc_icms": "% Red BC ICMS",
+            "cfop_saida_fornecedor": "CFOP saida fornecedor",
+            "aliquota_icms": "% ICMS (entrada)",
+            "cfop_entrada": "CFOP entrada empresa",
+            "cst_ipi": "CST IPI",
+            "aliquota_ipi": "% IPI",
+            "cst_pis": "CST PIS (entrada)",
+            "cst_pis_cofins": "CST PIS_COFINS (ENTRADA EMPRESA)",
+            "aliquota_pis": "% PIS",
+            "cst_cofins": "CST COFINS (entrada)",
+            "aliquota_cofins": "% COFINS",
+            "natureza_receita_entrada": "Natureza da receita entrada",
+            "mva": "MVA",
+            "valor_icms_st": "Valor ICMS-ST",
+            "c_classtrib": "cClassTrib",
+            "c_benef": "cBenef",
+            "origem_saida": "Origem (saida)",
+            "cst_icms_saida": "CST ICMS (saida)",
+            "cfop_saida_empresa": "CFOP saida empresa",
+            "aliquota_icms_saida": "% ICMS (saida)",
+            "cst_pis_saida": "CST PIS (saida)",
+            "cst_cofins_saida": "CST COFINS (saida)",
+            "natureza_receita_saida": "Natureza da receita saida",
+            "chave_nfe_origem": "Chave NFe origem",
+        }
+        changed_rows: list[list[object]] = []
+        stats: dict[str, object] = {
+            "rows": 0,
+            "updated": 0,
+            "ignored": 0,
+            "missing_products": 0,
+            "duplicate_products": 0,
+            "created_types": 0,
+            "errors": 0,
+            "error_messages": [],
+            "changed_values": 0,
+            "log_path": "",
+        }
+        total_data_rows = len(data_rows)
+        for processed_index, (row_number, row) in enumerate(enumerate(data_rows, start=header_index + 2), start=1):
+            emit_progress(processed_index - 1, total_data_rows, f"Processando linha {row_number}...")
+            supplier_name = row_value(row, supplier_index)
+            supplier_code = row_value(row, supplier_code_index)
+            if not supplier_name or not supplier_code:
+                stats["ignored"] = int(stats["ignored"]) + 1
+                continue
+            matching_products = existing_products_by_key.get(match_key(supplier_name, supplier_code), [])
+            if not matching_products:
+                stats["missing_products"] = int(stats["missing_products"]) + 1
+                continue
+            if len(matching_products) > 1:
+                stats["duplicate_products"] = int(stats["duplicate_products"]) + 1
+                error_messages = list(stats["error_messages"])
+                if len(error_messages) < 10:
+                    error_messages.append(
+                        f"Linha {row_number}: chave duplicada para Fornecedor={supplier_name}, Cod. Forn.={supplier_code}"
+                    )
+                stats["error_messages"] = error_messages
+                continue
+            existing = matching_products[0]
+            product_id = int(existing["id"])
+
+            payload = dict(existing)
+            payload["id"] = product_id
+            row_changes: list[list[object]] = []
+            for column_index, field in fields_by_index.items():
+                new_value = row[column_index] if column_index < len(row) else ""
+                old_value = existing.get(field, "")
+                payload[field] = new_value
+                if str(old_value or "").strip() != str(new_value or "").strip():
+                    row_changes.append(
+                        [
+                            row_number,
+                            product_id,
+                            existing.get("empresa_nome", ""),
+                            supplier_name,
+                            supplier_code,
+                            existing.get("descricao", ""),
+                            field_labels.get(field, field),
+                            old_value,
+                            new_value,
+                        ]
+                    )
+
+            classification = row[classification_index].strip() if classification_index >= 0 and classification_index < len(row) else ""
+            existing_classification = str(existing.get("tipo_produto", "") or "").strip()
+            if classification:
+                cache_key = classification.upper()
+                type_id = type_cache.get(cache_key)
+                if type_id is None:
+                    type_id = self.ensure_product_type(environment, classification)
+                    type_cache[cache_key] = type_id
+                    stats["created_types"] = int(stats["created_types"]) + 1
+                payload["tipo_produto_id"] = type_id
+            else:
+                payload["tipo_produto_id"] = None
+            if existing_classification != classification:
+                row_changes.append(
+                    [
+                        row_number,
+                        product_id,
+                        existing.get("empresa_nome", ""),
+                        supplier_name,
+                        supplier_code,
+                        existing.get("descricao", ""),
+                        "Classificacao",
+                        existing_classification,
+                        classification,
+                    ]
+                )
+
+            stats["rows"] = int(stats["rows"]) + 1
+            try:
+                self.save_supplier_product(int(existing.get("fornecedor_id") or 0), payload)
+                stats["updated"] = int(stats["updated"]) + 1
+                changed_rows.extend(row_changes)
+            except Exception as exc:
+                stats["errors"] = int(stats["errors"]) + 1
+                error_messages = list(stats["error_messages"])
+                if len(error_messages) < 10:
+                    error_messages.append(f"Linha {row_number}, produto {product_id}: {exc}")
+                stats["error_messages"] = error_messages
+        if changed_rows:
+            emit_progress(total_data_rows, total_data_rows, "Gravando log de alteracoes...")
+            log_path = excel_path.with_name(f"{excel_path.stem}_log_alteracoes_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx")
+            write_simple_excel_workbook(
+                log_path,
+                [
+                    (
+                        "Alteracoes",
+                        ["Linha", "Produto ID", "Empresa", "Fornecedor", "Cod. Forn.", "Descricao", "Campo", "Valor anterior", "Valor novo"],
+                        changed_rows,
+                        {"include_total": False},
+                    )
+                ],
+            )
+            stats["log_path"] = str(log_path)
+            stats["changed_values"] = len(changed_rows)
+        emit_progress(total_data_rows, total_data_rows, "Importacao de produtos concluida.")
+        return stats
+
     def ensure_product_type(self, environment: str, type_name: str, description: str = "") -> int:
         normalized_name = str(type_name or "").strip()
         if not normalized_name:
@@ -1079,6 +1352,7 @@ class MysqlCadastroRepository:
                     f.nome AS fornecedor_nome,
                     f.uf AS fornecedor_uf,
                     e.nome AS empresa_nome,
+                    e.cnpj AS empresa_cnpj,
                     COALESCE(t.nome, '') AS tipo_produto
                 FROM cad_produtos_fornecedor p
                 INNER JOIN cad_fornecedores f ON f.id = p.fornecedor_id
