@@ -8059,6 +8059,22 @@ class QtSpedApp(QMainWindow):
             QMessageBox.warning(self, title, "Nao ha dados para os filtros atuais.")
             return
         export_rows = [list(row) for row in rows]
+        runtime_rule_rows = [
+            {
+                "operation_type": operation_type,
+                "cst_icms": row[0] if len(row) > 0 else "",
+                "cfop": row[1] if len(row) > 1 else "",
+                "icms_rate": self.decimal_value(row[2] if len(row) > 2 else Decimal("0")),
+                "effective_rate": self.decimal_value(row[3] if len(row) > 3 else Decimal("0")),
+                "ipi_value": self.decimal_value(row[4] if len(row) > 4 else Decimal("0")),
+                "icms_value": self.decimal_value(row[5] if len(row) > 5 else Decimal("0")),
+                "base_icms_st": self.decimal_value(row[6] if len(row) > 6 else Decimal("0")),
+                "icms_st_value": self.decimal_value(row[7] if len(row) > 7 else Decimal("0")),
+                "sale_value": self.decimal_value(row[8] if len(row) > 8 else Decimal("0")),
+                "base_icms": self.decimal_value(row[9] if len(row) > 9 else Decimal("0")),
+            }
+            for row in export_rows
+        ]
         dialog = QDialog(self)
         dialog.setObjectName("popupDialog")
         dialog.setWindowTitle(title)
@@ -8234,7 +8250,11 @@ class QtSpedApp(QMainWindow):
         detail_rows_by_index: dict[int, list[dict[str, object]]],
         operation_type: str,
     ) -> None:
-        row_index = item.row()
+        data_index = item.data(Qt.UserRole)
+        try:
+            row_index = int(data_index)
+        except (TypeError, ValueError):
+            row_index = item.row()
         details = detail_rows_by_index.get(row_index, [])
         if not details:
             return
