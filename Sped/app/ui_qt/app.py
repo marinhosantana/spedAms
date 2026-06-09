@@ -363,6 +363,8 @@ class ProductTableModel(QAbstractTableModel):
             return None
         if role == Qt.DisplayRole:
             return str(self.rows[index.row()][index.column()])
+        if role == Qt.ForegroundRole:
+            return QColor("#1d2730")
         if role == Qt.TextAlignmentRole:
             header = self.headers[index.column()].strip().lower()
             return Qt.AlignVCenter | Qt.AlignLeft if header in {"descrição", "descricao", "produto"} else Qt.AlignCenter
@@ -465,6 +467,7 @@ def extract_nfe_keys_from_sped_file(sped_path: Path) -> list[dict[str, object]]:
 class QtSpedApp(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
+        self.scale = self._compute_scale()
         self.environment = get_application_environment()
         self.base_dir = get_application_base_dir(__file__)
         self.project_root_dir = get_project_root_dir(self.base_dir)
@@ -522,14 +525,26 @@ class QtSpedApp(QMainWindow):
     def get_mysql_default_config(self) -> dict[str, str]:
         return dict(MYSQL_DEFAULT_CONFIG)
 
+    def _compute_scale(self) -> float:
+        screen = QApplication.primaryScreen()
+        if screen is None:
+            return 1.0
+        geom = screen.availableGeometry()
+        scale = geom.height() / 1080.0
+        return max(0.75, min(scale, 2.0))
+
+    def _s(self, value: int) -> int:
+        return max(1, round(value * self.scale))
+
     def apply_styles(self) -> None:
+        s = self._s
         self.setStyleSheet(
             f"""
             QMainWindow, QWidget#contentHost, QDialog#popupDialog {{
                 background: {COLORS["bg"]};
                 color: {COLORS["text"]};
                 font-family: Segoe UI;
-                font-size: 14px;
+                font-size: {s(14)}px;
             }}
             QStackedWidget, QScrollArea#pageScroll, QWidget#pageScrollViewport, QWidget#scrollPage {{
                 background: {COLORS["bg"]};
@@ -552,15 +567,15 @@ class QtSpedApp(QMainWindow):
             }}
             QLabel#brand {{
                 color: {COLORS["sidebar_text"]};
-                font-size: 21px;
+                font-size: {s(21)}px;
                 font-weight: 700;
             }}
             QPushButton#navButton {{
                 background: transparent;
                 color: #d9e5ef;
                 border: 0;
-                border-radius: 6px;
-                padding: 11px 12px;
+                border-radius: {s(6)}px;
+                padding: {s(11)}px {s(12)}px;
                 text-align: left;
                 font-weight: 600;
             }}
@@ -572,10 +587,10 @@ class QtSpedApp(QMainWindow):
                 background: transparent;
                 color: #9fb3c8;
                 border: 0;
-                border-radius: 6px;
-                font-size: 16px;
+                border-radius: {s(6)}px;
+                font-size: {s(16)}px;
                 font-weight: 900;
-                padding: 13px 8px 9px 8px;
+                padding: {s(13)}px {s(8)}px {s(9)}px {s(8)}px;
                 text-align: left;
             }}
             QPushButton#navGroup:hover, QPushButton#navGroup:checked {{
@@ -586,9 +601,9 @@ class QtSpedApp(QMainWindow):
                 background: #203041;
                 color: #ffffff;
                 border: 0;
-                border-radius: 6px;
-                padding: 9px 10px;
-                font-size: 16px;
+                border-radius: {s(6)}px;
+                padding: {s(9)}px {s(10)}px;
+                font-size: {s(16)}px;
                 font-weight: 900;
             }}
             QPushButton#sidebarToggle:hover {{
@@ -596,49 +611,49 @@ class QtSpedApp(QMainWindow):
             }}
             QLabel#pageTitle {{
                 color: {COLORS["text"]};
-                font-size: 24px;
+                font-size: {s(24)}px;
                 font-weight: 750;
             }}
             QLabel#muted {{
                 color: {COLORS["muted"]};
-                font-size: 13px;
+                font-size: {s(13)}px;
             }}
             QFrame#panel {{
                 background: {COLORS["panel"]};
                 border: 1px solid {COLORS["line"]};
-                border-radius: 8px;
+                border-radius: {s(8)}px;
             }}
             QLabel#sectionTitle {{
                 color: {COLORS["text"]};
-                font-size: 15px;
+                font-size: {s(15)}px;
                 font-weight: 750;
             }}
             QLabel#popupTitle {{
                 color: {COLORS["text"]};
-                font-size: 18px;
+                font-size: {s(18)}px;
                 font-weight: 800;
             }}
             QLabel#popupFooter {{
                 color: {COLORS["text"]};
-                font-size: 14px;
+                font-size: {s(14)}px;
                 font-weight: 750;
             }}
             QLabel#metricKey {{
                 color: {COLORS["muted"]};
-                font-size: 12px;
+                font-size: {s(12)}px;
                 font-weight: 700;
             }}
             QLabel#metricValue {{
                 color: {COLORS["text"]};
-                font-size: 18px;
+                font-size: {s(18)}px;
                 font-weight: 800;
             }}
             QPushButton {{
                 background: #ffffff;
                 border: 1px solid #bdcbd7;
-                border-radius: 6px;
+                border-radius: {s(6)}px;
                 color: {COLORS["text"]};
-                padding: 8px 12px;
+                padding: {s(8)}px {s(12)}px;
                 font-weight: 650;
             }}
             QPushButton:hover {{
@@ -652,10 +667,10 @@ class QtSpedApp(QMainWindow):
             QLineEdit, QComboBox, QTextEdit {{
                 background: #ffffff;
                 border: 1px solid #c8d4df;
-                border-radius: 6px;
+                border-radius: {s(6)}px;
                 color: {COLORS["text"]};
-                padding: 7px 9px;
-                min-height: 22px;
+                padding: {s(7)}px {s(9)}px;
+                min-height: {s(22)}px;
             }}
             QTextEdit {{
                 selection-background-color: #dbeafe;
@@ -669,28 +684,28 @@ class QtSpedApp(QMainWindow):
             }}
             QCheckBox {{
                 color: {COLORS["text"]};
-                spacing: 7px;
+                spacing: {s(7)}px;
             }}
             QGroupBox {{
                 background: #ffffff;
                 border: 1px solid {COLORS["line"]};
-                border-radius: 8px;
+                border-radius: {s(8)}px;
                 color: {COLORS["text"]};
                 font-weight: 750;
-                margin-top: 18px;
-                padding: 12px 10px 10px 10px;
+                margin-top: {s(18)}px;
+                padding: {s(12)}px {s(10)}px {s(10)}px {s(10)}px;
             }}
             QGroupBox::title {{
                 subcontrol-origin: margin;
                 subcontrol-position: top left;
-                left: 10px;
-                padding: 0 6px;
+                left: {s(10)}px;
+                padding: 0 {s(6)}px;
                 color: {COLORS["text"]};
                 background: {COLORS["bg"]};
             }}
             QTabWidget::pane {{
                 border: 1px solid {COLORS["line"]};
-                border-radius: 8px;
+                border-radius: {s(8)}px;
                 background: #ffffff;
                 top: -1px;
             }}
@@ -702,11 +717,11 @@ class QtSpedApp(QMainWindow):
                 color: {COLORS["text"]};
                 border: 1px solid {COLORS["line"]};
                 border-bottom-color: {COLORS["line"]};
-                border-top-left-radius: 6px;
-                border-top-right-radius: 6px;
-                padding: 8px 14px;
-                margin-right: 4px;
-                min-width: 92px;
+                border-top-left-radius: {s(6)}px;
+                border-top-right-radius: {s(6)}px;
+                padding: {s(8)}px {s(14)}px;
+                margin-right: {s(4)}px;
+                min-width: {s(92)}px;
                 font-weight: 700;
             }}
             QTabBar::tab:selected {{
@@ -719,64 +734,68 @@ class QtSpedApp(QMainWindow):
                 color: {COLORS["text"]};
             }}
             QWidget#productFormTab QLineEdit, QWidget#productFormTab QComboBox {{
-                padding: 3px 8px;
-                min-height: 18px;
-                max-height: 28px;
+                padding: {s(3)}px {s(8)}px;
+                min-height: {s(18)}px;
+                max-height: {s(28)}px;
             }}
             QWidget#productFormTab QLabel {{
-                font-size: 13px;
+                font-size: {s(13)}px;
             }}
             QTabWidget#productTribTabs::pane {{
                 top: -1px;
             }}
             QTabWidget#productTribTabs QTabBar::tab {{
-                padding: 6px 14px;
-                min-width: 82px;
+                padding: {s(6)}px {s(14)}px;
+                min-width: {s(82)}px;
             }}
-            QTableWidget {{
+            QTableWidget, QTableView {{
                 background: #ffffff;
                 alternate-background-color: #fbfdff;
                 border: 1px solid {COLORS["line"]};
-                border-radius: 8px;
+                border-radius: {s(8)}px;
                 color: {COLORS["text"]};
                 gridline-color: #e7edf2;
                 selection-background-color: #dbeafe;
                 selection-color: {COLORS["text"]};
             }}
-            QTableWidget::item {{
+            QTableWidget::item, QTableView::item {{
                 color: {COLORS["text"]};
-                padding: 4px;
+                background: transparent;
+                padding: {s(4)}px;
             }}
-            QTableWidget::item:selected {{
+            QTableView::item:alternate {{
+                background: #fbfdff;
+            }}
+            QTableWidget::item:selected, QTableView::item:selected {{
                 background: #dbeafe;
                 color: {COLORS["text"]};
             }}
             QScrollBar:vertical {{
                 background: #edf3f7;
-                width: 16px;
+                width: {s(16)}px;
                 margin: 0;
                 border-left: 1px solid {COLORS["line"]};
             }}
             QScrollBar::handle:vertical {{
                 background: #8fa5b8;
-                min-height: 32px;
-                border-radius: 7px;
-                margin: 2px;
+                min-height: {s(32)}px;
+                border-radius: {s(7)}px;
+                margin: {s(2)}px;
             }}
             QScrollBar::handle:vertical:hover {{
                 background: #6f879d;
             }}
             QScrollBar:horizontal {{
                 background: #edf3f7;
-                height: 16px;
+                height: {s(16)}px;
                 margin: 0;
                 border-top: 1px solid {COLORS["line"]};
             }}
             QScrollBar::handle:horizontal {{
                 background: #8fa5b8;
-                min-width: 32px;
-                border-radius: 7px;
-                margin: 2px;
+                min-width: {s(32)}px;
+                border-radius: {s(7)}px;
+                margin: {s(2)}px;
             }}
             QScrollBar::handle:horizontal:hover {{
                 background: #6f879d;
@@ -794,8 +813,8 @@ class QtSpedApp(QMainWindow):
                 border: 0;
                 border-right: 1px solid {COLORS["line"]};
                 border-bottom: 1px solid {COLORS["line"]};
-                padding: 8px 9px;
-                font-size: 12px;
+                padding: {s(8)}px {s(9)}px;
+                font-size: {s(12)}px;
                 font-weight: 750;
             }}
             QStatusBar {{
@@ -852,13 +871,13 @@ class QtSpedApp(QMainWindow):
 
         sidebar = QWidget()
         sidebar.setObjectName("sidebar")
-        sidebar.setFixedWidth(230)
+        sidebar.setFixedWidth(self._s(230))
         self.sidebar = sidebar
-        self.sidebar_expanded_width = 230
-        self.sidebar_collapsed_width = 48
+        self.sidebar_expanded_width = self._s(230)
+        self.sidebar_collapsed_width = self._s(48)
         nav_layout = QVBoxLayout(sidebar)
-        nav_layout.setContentsMargins(6, 10, 6, 10)
-        nav_layout.setSpacing(4)
+        nav_layout.setContentsMargins(self._s(6), self._s(10), self._s(6), self._s(10))
+        nav_layout.setSpacing(self._s(4))
 
         self.sidebar_toggle_button = QPushButton("<")
         self.sidebar_toggle_button.setObjectName("sidebarToggle")
@@ -867,12 +886,12 @@ class QtSpedApp(QMainWindow):
 
         self.sidebar_content = QWidget()
         sidebar_content_layout = QVBoxLayout(self.sidebar_content)
-        sidebar_content_layout.setContentsMargins(4, 8, 4, 8)
-        sidebar_content_layout.setSpacing(4)
+        sidebar_content_layout.setContentsMargins(self._s(4), self._s(8), self._s(4), self._s(8))
+        sidebar_content_layout.setSpacing(self._s(4))
         brand = QLabel(self.app_home_title)
         brand.setObjectName("brand")
         sidebar_content_layout.addWidget(brand)
-        sidebar_content_layout.addSpacing(12)
+        sidebar_content_layout.addSpacing(self._s(12))
 
         self.nav_buttons: list[QPushButton] = []
         self.nav_page_indices: list[int] = []
@@ -926,8 +945,8 @@ class QtSpedApp(QMainWindow):
             group_container = QWidget()
             group_container.setVisible(group_title == "Consultas")
             group_layout = QVBoxLayout(group_container)
-            group_layout.setContentsMargins(8, 0, 0, 0)
-            group_layout.setSpacing(4)
+            group_layout.setContentsMargins(self._s(8), 0, 0, 0)
+            group_layout.setSpacing(self._s(4))
             for title, index in items:
                 button = QPushButton(title)
                 button.setObjectName("navButton")
@@ -946,8 +965,8 @@ class QtSpedApp(QMainWindow):
 
         content = QWidget()
         content_layout = QVBoxLayout(content)
-        content_layout.setContentsMargins(18, 16, 18, 10)
-        content_layout.setSpacing(12)
+        content_layout.setContentsMargins(self._s(18), self._s(16), self._s(18), self._s(10))
+        content_layout.setSpacing(self._s(12))
 
         header = QHBoxLayout()
         self.page_title = QLabel("")

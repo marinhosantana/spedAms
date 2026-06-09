@@ -4,6 +4,7 @@ import faulthandler
 import sys
 from pathlib import Path
 
+from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QApplication
 
 from app.ui_qt.app import QtSpedApp
@@ -17,6 +18,7 @@ def main() -> None:
     except Exception:
         crash_file = None
     app = QApplication(sys.argv)
+    app.setHighDpiScaleFactorRoundingPolicy(Qt.HighDpiScaleFactorRoundingPolicy.PassThrough)
     window = QtSpedApp()
     window.showMaximized()
     try:

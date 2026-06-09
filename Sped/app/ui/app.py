@@ -157,6 +157,7 @@ class SpedApp:
     def __init__(self, root: Tk) -> None:
         # Interface principal para selecionar arquivos, filtros e gerar as saidas.
         self.root = root
+        self.scale = self._compute_scale_factor()
         self.app_base_dir = get_application_base_dir(__file__)
         self.app_environment = get_application_environment()
         self.project_root_dir = get_project_root_dir(self.app_base_dir)
@@ -169,8 +170,8 @@ class SpedApp:
             value=f"Ambiente atual: {self.app_environment}. Informe os nomes que devem aparecer na tela inicial."
         )
         self.root.title(self.app_window_title_var.get().strip() or self.get_app_default_config()["window_title"])
-        self.root.minsize(860, 680)
-        self.set_dialog_screen_geometry(self.root, 1440, 900, 860, 680, margin_y=150)
+        self.root.minsize(self._s(860), self._s(680))
+        self.set_dialog_screen_geometry(self.root, self._s(1440), self._s(900), self._s(860), self._s(680), margin_y=self._s(150))
         self.root.state("zoomed")
         self.audit_log_path = get_audit_log_path(self.app_base_dir)
         self.audit_session_id = dt.datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -369,6 +370,23 @@ class SpedApp:
         self.root.protocol("WM_DELETE_WINDOW", self.close_application)
         self.write_audit_log("INICIO_SESSAO", f"Sistema iniciado. Sessao={self.audit_session_id}")
 
+    def _compute_scale_factor(self) -> float:
+        self.root.update_idletasks()
+        try:
+            import ctypes
+            hdc = ctypes.windll.user32.GetDC(0)
+            dpi = ctypes.windll.gdi32.GetDeviceCaps(hdc, 88)  # LOGPIXELSX
+            ctypes.windll.user32.ReleaseDC(0, hdc)
+            if dpi > 0:
+                return max(0.75, min(dpi / 96.0, 2.5))
+        except Exception:
+            pass
+        screen_h = self.root.winfo_screenheight()
+        return max(0.75, min(screen_h / 1080.0, 2.5))
+
+    def _s(self, value: int) -> int:
+        return max(1, round(value * self.scale))
+
     def _configure_styles(self) -> None:
         style = ttk.Style()
         style.theme_use("clam")
@@ -403,7 +421,7 @@ class SpedApp:
             bordercolor=border,
             lightcolor=border,
             darkcolor=border,
-            padding=5,
+            padding=self._s(5),
         )
         style.configure(
             "Primary.TButton",
@@ -413,7 +431,7 @@ class SpedApp:
             lightcolor=accent,
             darkcolor=accent,
             relief="flat",
-            padding=(10, 6),
+            padding=(self._s(10), self._s(6)),
             focusthickness=0,
             font=("Segoe UI", 9, "bold"),
         )
@@ -430,7 +448,7 @@ class SpedApp:
             lightcolor=border,
             darkcolor=border,
             relief="flat",
-            padding=(9, 6),
+            padding=(self._s(9), self._s(6)),
             focusthickness=0,
         )
         style.map(
@@ -443,7 +461,7 @@ class SpedApp:
             "TNotebook.Tab",
             background="#d9eefc",
             foreground=text,
-            padding=(10, 7),
+            padding=(self._s(10), self._s(7)),
             font=("Segoe UI", 8, "bold"),
         )
         style.map(
@@ -456,13 +474,13 @@ class SpedApp:
             background="#ffffff",
             fieldbackground="#ffffff",
             foreground=text,
-            rowheight=24,
+            rowheight=self._s(24),
             font=("Segoe UI", 9, "bold"),
         )
         style.configure("Treeview.Heading", background="#d8eefc", foreground=text, relief="flat", font=("Segoe UI", 9, "bold"))
 
     def _build_layout(self) -> None:
-        frame = ttk.Frame(self.root, padding=10)
+        frame = ttk.Frame(self.root, padding=self._s(10))
         frame.pack(fill=BOTH, expand=True)
 
         ttk.Label(
@@ -471,16 +489,16 @@ class SpedApp:
             font=("Segoe UI", 15, "bold"),
             foreground="#08324d",
             justify="center",
-        ).pack(pady=(0, 6))
+        ).pack(pady=(0, self._s(6)))
 
         notebook = ttk.Notebook(frame)
         notebook.pack(fill=BOTH, expand=True)
 
-        fiscal_root_tab = ttk.Frame(notebook, padding=6, style="Card.TFrame")
-        contrib_root_tab = ttk.Frame(notebook, padding=6, style="Card.TFrame")
-        xml_root_tab = ttk.Frame(notebook, padding=6, style="Card.TFrame")
-        entry_exit_root_tab = ttk.Frame(notebook, padding=6, style="Card.TFrame")
-        settings_root_tab = ttk.Frame(notebook, padding=6, style="Card.TFrame")
+        fiscal_root_tab = ttk.Frame(notebook, padding=self._s(6), style="Card.TFrame")
+        contrib_root_tab = ttk.Frame(notebook, padding=self._s(6), style="Card.TFrame")
+        xml_root_tab = ttk.Frame(notebook, padding=self._s(6), style="Card.TFrame")
+        entry_exit_root_tab = ttk.Frame(notebook, padding=self._s(6), style="Card.TFrame")
+        settings_root_tab = ttk.Frame(notebook, padding=self._s(6), style="Card.TFrame")
         notebook.add(fiscal_root_tab, text="Fiscal")
         notebook.add(contrib_root_tab, text="Contribuicoes")
         notebook.add(xml_root_tab, text="XML")
@@ -11016,12 +11034,12 @@ class SpedApp:
         dialog.transient(self.root)
         dialog.grab_set()
         dialog.protocol("WM_DELETE_WINDOW", lambda: None)
-        self.set_dialog_screen_geometry(dialog, 760, 270, 620, 240, margin_x=120, margin_y=160)
+        self.set_dialog_screen_geometry(dialog, self._s(760), self._s(270), self._s(620), self._s(240), margin_x=self._s(120), margin_y=self._s(160))
 
-        container = ttk.Frame(dialog, padding=(22, 18, 22, 20))
+        container = ttk.Frame(dialog, padding=(self._s(22), self._s(18), self._s(22), self._s(20)))
         container.pack(fill=BOTH, expand=True)
         container.columnconfigure(0, weight=1)
-        container.rowconfigure(1, minsize=64)
+        container.rowconfigure(1, minsize=self._s(64))
 
         ttk.Label(
             container,
