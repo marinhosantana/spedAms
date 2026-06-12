@@ -84,6 +84,7 @@ from app.services.runtime_rule_history import (
     save_runtime_rule_history as save_runtime_rule_history_file,
 )
 from app.services.xml_reconciliation import build_pis_cofins_period_comparison_rows
+from app.ui_qt.import_planilha import ImportPlanilhaDialog
 
 
 COLORS = {
@@ -1396,6 +1397,11 @@ class QtSpedApp(QMainWindow):
 
     def build_catalog_product_page(self) -> QWidget:
         page = self.create_single_catalog_page("Produtos")
+        header_panel = page.layout().itemAt(0).widget()
+        if header_panel is not None and header_panel.layout() is not None:
+            header_panel.layout().addWidget(
+                self.create_button("Importar Planilha", self.open_planilha_import)
+            )
         self.product_page_fields = self.create_line_fields(
             (
                 "id",
@@ -3679,6 +3685,11 @@ class QtSpedApp(QMainWindow):
             QMessageBox.information(self, "Produtos", f"Produto {action} com sucesso.")
         except Exception as exc:
             QMessageBox.critical(self, "Produtos", str(exc))
+
+    def open_planilha_import(self) -> None:
+        dialog = ImportPlanilhaDialog(self.mysql_repo, self.environment, self)
+        dialog.exec()
+        self.start_refresh_product_page_fast()
 
     def delete_product_page(self) -> None:
         row_id = self.selected_product_page_id()

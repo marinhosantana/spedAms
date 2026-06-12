@@ -1491,6 +1491,126 @@ class MysqlCadastroRepository:
         finally:
             connection.close()
 
+    def _make_product_row(self, supplier_id: int, data: dict) -> tuple:
+        """Monta a tupla de valores para INSERT/UPDATE em cad_produtos_fornecedor."""
+        cst_pis    = self._trim_text(data.get("cst_pis",    data.get("cst_pis_cofins",    "")), 4)
+        cst_cofins = self._trim_text(data.get("cst_cofins", data.get("cst_pis_cofins",    "")), 4)
+        aliquota_pis    = self._decimal_text(data.get("aliquota_pis",    data.get("aliquota_pis_cofins", "")))
+        aliquota_cofins = self._decimal_text(data.get("aliquota_cofins", data.get("aliquota_pis_cofins", "")))
+        cst_pis_cofins      = self._trim_text(data.get("cst_pis_cofins", ""), 20)
+        aliquota_pis_cofins = self._decimal_text(data.get("aliquota_pis_cofins", aliquota_pis))
+        normalized_ean  = self._only_digits(data.get("ean", ""))[:30]
+        normalized_code = self._trim_text(data.get("codigo_fornecedor", ""), 80)
+        return (
+            supplier_id,
+            int(data.get("tipo_produto_id") or 0) or None,
+            normalized_code,
+            self._trim_text(data.get("codigo_empresa", ""), 80),
+            self._trim_text(data.get("chave_nfe_origem", ""), 44),
+            self._trim_text(data.get("status_produto", ""), 40),
+            self._trim_text(data.get("descricao", ""), 255),
+            normalized_ean,
+            normalized_ean or None,
+            self._only_digits(data.get("ncm", ""))[:20],
+            self._only_digits(data.get("cest", ""))[:20],
+            self._trim_text(data.get("origem_entrada", ""), 4),
+            self._only_digits(data.get("cfop_saida_fornecedor", ""))[:10],
+            self._only_digits(data.get("cfop_entrada", ""))[:10],
+            self._only_digits(data.get("cfop_saida", ""))[:10],
+            self._trim_text(data.get("natureza_receita_entrada", ""), 40),
+            self._trim_text(data.get("c_classtrib", ""), 20),
+            self._trim_text(data.get("c_benef", ""), 20),
+            self._trim_text(data.get("origem_saida", ""), 4),
+            self._trim_text(data.get("cst_icms_saida", ""), 4),
+            self._only_digits(data.get("cfop_saida_empresa", ""))[:10],
+            self._decimal_text(data.get("aliquota_icms_saida", "")),
+            self._trim_text(data.get("cst_icms", ""), 4),
+            self._decimal_text(data.get("reducao_bc_icms", "")),
+            self._decimal_text(data.get("aliquota_icms", "")),
+            self._trim_text(data.get("cst_ipi", ""), 4),
+            self._decimal_text(data.get("aliquota_ipi", "")),
+            cst_pis_cofins,
+            aliquota_pis_cofins,
+            cst_pis,
+            self._trim_text(data.get("cst_pis_saida", ""), 4),
+            cst_cofins,
+            self._trim_text(data.get("cst_cofins_saida", ""), 4),
+            self._trim_text(data.get("natureza_receita_saida", ""), 40),
+            aliquota_pis,
+            aliquota_cofins,
+            self._decimal_text(data.get("bc_st", "")),
+            self._decimal_text(data.get("mva", "")),
+            self._decimal_text(data.get("valor_icms_st", "")),
+            self._decimal_text(data.get("aliquota_icms_st", "")),
+        )
+
+    _INSERT_PRODUCT_SQL = """
+        INSERT INTO cad_produtos_fornecedor (
+            fornecedor_id, tipo_produto_id, codigo_fornecedor, codigo_empresa, chave_nfe_origem,
+            status_produto, descricao, ean, ean_unico, ncm, cest, origem_entrada,
+            cfop_saida_fornecedor, cfop_entrada, cfop_saida, natureza_receita_entrada,
+            c_classtrib, c_benef, origem_saida, cst_icms_saida, cfop_saida_empresa,
+            aliquota_icms_saida, cst_icms, reducao_bc_icms, aliquota_icms, cst_ipi, aliquota_ipi,
+            cst_pis_cofins, aliquota_pis_cofins, cst_pis, cst_pis_saida, cst_cofins,
+            cst_cofins_saida, natureza_receita_saida, aliquota_pis, aliquota_cofins,
+            bc_st, mva, valor_icms_st, aliquota_icms_st
+        ) VALUES (
+            %s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,
+            %s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s
+        )
+    """
+
+    _UPDATE_PRODUCT_SQL = """
+        UPDATE cad_produtos_fornecedor
+        SET fornecedor_id=%s, tipo_produto_id=%s, codigo_fornecedor=%s, codigo_empresa=%s,
+            chave_nfe_origem=%s, status_produto=%s, descricao=%s, ean=%s, ean_unico=%s,
+            ncm=%s, cest=%s, origem_entrada=%s, cfop_saida_fornecedor=%s, cfop_entrada=%s,
+            cfop_saida=%s, natureza_receita_entrada=%s, c_classtrib=%s, c_benef=%s,
+            origem_saida=%s, cst_icms_saida=%s, cfop_saida_empresa=%s, aliquota_icms_saida=%s,
+            cst_icms=%s, reducao_bc_icms=%s, aliquota_icms=%s, cst_ipi=%s, aliquota_ipi=%s,
+            cst_pis_cofins=%s, aliquota_pis_cofins=%s, cst_pis=%s, cst_pis_saida=%s,
+            cst_cofins=%s, cst_cofins_saida=%s, natureza_receita_saida=%s,
+            aliquota_pis=%s, aliquota_cofins=%s, bc_st=%s, mva=%s, valor_icms_st=%s,
+            aliquota_icms_st=%s
+        WHERE id=%s
+    """
+
+    def bulk_upsert_supplier_products(
+        self,
+        records: list[dict],
+    ) -> list[int]:
+        """Insere/atualiza múltiplos produtos em uma única conexão + transação.
+
+        Cada record: {'supplier_id': int, 'data': dict, 'existing_id': int|None}
+        Retorna lista de IDs na mesma ordem de records.
+        """
+        ids: list[int] = [0] * len(records)
+        if not records:
+            return ids
+
+        to_insert = [(i, r) for i, r in enumerate(records) if not r["existing_id"]]
+        to_update = [(i, r) for i, r in enumerate(records) if r["existing_id"]]
+
+        connection = self.get_connection()
+        try:
+            cursor = connection.cursor()
+
+            for i, rec in to_insert:
+                row = self._make_product_row(rec["supplier_id"], rec["data"])
+                cursor.execute(self._INSERT_PRODUCT_SQL, row)
+                ids[i] = int(cursor.lastrowid)
+
+            for i, rec in to_update:
+                row = self._make_product_row(rec["supplier_id"], rec["data"])
+                cursor.execute(self._UPDATE_PRODUCT_SQL, (*row, rec["existing_id"]))
+                ids[i] = rec["existing_id"]
+
+            connection.commit()
+        finally:
+            connection.close()
+
+        return ids
+
     def delete_supplier_product(self, product_id: int) -> None:
         self._delete_by_id("cad_produtos_fornecedor", product_id)
 
