@@ -794,6 +794,7 @@ def import_catalogs_from_preview(
     environment: str,
     preview_rows: list[CatalogImportPreviewRow],
     allow_update_existing: bool,
+    allow_insert_new: bool = True,
     progress_callback: Callable[[int, int, str], None] | None = None,
     update_fields: set[str] | None = None,
 ) -> dict[str, int]:
@@ -805,6 +806,7 @@ def import_catalogs_from_preview(
         "products_created": 0,
         "products_updated": 0,
         "products_skipped_existing": 0,
+        "products_skipped_new": 0,
     }
     skipped_rows: list[list[str]] = []
     hidden_skipped_rows = 0
@@ -846,6 +848,9 @@ def import_catalogs_from_preview(
     supplier_ids = {supplier_id for _row, supplier_id, _payload in resolved_rows}
     eans = {str(payload.get("ean", "") or "").strip() for _row, _supplier_id, payload in resolved_rows if str(payload.get("ean", "") or "").strip()}
     codes = {str(payload.get("codigo_fornecedor", "") or "").strip() for _row, _supplier_id, payload in resolved_rows if str(payload.get("codigo_fornecedor", "") or "").strip()}
+    # Also include zero-stripped versions of numeric codes so DB products with different zero-padding are loaded
+    stripped_codes = {(c.lstrip("0") or "0") for c in codes if c.isdigit() and c.lstrip("0") != c}
+    codes = codes | stripped_codes
     existing_by_id: dict[int, dict[str, object]] = {}
     existing_by_ean: dict[tuple[int, str], int] = {}
     existing_by_code: dict[tuple[int, str], int] = {}
@@ -870,6 +875,11 @@ def import_catalogs_from_preview(
                         existing_by_ean.setdefault((supplier_id, existing_ean), product_id)
                     if existing_code:
                         existing_by_code.setdefault((supplier_id, existing_code), product_id)
+                        # Also index by zero-stripped code for numeric codes
+                        if existing_code.isdigit():
+                            stripped = existing_code.lstrip("0") or "0"
+                            if stripped != existing_code:
+                                existing_by_code.setdefault((supplier_id, stripped), product_id)
 
             for supplier_chunk in _chunks(sorted(supplier_ids)):
                 for ean_chunk in _chunks(sorted(eans)):
@@ -901,6 +911,7 @@ def import_catalogs_from_preview(
     update_values: list[tuple[int, dict[str, object]]] = []
     staged_by_ean = dict(existing_by_ean)
     staged_by_code = dict(existing_by_code)
+    already_processed_ids: set[int] = set()
     for index, (row, supplier_id, payload) in enumerate(resolved_rows, start=1):
         if progress_callback is not None and (index == 1 or index == len(resolved_rows) or index % 50 == 0):
             progress_callback(index, len(resolved_rows), f"Preparando produtos ({index}/{len(resolved_rows)})")
@@ -909,13 +920,25 @@ def import_catalogs_from_preview(
         existing_id = staged_by_ean.get((supplier_id, normalized_ean)) if normalized_ean else None
         if existing_id is None and normalized_code:
             existing_id = staged_by_code.get((supplier_id, normalized_code))
+            # Fallback: try zero-stripped numeric code (handles '000053' vs '53' mismatch)
+            if existing_id is None and normalized_code.isdigit():
+                stripped = normalized_code.lstrip("0") or "0"
+                if stripped != normalized_code:
+                    existing_id = staged_by_code.get((supplier_id, stripped))
         existing_product = existing_by_id.get(existing_id or 0)
         if existing_id is not None and existing_product is None:
-            add_skipped_row([row.xml_file, row.codigo_fornecedor, row.ean, row.descricao, "Sem alteracao", "Produto repetido na previa; item ja preparado para cadastro."])
+            add_skipped_row([row.xml_file, row.codigo_fornecedor, row.ean, row.descricao, "Ja cadastrado", "Produto repetido na previa; item ja preparado para cadastro nesta importacao."])
+            continue
+        if existing_id is not None and int(existing_id) in already_processed_ids:
+            add_skipped_row([row.xml_file, row.codigo_fornecedor, row.ean, row.descricao, "Ja processado", "Produto ja atualizado em outra nota nesta importacao."])
             continue
         if existing_id and not allow_update_existing:
             stats["products_skipped_existing"] += 1
             add_skipped_row([row.xml_file, row.codigo_fornecedor, row.ean, row.descricao, "Ignorado", "Produto ja existe e atualizacao de existentes nao foi autorizada."])
+            continue
+        if existing_id is None and not allow_insert_new:
+            stats["products_skipped_new"] += 1
+            add_skipped_row([row.xml_file, row.codigo_fornecedor, row.ean, row.descricao, "Ignorado", "Produto novo ignorado pois apenas atualizacao de existentes foi autorizada."])
             continue
         if existing_product and allow_update_existing:
             changed_values: dict[str, object] = {}
@@ -933,6 +956,7 @@ def import_catalogs_from_preview(
                 add_skipped_row([row.xml_file, row.codigo_fornecedor, row.ean, row.descricao, "Sem alteracao", "Item existente sem diferenca real nos campos selecionados."])
                 continue
             update_values.append((int(existing_id), changed_values))
+            already_processed_ids.add(int(existing_id))
             stats["products_updated"] += 1
         else:
             values = _supplier_product_values(repository, supplier_id, payload)

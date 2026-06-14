@@ -362,7 +362,7 @@ def _execute_import(
                     cache[f"ean:{ean_v}"] = entry
                 if cod:
                     cache[f"cod:{cod}"] = entry
-            if ex:
+            if ex and ex.get("id"):
                 stats["atualizados"] += 1
             else:
                 stats["novos"] += 1
@@ -512,6 +512,109 @@ def _execute_import(
     return stats
 
 
+# ── Worker de carregamento de arquivo ─────────────────────────────────────────
+
+class _FileLoaderWorker(QObject):
+    progress = Signal(str)
+    finished = Signal(list, int, object, int, object)  # sheet_names, header_row, df_preview, total_rows, df_full
+    failed = Signal(str)
+
+    def __init__(
+        self,
+        file_path: Path,
+        sheet: Any,
+        header_row: int,
+        detect_header: bool,
+        read_sheets: bool,
+    ) -> None:
+        super().__init__()
+        self._file_path = file_path
+        self._sheet = sheet
+        self._header_row = header_row
+        self._detect_header = detect_header
+        self._read_sheets = read_sheets
+        self._cancelled = False
+
+    def cancel(self) -> None:
+        self._cancelled = True
+
+    def run(self) -> None:
+        try:
+            ext = self._file_path.suffix.lower()
+            sheet_names: list[str] = []
+            sheet = self._sheet
+            header_row = self._header_row
+
+            if self._read_sheets:
+                self.progress.emit("Lendo estrutura do arquivo...")
+                if ext in {".xlsx", ".xls", ".ods"}:
+                    xf = pd.ExcelFile(str(self._file_path))
+                    sheet_names = list(xf.sheet_names)
+                    xf.close()
+                    if sheet_names and (sheet == 0 or sheet not in sheet_names):
+                        sheet = sheet_names[0]
+
+            if self._cancelled:
+                return
+
+            if self._detect_header:
+                self.progress.emit("Detectando cabecalho...")
+                best_row = 0
+                best_score = -1
+                for row in range(5):
+                    if self._cancelled:
+                        return
+                    try:
+                        if ext == ".csv":
+                            df = pd.read_csv(str(self._file_path), header=row, nrows=0, dtype=str)
+                        else:
+                            df = pd.read_excel(str(self._file_path), sheet_name=sheet, header=row, nrows=0, dtype=str)
+                        total = len(df.columns)
+                        if total == 0:
+                            continue
+                        named = sum(1 for c in df.columns if not str(c).startswith("Unnamed:"))
+                        score = named / total
+                        if score > best_score:
+                            best_score = score
+                            best_row = row
+                        if score >= 0.9:
+                            break
+                    except Exception:
+                        break
+                header_row = best_row
+
+            if self._cancelled:
+                return
+
+            self.progress.emit("Carregando preview...")
+            if ext == ".csv":
+                df_preview = pd.read_csv(
+                    str(self._file_path), header=header_row, nrows=8, dtype=str, keep_default_na=False,
+                )
+            else:
+                df_preview = pd.read_excel(
+                    str(self._file_path), sheet_name=sheet, header=header_row, nrows=8, dtype=str,
+                )
+
+            if self._cancelled:
+                return
+
+            self.progress.emit("Contando linhas...")
+            if ext == ".csv":
+                df_full = pd.read_csv(str(self._file_path), header=header_row, dtype=str, keep_default_na=False)
+            else:
+                df_full = pd.read_excel(str(self._file_path), sheet_name=sheet, header=header_row, dtype=str)
+            total_rows = len(df_full)
+
+            if self._cancelled:
+                return
+
+            self.finished.emit(sheet_names, header_row, df_preview, total_rows, df_full)
+        except Exception as exc:
+            if not self._cancelled:
+                self.failed.emit(str(exc))
+
+
 # ── Dialog principal ──────────────────────────────────────────────────────────
 
 class ImportPlanilhaDialog(QDialog):
@@ -540,6 +643,8 @@ class ImportPlanilhaDialog(QDialog):
         self._mapping_combos: dict[str, QComboBox] = {}
         self._thread: QThread | None = None
         self._worker: _ImportWorker | None = None
+        self._file_load_thread: QThread | None = None
+        self._file_load_worker: _FileLoaderWorker | None = None
         self._profiles: dict[str, dict[str, str]] = _load_all_profiles()
 
         self.setWindowTitle("Importar Planilha de Produtos")
@@ -747,6 +852,24 @@ class ImportPlanilhaDialog(QDialog):
         self._file_info_label.setObjectName("muted")
         layout.addWidget(self._file_info_label)
 
+        # Barra de progresso de carregamento
+        load_bar_widget = QWidget()
+        load_bar_widget.setStyleSheet("background: transparent;")
+        load_bar_layout = QHBoxLayout(load_bar_widget)
+        load_bar_layout.setContentsMargins(0, 0, 0, 0)
+        load_bar_layout.setSpacing(8)
+        self._load_status_label = QLabel("")
+        self._load_status_label.setStyleSheet(f"color: {self.COLORS['muted']}; font-size: 11px; background: transparent;")
+        self._load_progress_bar = QProgressBar()
+        self._load_progress_bar.setRange(0, 0)
+        self._load_progress_bar.setFixedHeight(8)
+        self._load_progress_bar.setTextVisible(False)
+        load_bar_layout.addWidget(self._load_status_label)
+        load_bar_layout.addWidget(self._load_progress_bar, 1)
+        load_bar_widget.setVisible(False)
+        self._load_bar_widget = load_bar_widget
+        layout.addWidget(load_bar_widget)
+
         return page
 
     def _load_company_combo(self) -> None:
@@ -771,7 +894,17 @@ class ImportPlanilhaDialog(QDialog):
         self._file_path = Path(path)
         self._file_label.setText(str(self._file_path.name))
         self._file_label.setStyleSheet(f"color: {self.COLORS['text']};")
-        self._load_sheets()
+        self._df = None
+        self._all_columns = []
+        self._sheet_combo.blockSignals(True)
+        self._sheet_combo.clear()
+        self._sheet_combo.setEnabled(False)
+        self._sheet_combo.blockSignals(False)
+        self._preview_table.setRowCount(0)
+        self._preview_table.setColumnCount(0)
+        self._file_info_label.setText("")
+        self._update_nav()
+        self._start_file_load(read_sheets=True, detect_header=True)
 
     def _load_sheets(self) -> None:
         if self._file_path is None:
@@ -797,12 +930,109 @@ class ImportPlanilhaDialog(QDialog):
         self._refresh_preview()
 
     def _on_sheet_changed(self, _: str) -> None:
-        self._auto_detect_header()
-        self._refresh_preview()
+        if self._file_path is None:
+            return
+        self._start_file_load(read_sheets=False, detect_header=True)
 
     def _on_header_check_changed(self) -> None:
         self._header_row_spin.setEnabled(self._header_check.isChecked())
-        self._refresh_preview()
+        if self._file_path is not None:
+            self._start_file_load(read_sheets=False, detect_header=False)
+
+    def _start_file_load(self, read_sheets: bool, detect_header: bool) -> None:
+        if self._file_path is None:
+            return
+        if self._file_load_worker is not None:
+            self._file_load_worker.cancel()
+        if self._file_load_thread is not None:
+            self._file_load_thread.quit()
+            self._file_load_thread.wait(300)
+
+        ext = self._file_path.suffix.lower()
+        sheet: Any = self._sheet_combo.currentText() if self._sheet_combo.isEnabled() else 0
+        if sheet in {"(csv)", ""}:
+            sheet = 0
+        has_header = self._header_check.isChecked()
+        header_row = self._header_row_spin.value() if has_header else None
+        if header_row is None:
+            detect_header = False
+            header_row = 0
+
+        self._load_bar_widget.setVisible(True)
+        self._load_status_label.setText("Aguarde...")
+        self._btn_proximo.setEnabled(False)
+
+        self._file_load_thread = QThread(self)
+        self._file_load_worker = _FileLoaderWorker(
+            self._file_path, sheet, header_row, detect_header, read_sheets,
+        )
+        self._file_load_worker.moveToThread(self._file_load_thread)
+        self._file_load_thread.started.connect(self._file_load_worker.run)
+        self._file_load_worker.progress.connect(self._on_file_load_progress)
+        self._file_load_worker.finished.connect(self._on_file_load_done)
+        self._file_load_worker.failed.connect(self._on_file_load_failed)
+        self._file_load_worker.finished.connect(self._file_load_thread.quit)
+        self._file_load_worker.failed.connect(self._file_load_thread.quit)
+        self._file_load_thread.finished.connect(self._file_load_worker.deleteLater)
+        self._file_load_thread.finished.connect(self._file_load_thread.deleteLater)
+        self._file_load_thread.finished.connect(lambda: setattr(self, "_file_load_thread", None))
+        self._file_load_thread.finished.connect(lambda: setattr(self, "_file_load_worker", None))
+        self._file_load_thread.start()
+
+    def _on_file_load_progress(self, message: str) -> None:
+        self._load_status_label.setText(message)
+
+    def _on_file_load_done(self, sheet_names: list, header_row: int, df_preview: Any, total_rows: int, df_full: Any) -> None:
+        self._load_bar_widget.setVisible(False)
+
+        if sheet_names:
+            self._sheet_combo.blockSignals(True)
+            self._sheet_combo.clear()
+            for name in sheet_names:
+                self._sheet_combo.addItem(name)
+            self._sheet_combo.setEnabled(len(sheet_names) > 1)
+            self._sheet_combo.blockSignals(False)
+        elif self._sheet_combo.count() == 0:
+            ext = self._file_path.suffix.lower() if self._file_path else ""
+            if ext == ".csv":
+                self._sheet_combo.blockSignals(True)
+                self._sheet_combo.addItem("(csv)")
+                self._sheet_combo.setEnabled(False)
+                self._sheet_combo.blockSignals(False)
+
+        self._header_row_spin.blockSignals(True)
+        self._header_row_spin.setValue(header_row)
+        self._header_row_spin.blockSignals(False)
+
+        df_full.columns = [str(c) for c in df_full.columns]
+        self._df = df_full
+        self._all_columns = list(df_full.columns)
+        df_preview.columns = self._all_columns[:len(df_preview.columns)]
+
+        self._file_info_label.setText(f"{total_rows} linhas · {len(self._all_columns)} colunas")
+        self._file_info_label.setStyleSheet(f"color: {self.COLORS['muted']};")
+
+        preview_df = df_preview.head(self.PREVIEW_ROWS)
+        self._preview_table.setUpdatesEnabled(False)
+        self._preview_table.setColumnCount(len(self._all_columns))
+        self._preview_table.setHorizontalHeaderLabels(self._all_columns)
+        self._preview_table.setRowCount(len(preview_df))
+        for r, (_, row) in enumerate(preview_df.iterrows()):
+            for c, col in enumerate(self._all_columns):
+                v = row[col]
+                text = "" if (v is None or (isinstance(v, float) and str(v) == "nan")) else str(v)
+                item = QTableWidgetItem(text)
+                item.setTextAlignment(Qt.AlignVCenter | Qt.AlignLeft)
+                self._preview_table.setItem(r, c, item)
+        self._preview_table.setUpdatesEnabled(True)
+
+        self._update_nav()
+
+    def _on_file_load_failed(self, error: str) -> None:
+        self._load_bar_widget.setVisible(False)
+        self._file_info_label.setText(f"Erro: {error}")
+        self._file_info_label.setStyleSheet(f"color: {self.COLORS['bad']};")
+        self._update_nav()
 
     def _auto_detect_header(self) -> None:
         """Testa linhas 0-4 e escolhe a que tem menos 'Unnamed:' como cabeçalho."""
@@ -839,39 +1069,7 @@ class ImportPlanilhaDialog(QDialog):
     def _refresh_preview(self) -> None:
         if self._file_path is None:
             return
-        try:
-            df = self._read_file(nrows=self.PREVIEW_ROWS + 1)
-        except Exception as exc:
-            self._file_info_label.setText(f"Erro: {exc}")
-            self._file_info_label.setStyleSheet(f"color: {self.COLORS['bad']};")
-            return
-
-        df.columns = [str(c) for c in df.columns]
-        self._df = df
-        self._all_columns = list(df.columns)
-
-        total_rows = self._count_rows()
-        self._file_info_label.setText(
-            f"{total_rows} linhas · {len(self._all_columns)} colunas"
-        )
-        self._file_info_label.setStyleSheet(f"color: {self.COLORS['muted']};")
-
-        # Preenche preview
-        preview_df = df.head(self.PREVIEW_ROWS)
-        self._preview_table.setUpdatesEnabled(False)
-        self._preview_table.setColumnCount(len(self._all_columns))
-        self._preview_table.setHorizontalHeaderLabels(self._all_columns)
-        self._preview_table.setRowCount(len(preview_df))
-        for r, (_, row) in enumerate(preview_df.iterrows()):
-            for c, col in enumerate(self._all_columns):
-                v = row[col]
-                text = "" if (v is None or (isinstance(v, float) and str(v) == "nan")) else str(v)
-                item = QTableWidgetItem(text)
-                item.setTextAlignment(Qt.AlignVCenter | Qt.AlignLeft)
-                self._preview_table.setItem(r, c, item)
-        self._preview_table.setUpdatesEnabled(True)
-
-        self._update_nav()
+        self._start_file_load(read_sheets=False, detect_header=False)
 
     def _read_file(self, nrows: int | None = None) -> Any:
         assert self._file_path is not None
@@ -1280,14 +1478,9 @@ class ImportPlanilhaDialog(QDialog):
     def _go_next(self) -> None:
         step = self._stack.currentIndex()
         if step == 0:
-            # Carrega os dados completos antes de avançar
-            try:
-                self._df = self._read_file()
-                self._df.columns = [str(c) for c in self._df.columns]
-                self._all_columns = list(self._df.columns)
-            except Exception as exc:
+            if self._df is None:
                 from PySide6.QtWidgets import QMessageBox
-                QMessageBox.critical(self, "Erro ao ler arquivo", str(exc))
+                QMessageBox.warning(self, "Aguarde", "O arquivo ainda esta sendo carregado. Aguarde e tente novamente.")
                 return
             self._stack.setCurrentIndex(1)
             try:

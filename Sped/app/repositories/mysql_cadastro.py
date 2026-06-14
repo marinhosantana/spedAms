@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import json
 import sys
@@ -1212,29 +1212,50 @@ class MysqlCadastroRepository:
                 row = cursor.fetchone()
                 if row:
                     supplier_id = int(row[0])
+                    # Check if another supplier already uses the new nome to avoid duplicate key
                     cursor.execute(
-                        """
-                        UPDATE cad_fornecedores
-                        SET nome = %s,
-                            cnpj = CASE WHEN %s <> '' THEN %s ELSE cnpj END,
-                            inscricao_estadual = CASE WHEN %s <> '' THEN %s ELSE inscricao_estadual END,
-                            uf = CASE WHEN %s <> '' THEN %s ELSE uf END,
-                            regime_tributario = CASE WHEN %s <> '' THEN %s ELSE regime_tributario END
-                        WHERE id = %s
-                        """,
-                        (
-                            normalized_name,
-                            normalized_cnpj,
-                            normalized_cnpj,
-                            normalized_ie,
-                            normalized_ie,
-                            normalized_uf,
-                            normalized_uf,
-                            normalized_regime,
-                            normalized_regime,
-                            supplier_id,
-                        ),
+                        "SELECT id FROM cad_fornecedores WHERE empresa_id = %s AND UPPER(nome) = UPPER(%s) AND id != %s LIMIT 1",
+                        (company_id, normalized_name, supplier_id),
                     )
+                    nome_taken = cursor.fetchone() is not None
+                    if nome_taken:
+                        cursor.execute(
+                            """
+                            UPDATE cad_fornecedores
+                            SET cnpj = CASE WHEN %s <> '' THEN %s ELSE cnpj END,
+                                inscricao_estadual = CASE WHEN %s <> '' THEN %s ELSE inscricao_estadual END,
+                                uf = CASE WHEN %s <> '' THEN %s ELSE uf END,
+                                regime_tributario = CASE WHEN %s <> '' THEN %s ELSE regime_tributario END
+                            WHERE id = %s
+                            """,
+                            (
+                                normalized_cnpj, normalized_cnpj,
+                                normalized_ie, normalized_ie,
+                                normalized_uf, normalized_uf,
+                                normalized_regime, normalized_regime,
+                                supplier_id,
+                            ),
+                        )
+                    else:
+                        cursor.execute(
+                            """
+                            UPDATE cad_fornecedores
+                            SET nome = %s,
+                                cnpj = CASE WHEN %s <> '' THEN %s ELSE cnpj END,
+                                inscricao_estadual = CASE WHEN %s <> '' THEN %s ELSE inscricao_estadual END,
+                                uf = CASE WHEN %s <> '' THEN %s ELSE uf END,
+                                regime_tributario = CASE WHEN %s <> '' THEN %s ELSE regime_tributario END
+                            WHERE id = %s
+                            """,
+                            (
+                                normalized_name,
+                                normalized_cnpj, normalized_cnpj,
+                                normalized_ie, normalized_ie,
+                                normalized_uf, normalized_uf,
+                                normalized_regime, normalized_regime,
+                                supplier_id,
+                            ),
+                        )
                     connection.commit()
                     return supplier_id
             cursor.execute(
@@ -1273,15 +1294,26 @@ class MysqlCadastroRepository:
                 )
                 connection.commit()
                 return supplier_id
-            cursor.execute(
-                """
-                INSERT INTO cad_fornecedores (empresa_id, nome, cnpj, inscricao_estadual, uf, codigo, regime_tributario, observacao)
-                VALUES (%s, %s, %s, %s, %s, '', %s, 'Importado de XML')
-                """,
-                (company_id, normalized_name, normalized_cnpj, normalized_ie, normalized_uf, normalized_regime),
-            )
-            connection.commit()
-            return int(cursor.lastrowid)
+            try:
+                cursor.execute(
+                    """
+                    INSERT INTO cad_fornecedores (empresa_id, nome, cnpj, inscricao_estadual, uf, codigo, regime_tributario, observacao)
+                    VALUES (%s, %s, %s, %s, %s, '', %s, 'Importado de XML')
+                    """,
+                    (company_id, normalized_name, normalized_cnpj, normalized_ie, normalized_uf, normalized_regime),
+                )
+                connection.commit()
+                return int(cursor.lastrowid)
+            except MySQLError as exc:
+                if exc.errno == 1062:
+                    cursor.execute(
+                        "SELECT id FROM cad_fornecedores WHERE empresa_id = %s AND UPPER(nome) = UPPER(%s) LIMIT 1",
+                        (company_id, normalized_name),
+                    )
+                    dup = cursor.fetchone()
+                    if dup:
+                        return int(dup[0])
+                raise
         finally:
             connection.close()
 
@@ -2328,3 +2360,82 @@ class MysqlCadastroRepository:
         finally:
             connection.close()
 
+
+    def get_sped_catalog_check(self, sped_arquivo_id: int) -> list[dict]:
+        connection = self.get_connection()
+        try:
+            cursor = connection.cursor(dictionary=True)
+            cursor.execute(
+                """
+                SELECT
+                    s.codigo            AS codigo_sped,
+                    s.descricao         AS descricao_sped,
+                    s.ncm               AS ncm_sped,
+                    s.cst_icms          AS cst_icms_sped,
+                    s.aliquota_icms     AS aliquota_icms_sped,
+                    s.cest              AS cest_sped,
+                    IF(p.id IS NOT NULL, 'Cadastrado', 'Nao Cadastrado') AS status,
+                    p.id                AS cad_id,
+                    p.codigo_empresa    AS codigo_empresa_cad,
+                    p.codigo_fornecedor AS codigo_fornecedor_cad,
+                    p.descricao         AS descricao_cad,
+                    f.nome              AS fornecedor,
+                    f.cnpj              AS fornecedor_cnpj,
+                    p.ncm               AS ncm_cad,
+                    p.cest              AS cest_cad,
+                    p.cst_icms          AS cst_icms_cad,
+                    p.aliquota_icms     AS aliquota_icms_cad,
+                    p.cst_pis           AS cst_pis_cad,
+                    p.cst_cofins        AS cst_cofins_cad,
+                    p.aliquota_pis      AS aliquota_pis_cad,
+                    p.aliquota_cofins   AS aliquota_cofins_cad,
+                    IF(p.chave_nfe_origem IS NOT NULL AND p.chave_nfe_origem != '', 'Sim', 'Nao') AS via_xml
+                FROM sped_produtos_0200 s
+                LEFT JOIN sped_arquivos sa ON sa.id = s.sped_arquivo_id
+                LEFT JOIN sped_perfis sp ON sp.id = sa.perfil_id
+                LEFT JOIN cad_empresas e ON e.cnpj = sp.empresa_cnpj_sped
+                LEFT JOIN cad_fornecedores f ON f.empresa_id = e.id
+                LEFT JOIN cad_produtos_fornecedor p
+                    ON p.fornecedor_id = f.id
+                   AND p.codigo_empresa = s.codigo
+                WHERE s.sped_arquivo_id = %s
+                ORDER BY
+                    IF(p.id IS NOT NULL, 0, 1),
+                    s.codigo,
+                    f.nome
+                """,
+                (sped_arquivo_id,),
+            )
+            return [dict(row) for row in cursor.fetchall()]
+        finally:
+            connection.close()
+
+    def get_catalog_products_by_company_cnpj(self, environment: str, company_cnpj: str) -> list[dict]:
+        """
+        Retorna todos os produtos do cadastro (cad_produtos_fornecedor) vinculados
+        a uma empresa identificada pelo CNPJ, incluindo nome do fornecedor.
+        Usado na conferencia SPED x Cadastro.
+        """
+        digits_only = "".join(c for c in str(company_cnpj or "") if c.isdigit())
+        if not digits_only:
+            return []
+        connection = self.get_connection()
+        try:
+            cursor = connection.cursor(dictionary=True)
+            cursor.execute(
+                """
+                SELECT
+                    p.*,
+                    f.nome AS fornecedor_nome,
+                    f.cnpj AS fornecedor_cnpj
+                FROM cad_produtos_fornecedor p
+                JOIN cad_fornecedores f ON f.id = p.fornecedor_id
+                JOIN cad_empresas e ON e.id = f.empresa_id
+                WHERE e.cnpj = %s
+                ORDER BY p.codigo_empresa, f.nome
+                """,
+                (digits_only,),
+            )
+            return [dict(row) for row in cursor.fetchall()]
+        finally:
+            connection.close()

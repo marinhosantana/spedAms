@@ -13,6 +13,7 @@ from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QApplication,
+    QButtonGroup,
     QCheckBox,
     QComboBox,
     QCompleter,
@@ -30,6 +31,7 @@ from PySide6.QtWidgets import (
     QMenu,
     QProgressBar,
     QPushButton,
+    QRadioButton,
     QScrollArea,
     QSizePolicy,
     QStackedWidget,
@@ -286,6 +288,7 @@ class CatalogImportWorker(QObject):
         environment: str,
         preview_rows: list[CatalogImportPreviewRow],
         allow_update_existing: bool,
+        allow_insert_new: bool,
         update_fields: set[str],
     ) -> None:
         super().__init__()
@@ -293,6 +296,7 @@ class CatalogImportWorker(QObject):
         self.environment = environment
         self.preview_rows = preview_rows
         self.allow_update_existing = allow_update_existing
+        self.allow_insert_new = allow_insert_new
         self.update_fields = update_fields
 
     def run(self) -> None:
@@ -317,6 +321,7 @@ class CatalogImportWorker(QObject):
                 self.environment,
                 self.preview_rows,
                 allow_update_existing=self.allow_update_existing,
+                allow_insert_new=self.allow_insert_new,
                 progress_callback=self.progress.emit,
                 update_fields=self.update_fields,
             )
@@ -1520,6 +1525,9 @@ class QtSpedApp(QMainWindow):
         self.product_page_search_input.setPlaceholderText("Codigo, descricao, classificacao, EAN, NCM ou CST")
         self.product_page_search_input.textChanged.connect(lambda _text: self.apply_product_page_filters())
         search_grid.addWidget(self.product_page_search_input, 1, 2)
+        self.product_page_xml_only_check = QCheckBox("Somente via XML (tem Chave NF-e)")
+        self.product_page_xml_only_check.stateChanged.connect(lambda _: self.apply_product_page_filters())
+        search_grid.addWidget(self.product_page_xml_only_check, 2, 0, 1, 2)
         actions = QHBoxLayout()
         actions.addWidget(self.create_button("Exportar", self.export_product_page_filtered))
         actions.addWidget(self.create_button("Limpar Consulta", self.clear_product_page_consultation))
@@ -1532,7 +1540,7 @@ class QtSpedApp(QMainWindow):
         actions.addWidget(self.create_button("Editar Selecionado", self.edit_product_page_selected))
         actions.addWidget(self.create_button("Excluir", self.delete_product_page))
         actions.addStretch()
-        search_grid.addLayout(actions, 2, 0, 1, 3)
+        search_grid.addLayout(actions, 3, 0, 1, 3)
         search_grid.setColumnStretch(0, 2)
         search_grid.setColumnStretch(1, 2)
         search_grid.setColumnStretch(2, 5)
@@ -1681,9 +1689,224 @@ class QtSpedApp(QMainWindow):
         form_layout.addLayout(form)
         form_layout.addStretch()
         self.product_page_tabs.addTab(form_tab, "Cadastro / Edicao")
+        self.product_page_tabs.addTab(self._build_sped_catalog_check_tab(), "Conferencia SPED x Cadastro")
         page.layout().addWidget(self.product_page_tabs, 1)
         self.product_page_table.selectionModel().selectionChanged.connect(lambda _selected, _deselected: self.handle_product_page_select())
         return page
+
+    # ------------------------------------------------------------------
+    # Conferencia SPED x Cadastro
+    # ------------------------------------------------------------------
+    def _build_sped_catalog_check_tab(self) -> QWidget:
+        tab = QWidget()
+        layout = QVBoxLayout(tab)
+        layout.setContentsMargins(10, 10, 10, 10)
+        layout.setSpacing(8)
+
+        title = QLabel("Conferencia: Produtos do SPED 0200 x Cadastro de Produtos")
+        title.setObjectName("sectionTitle")
+        layout.addWidget(title)
+
+        file_row = QHBoxLayout()
+        file_row.addWidget(QLabel("Arquivo SPED:"))
+        self.sped_check_file_input = QLineEdit()
+        self.sped_check_file_input.setPlaceholderText("Selecione um arquivo SPED (.txt / .efd)...")
+        self.sped_check_file_input.setReadOnly(True)
+        file_row.addWidget(self.sped_check_file_input, 1)
+        file_row.addWidget(self.create_button("Selecionar", self._select_sped_check_file))
+        file_row.addWidget(self.create_button("Gerar Relatorio", self.run_sped_catalog_check, primary=True))
+        file_row.addWidget(self.create_button("Exportar Excel", self.export_sped_catalog_check))
+        layout.addLayout(file_row)
+
+        self.sped_check_info_label = QLabel("")
+        self.sped_check_info_label.setObjectName("statusLabel")
+        layout.addWidget(self.sped_check_info_label)
+
+        metrics_row = QHBoxLayout()
+        self.sped_check_metric_labels: dict[str, QLabel] = {}
+        for key, label in (
+            ("total", "Total 0200"),
+            ("found", "Cadastrados"),
+            ("missing", "Nao Cadastrados"),
+            ("via_xml", "Via XML"),
+        ):
+            card, value_label = self.create_metric_card_with_label(label, "-")
+            self.sped_check_metric_labels[key] = value_label
+            metrics_row.addWidget(card)
+        metrics_row.addStretch()
+        layout.addLayout(metrics_row)
+
+        headers = [
+            "Status",
+            "Cod. SPED",
+            "Descricao SPED",
+            "NCM SPED",
+            "CST ICMS SPED",
+            "% ICMS SPED",
+            "CEST SPED",
+            "Fornecedor",
+            "Cod. Fornecedor",
+            "Cod. Empresa",
+            "Descricao Cadastro",
+            "NCM Cadastro",
+            "CST ICMS Cad.",
+            "% ICMS Cad.",
+            "CST PIS Cad.",
+            "CST COFINS Cad.",
+            "Via XML",
+            "Fornecedor Entrada (SPED)",
+            "CNPJ Fornecedor Entrada",
+        ]
+        self.sped_check_headers = headers
+        self.sped_check_rows: list[list[object]] = []
+        self.sped_check_table = self.create_data_table(headers)
+        layout.addWidget(self.sped_check_table, 1)
+        return tab
+
+    def _select_sped_check_file(self) -> None:
+        file_path, _ = QFileDialog.getOpenFileName(
+            self, "Selecionar arquivo SPED", "",
+            "Arquivos SPED (*.txt *.sped *.efd);;Todos os arquivos (*.*)",
+        )
+        if file_path:
+            self.sped_check_file_input.setText(file_path)
+            self.sped_check_info_label.setText("Arquivo selecionado. Clique em 'Gerar Relatorio'.")
+
+    def reload_sped_catalog_check_archives(self) -> None:
+        pass  # not used in file-based approach
+
+    def run_sped_catalog_check(self) -> None:
+        from app.parsers.sped_fiscal_parser import read_sped_0200_products
+
+        file_path_str = self.sped_check_file_input.text().strip()
+        if not file_path_str:
+            QMessageBox.warning(self, "Conferencia SPED x Cadastro", "Selecione um arquivo SPED antes de gerar o relatorio.")
+            return
+        sped_path = Path(file_path_str)
+        if not sped_path.exists():
+            QMessageBox.warning(self, "Conferencia SPED x Cadastro", "Arquivo SPED nao encontrado no caminho informado.")
+            return
+        try:
+            QApplication.setOverrideCursor(Qt.WaitCursor)
+            company_cnpj, company_name, periodo_ini, periodo_fim, sped_products, entry_suppliers = read_sped_0200_products(sped_path)
+            if not company_cnpj:
+                QApplication.restoreOverrideCursor()
+                QMessageBox.warning(self, "Conferencia SPED x Cadastro", "Nao foi possivel identificar o CNPJ da empresa no arquivo SPED (registro 0000 nao encontrado).")
+                return
+            catalog_rows = self.mysql_repo.get_catalog_products_by_company_cnpj(self.environment, company_cnpj)
+        except Exception as exc:
+            QApplication.restoreOverrideCursor()
+            QMessageBox.critical(self, "Conferencia SPED x Cadastro", f"Erro ao processar:\n{exc}")
+            return
+        finally:
+            QApplication.restoreOverrideCursor()
+
+        # Index catalog products by codigo_empresa
+        catalog_by_code: dict[str, list[dict]] = {}
+        for prod in catalog_rows:
+            code = str(prod.get("codigo_empresa") or "").strip()
+            if code:
+                catalog_by_code.setdefault(code, []).append(prod)
+
+        table_rows: list[list[object]] = []
+        seen_sped_codes: set[str] = set()
+        for sped_prod in sped_products:
+            sped_code = str(sped_prod.get("codigo") or "").strip()
+            if sped_code in seen_sped_codes:
+                continue
+            seen_sped_codes.add(sped_code)
+            matches = catalog_by_code.get(sped_code, [])
+            if matches:
+                for cad in matches:
+                    chave = str(cad.get("chave_nfe_origem") or "").strip()
+                    table_rows.append([
+                        "Cadastrado",
+                        sped_code,
+                        sped_prod.get("descricao", ""),
+                        sped_prod.get("ncm", ""),
+                        sped_prod.get("cst_icms", ""),
+                        str(sped_prod.get("aliquota_icms") or ""),
+                        sped_prod.get("cest", ""),
+                        str(cad.get("fornecedor_nome") or cad.get("fornecedor") or ""),
+                        str(cad.get("codigo_fornecedor") or ""),
+                        str(cad.get("codigo_empresa") or ""),
+                        str(cad.get("descricao") or ""),
+                        str(cad.get("ncm") or ""),
+                        str(cad.get("cst_icms") or ""),
+                        str(cad.get("aliquota_icms") or ""),
+                        str(cad.get("cst_pis") or ""),
+                        str(cad.get("cst_cofins") or ""),
+                        "Sim" if chave else "Nao",
+                        "",
+                        "",
+                    ])
+            else:
+                suppliers = entry_suppliers.get(sped_code, [])
+                sup_names = " ; ".join(s.get("nome", "") for s in suppliers if s.get("nome"))
+                sup_cnpjs = " ; ".join(s.get("cnpj", "") for s in suppliers if s.get("cnpj"))
+                table_rows.append([
+                    "Nao Cadastrado",
+                    sped_code,
+                    sped_prod.get("descricao", ""),
+                    sped_prod.get("ncm", ""),
+                    sped_prod.get("cst_icms", ""),
+                    str(sped_prod.get("aliquota_icms") or ""),
+                    sped_prod.get("cest", ""),
+                    "", "", "", "", "", "", "", "", "",
+                    "",
+                    sup_names,
+                    sup_cnpjs,
+                ])
+
+        self.sped_check_rows = table_rows
+        self.set_table_rows(self.sped_check_table, table_rows)
+
+        total = len(seen_sped_codes)
+        found = len({r[1] for r in table_rows if r[0] == "Cadastrado"})
+        missing = total - found
+        via_xml = len({r[1] for r in table_rows if r[16] == "Sim"})
+        for key, value in (("total", total), ("found", found), ("missing", missing), ("via_xml", via_xml)):
+            lbl = self.sped_check_metric_labels.get(key)
+            if lbl:
+                lbl.setText(str(value))
+
+        periodo = ""
+        if periodo_ini and periodo_fim:
+            try:
+                def fmt(d: str) -> str:
+                    return f"{d[4:6]}/{d[2:4]}/{d[:2]}" if len(d) == 8 else d
+                periodo = f"{fmt(periodo_ini)} a {fmt(periodo_fim)}"
+            except Exception:
+                periodo = f"{periodo_ini} - {periodo_fim}"
+        self.sped_check_info_label.setText(
+            f"Empresa: {company_name}  |  CNPJ: {company_cnpj}  |  Periodo: {periodo}  |  {total} produtos no 0200"
+        )
+
+    def export_sped_catalog_check(self) -> None:
+        rows = getattr(self, "sped_check_rows", [])
+        if not rows:
+            QMessageBox.warning(self, "Exportar", "Gere o relatorio antes de exportar.")
+            return
+        output, selected_filter = QFileDialog.getSaveFileName(
+            self, "Salvar relatorio", "conferencia_sped_cadastro.xlsx",
+            "Arquivo Excel (*.xlsx);;Arquivo CSV (*.csv)",
+        )
+        if not output:
+            return
+        output_path = Path(output)
+        headers = list(getattr(self, "sped_check_headers", []))
+        try:
+            if selected_filter.startswith("Arquivo CSV") or output_path.suffix.lower() == ".csv":
+                if output_path.suffix.lower() != ".csv":
+                    output_path = output_path.with_suffix(".csv")
+                write_simple_csv_file(output_path, headers, rows)
+            else:
+                if output_path.suffix.lower() != ".xlsx":
+                    output_path = output_path.with_suffix(".xlsx")
+                write_simple_excel_workbook(output_path, [("Conferencia", headers, rows, {"include_total": False})])
+            self.handle_export_success("Conferencia SPED x Cadastro", output_path, "Relatorio exportado")
+        except Exception as exc:
+            self.handle_export_failure("Conferencia SPED x Cadastro", "conferencia", exc)
 
     def create_single_catalog_page(self, title: str) -> QWidget:
         page = QWidget()
@@ -3578,10 +3801,11 @@ class QtSpedApp(QMainWindow):
         selected_company_id = int(self.product_page_filter_company_combo.currentData() or 0)
         selected_supplier_id = int(self.product_page_filter_supplier_combo.currentData() or 0)
         search_text = self.product_page_search_input.text().strip().lower() if hasattr(self, "product_page_search_input") else ""
+        xml_only = hasattr(self, "product_page_xml_only_check") and self.product_page_xml_only_check.isChecked()
         display_rows_by_id = getattr(self, "product_page_display_rows_by_id", {})
         visible_ids: list[int] = []
         visible_rows: list[list[object]] = []
-        if not selected_company_id and not selected_supplier_id and not search_text:
+        if not selected_company_id and not selected_supplier_id and not search_text and not xml_only:
             self._product_rows_all_visible = True
             visible_rows = list(getattr(self, "product_page_all_display_rows", []))
             visible_ids = [int(row_values[1]) for row_values in visible_rows if len(row_values) > 1 and str(row_values[1]).isdigit()]
@@ -3596,7 +3820,8 @@ class QtSpedApp(QMainWindow):
             supplier_ok = not selected_supplier_id or row_supplier_id == selected_supplier_id
             row_text = getattr(self, "product_page_search_text_by_id", {}).get(row_id, "")
             text_ok = not search_text or search_text in row_text
-            if company_ok and supplier_ok and text_ok and row_id in display_rows_by_id:
+            xml_ok = not xml_only or bool(str(row.get("chave_nfe_origem") or "").strip())
+            if company_ok and supplier_ok and text_ok and xml_ok and row_id in display_rows_by_id:
                 visible_ids.append(row_id)
                 visible_rows.append(display_rows_by_id[row_id])
         self.set_product_page_visible_rows(visible_rows, visible_ids)
@@ -3670,6 +3895,8 @@ class QtSpedApp(QMainWindow):
             self.product_page_filter_supplier_combo.setCurrentIndex(0)
         if hasattr(self, "product_page_search_input"):
             self.product_page_search_input.clear()
+        if hasattr(self, "product_page_xml_only_check"):
+            self.product_page_xml_only_check.setChecked(False)
         self.apply_product_page_filters()
 
     def save_product_page(self) -> None:
@@ -4333,15 +4560,10 @@ class QtSpedApp(QMainWindow):
         if not preview_rows:
             QMessageBox.warning(self, "Importacao XML Cadastros", "Nao ha itens na previa para importar.")
             return
-        existing_count = sum(1 for row in preview_rows if row.exists)
-        allow_update_existing = False
-        if existing_count:
-            answer = QMessageBox.question(
-                self,
-                "Importacao XML Cadastros",
-                f"Existem {existing_count} produto(s) ja cadastrado(s). Deseja atualizar esses registros existentes?",
-            )
-            allow_update_existing = answer == QMessageBox.Yes
+        mode = self.ask_catalog_import_mode()
+        if mode is None:
+            return
+        allow_insert_new, allow_update_existing = mode
         selected_update_fields = set(UPDATABLE_PRODUCT_FIELDS)
         if allow_update_existing:
             selected_update_fields = self.ask_catalog_import_update_fields()
@@ -4359,6 +4581,7 @@ class QtSpedApp(QMainWindow):
             self.environment,
             preview_rows,
             allow_update_existing,
+            allow_insert_new,
             selected_update_fields,
         )
         self.catalog_import_worker.moveToThread(self.catalog_import_thread)
@@ -4386,13 +4609,16 @@ class QtSpedApp(QMainWindow):
         try:
             if backup_path:
                 self.statusBar().showMessage(f"Backup de seguranca criado: {backup_path}")
-            summary = (
-                f"Registros na previa: {stats['rows_total']}\n"
-                f"Empresas processadas: {stats['companies_processed']} | Fornecedores processados: {stats['suppliers_processed']}\n"
-                f"Produtos criados: {stats['products_created']} | atualizados: {stats['products_updated']} | "
-                f"existentes ignorados: {stats['products_skipped_existing']}\n"
-                "Classificacao do produto: em branco para selecionar depois"
-            )
+            skipped_new = stats.get("products_skipped_new", 0)
+            summary_parts = [
+                f"Registros na previa: {stats['rows_total']}",
+                f"Empresas processadas: {stats['companies_processed']} | Fornecedores processados: {stats['suppliers_processed']}",
+                f"Produtos criados: {stats['products_created']} | atualizados: {stats['products_updated']} | existentes ignorados: {stats['products_skipped_existing']}",
+            ]
+            if skipped_new:
+                summary_parts.append(f"Novos ignorados (modo somente atualizar): {skipped_new}")
+            summary_parts.append("Classificacao do produto: em branco para selecionar depois")
+            summary = "\n".join(summary_parts)
             self.catalog_import_status.setText(summary)
             self.catalog_import_skipped_product_rows = list(stats.get("skipped_rows", [])) if isinstance(stats, dict) else []
             self.statusBar().showMessage("Importacao de cadastros via XML concluida.")
@@ -4426,6 +4652,56 @@ class QtSpedApp(QMainWindow):
             QMessageBox.critical(self, "Importacao XML Cadastros", error_text)
         finally:
             QApplication.restoreOverrideCursor()
+
+    def ask_catalog_import_mode(self) -> tuple[bool, bool] | None:
+        """Returns (allow_insert_new, allow_update_existing) or None if cancelled."""
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Modo de Importacao")
+        dialog.setObjectName("popupDialog")
+        self.resize_dialog_to_screen(dialog, 480, 260)
+        layout = QVBoxLayout(dialog)
+        layout.setContentsMargins(20, 20, 20, 20)
+        layout.setSpacing(14)
+
+        title = QLabel("Como deseja importar os produtos encontrados nos XMLs?")
+        title.setObjectName("sectionTitle")
+        title.setWordWrap(True)
+        layout.addWidget(title)
+
+        group = QButtonGroup(dialog)
+        rb_novos = QRadioButton("Somente cadastrar novos  (produtos existentes sao ignorados)")
+        rb_atualizar = QRadioButton("Somente atualizar existentes  (novos produtos nao sao cadastrados)")
+        rb_ambos = QRadioButton("Cadastrar novos e atualizar existentes")
+        rb_novos.setChecked(True)
+        group.addButton(rb_novos, 0)
+        group.addButton(rb_atualizar, 1)
+        group.addButton(rb_ambos, 2)
+
+        panel = self.create_panel()
+        panel_layout = QVBoxLayout(panel)
+        panel_layout.setContentsMargins(14, 10, 14, 10)
+        panel_layout.setSpacing(8)
+        panel_layout.addWidget(rb_novos)
+        panel_layout.addWidget(rb_atualizar)
+        panel_layout.addWidget(rb_ambos)
+        layout.addWidget(panel)
+
+        actions = QHBoxLayout()
+        ok_btn = self.create_button("Continuar", dialog.accept, primary=True)
+        cancel_btn = self.create_button("Cancelar", dialog.reject)
+        actions.addStretch()
+        actions.addWidget(ok_btn)
+        actions.addWidget(cancel_btn)
+        layout.addLayout(actions)
+
+        if dialog.exec() != QDialog.Accepted:
+            return None
+        selected = group.checkedId()
+        if selected == 0:
+            return (True, False)   # insert only
+        if selected == 1:
+            return (False, True)   # update only
+        return (True, True)        # both
 
     def ask_catalog_import_update_fields(self) -> set[str]:
         dialog = QDialog(self)

@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 from collections import defaultdict
 from decimal import Decimal
@@ -329,3 +329,86 @@ def read_sped_file(
         )
 
     return product_rows, sales_rows, detailed_sales, c190_rows, c190_product_rows
+
+
+def read_sped_0200_products(
+    file_path: Path,
+) -> tuple[str, str, str, str, list[dict], dict[str, list[dict]]]:
+    """
+    Le um arquivo SPED EFD fiscal em uma unica passagem e extrai:
+    - CNPJ e nome da empresa (registro 0000)
+    - Periodo inicio e fim (registro 0000)
+    - Lista de produtos do registro 0200
+    - Mapa produto->fornecedores de entrada (via 0150/C100/C170)
+
+    Retorna: (cnpj, nome, periodo_inicio, periodo_fim, produtos, entry_suppliers_by_product)
+      entry_suppliers_by_product: {cod_produto: [{"nome": ..., "cnpj": ...}, ...]}
+      Cada lista contem os fornecedores distintos que deram entrada nesse produto.
+    """
+    company_cnpj = ""
+    company_name = ""
+    periodo_inicio = ""
+    periodo_fim = ""
+    products: list[dict] = []
+    participants: dict[str, dict] = {}
+    entry_suppliers_by_product: dict[str, list[dict]] = {}
+    seen_supplier_per_product: dict[str, set[str]] = {}
+
+    current_is_entry = False
+    current_participant_code = ""
+
+    with file_path.open("r", encoding="latin-1", errors="replace") as f:
+        for raw_line in f:
+            if not raw_line.startswith("|"):
+                continue
+            fields = normalize_sped_line(raw_line)
+            register = get_field(fields, 1)
+
+            if register == "0000":
+                periodo_inicio = get_field(fields, 4)
+                periodo_fim = get_field(fields, 5)
+                company_name = get_field(fields, 6)
+                company_cnpj = "".join(c for c in get_field(fields, 7) if c.isdigit())
+                continue
+
+            if register == "0150":
+                pcode = get_field(fields, 2)
+                participants[pcode] = {
+                    "nome": get_field(fields, 3),
+                    "cnpj": "".join(c for c in first_non_empty(get_field(fields, 5), get_field(fields, 4)) if c.isdigit()),
+                }
+                continue
+
+            if register == "0200":
+                products.append(
+                    {
+                        "codigo": get_field(fields, 2),
+                        "descricao": get_field(fields, 3),
+                        "ncm": get_field(fields, 8),
+                        "cst_icms": get_field(fields, 11) or "",
+                        "aliquota_icms": str(parse_rate(get_field(fields, 12)) or ""),
+                        "cest": get_field(fields, 13),
+                    }
+                )
+                continue
+
+            if register == "C100":
+                current_is_entry = get_field(fields, 2) == "0"
+                current_participant_code = get_field(fields, 4)
+                continue
+
+            if register == "C170" and current_is_entry:
+                prod_code = get_field(fields, 3)
+                if not prod_code:
+                    continue
+                participant = participants.get(current_participant_code, {})
+                sup_cnpj = participant.get("cnpj", "")
+                sup_nome = participant.get("nome", current_participant_code)
+                seen_key = f"{sup_cnpj}|{sup_nome}"
+                if seen_key not in seen_supplier_per_product.setdefault(prod_code, set()):
+                    seen_supplier_per_product[prod_code].add(seen_key)
+                    entry_suppliers_by_product.setdefault(prod_code, []).append(
+                        {"nome": sup_nome, "cnpj": sup_cnpj}
+                    )
+
+    return company_cnpj, company_name, periodo_inicio, periodo_fim, products, entry_suppliers_by_product
