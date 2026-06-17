@@ -65,9 +65,15 @@ DETAIL_FIELDS = [
     "sale_value", "base_icms", "icms_value",
 ]
 
-_COLOR_OK  = QColor("#1f8f5f")
-_COLOR_DIV = QColor("#b42318")
-_COLOR_NAO = QColor("#b56b12")
+# Cor de fundo da célula Status (mais visível que apenas cor de texto)
+_BG_OK  = QColor("#c6efce")   # verde claro
+_BG_DIV = QColor("#ffc7ce")   # vermelho claro
+_BG_NAO = QColor("#ffeb9c")   # laranja/amarelo claro
+
+# Cor do texto da célula Status
+_FG_OK  = QColor("#276221")   # verde escuro
+_FG_DIV = QColor("#9c0006")   # vermelho escuro
+_FG_NAO = QColor("#7d4a00")   # laranja escuro
 
 
 # ── Worker assíncrono ─────────────────────────────────────────────────────────
@@ -209,12 +215,13 @@ class ConfrontoDialog(QDialog):
         except Exception:
             pass
 
-    def _row_color(self, status: str) -> QColor:
+    def _status_colors(self, status: str) -> tuple[QColor, QColor]:
+        """Retorna (bg_color, fg_color) para o status dado."""
         if status == "OK":
-            return _COLOR_OK
+            return _BG_OK, _FG_OK
         if "Cadastrado" in status:
-            return _COLOR_NAO
-        return _COLOR_DIV
+            return _BG_NAO, _FG_NAO
+        return _BG_DIV, _FG_DIV
 
     # ── Gerar confronto ───────────────────────────────────────────────────────
 
@@ -286,13 +293,18 @@ class ConfrontoDialog(QDialog):
         table.setRowCount(len(rows))
         for r, row in enumerate(rows):
             status = str(row.get("status") or "")
-            color = self._row_color(status)
+            bg, fg = self._status_colors(status)
             for c, field in enumerate(fields):
                 val = str(row.get(field) or "")
                 item = QTableWidgetItem(val)
                 item.setTextAlignment(Qt.AlignVCenter | Qt.AlignLeft)
                 if c == 0:
-                    item.setForeground(color)
+                    # Célula de status: fundo colorido + texto em negrito
+                    item.setBackground(bg)
+                    item.setForeground(fg)
+                    font = item.font()
+                    font.setBold(True)
+                    item.setFont(font)
                 table.setItem(r, c, item)
         table.setUpdatesEnabled(True)
 
