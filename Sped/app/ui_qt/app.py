@@ -2429,6 +2429,7 @@ class QtSpedApp(QMainWindow):
         filter_actions.addWidget(self.create_button("Limpar filtros", self.clear_entry_filters))
         filter_actions.addWidget(self.create_button("Exportar filtro atual", self.export_entry_filter))
         filter_actions.addWidget(self.create_button("Entradas", self.open_entry_operation_summary_popup))
+        filter_actions.addWidget(self.create_button("Confronto", self.open_confronto_entry, primary=True))
         filter_actions.addWidget(self.create_button("Comp. Diag. Credito", self.open_entry_credit_comparison_popup))
         filter_actions.addWidget(self.create_button("Diag. Credito", self.open_entry_credit_diagnostic_popup))
         filter_actions.addWidget(self.create_button("Curva ABC", self.open_entry_abc_popup))
@@ -2562,6 +2563,7 @@ class QtSpedApp(QMainWindow):
         filter_actions.addWidget(self.create_button("Limpar filtros", self.clear_sale_filters))
         filter_actions.addWidget(self.create_button("Exportar filtro atual", self.export_sale_filter))
         filter_actions.addWidget(self.create_button("Saidas", self.open_sale_operation_summary_popup))
+        filter_actions.addWidget(self.create_button("Confronto", self.open_confronto_sale, primary=True))
         filter_actions.addWidget(self.create_button("Comp. Diag. Debito", self.open_sale_debit_comparison_popup))
         filter_actions.addWidget(self.create_button("Diag. Debito", self.open_sale_debit_diagnostic_popup))
         filter_actions.addWidget(self.create_button("Curva ABC", self.open_sale_abc_popup))
@@ -7945,6 +7947,34 @@ class QtSpedApp(QMainWindow):
 
     def open_sale_operation_summary_popup(self) -> None:
         self.open_operation_summary_for_rows(self.filtered_sale_rows, "Saida", "Resumo Saidas")
+
+    def open_confronto_entry(self) -> None:
+        if not self.filtered_entry_rows:
+            QMessageBox.warning(self, "Confronto", "Nao ha dados de entrada. Processe o SPED primeiro.")
+            return
+        from app.ui_qt.confronto_dialog import ConfrontoDialog
+        dlg = ConfrontoDialog(
+            rows=self.filtered_entry_rows,
+            operation_type="Entrada",
+            repository=self.mysql_repo,
+            environment=self.environment,
+            parent=self,
+        )
+        dlg.exec()
+
+    def open_confronto_sale(self) -> None:
+        if not self.filtered_sale_rows:
+            QMessageBox.warning(self, "Confronto", "Nao ha dados de saida. Processe o SPED primeiro.")
+            return
+        from app.ui_qt.confronto_dialog import ConfrontoDialog
+        dlg = ConfrontoDialog(
+            rows=self.filtered_sale_rows,
+            operation_type="Saida",
+            repository=self.mysql_repo,
+            environment=self.environment,
+            parent=self,
+        )
+        dlg.exec()
 
     def open_sale_abc_popup(self) -> None:
         _periods, headers, _display_rows, export_rows = build_product_monthly_linear_dataset(self.filtered_sale_rows, "Saida")
