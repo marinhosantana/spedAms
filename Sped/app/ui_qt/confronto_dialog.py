@@ -336,6 +336,15 @@ class ConfrontoDialog(QDialog):
                     (f"Detalhado {self._operation_type}", DETAIL_HEADERS, det_data),
                 ],
             )
-            QMessageBox.information(self, "Exportar", f"Arquivo salvo:\n{path}")
+            msg = QMessageBox(self)
+            msg.setIcon(QMessageBox.Information)
+            msg.setWindowTitle("Exportar")
+            msg.setText(f"Exportacao concluida.\n\nDeseja abrir o arquivo?\n{path}")
+            btn_sim = msg.addButton("Sim", QMessageBox.YesRole)
+            msg.addButton("Nao", QMessageBox.NoRole)
+            msg.exec()
+            if msg.clickedButton() == btn_sim:
+                import os
+                os.startfile(path)
         except Exception as exc:
             QMessageBox.critical(self, "Exportar", f"Erro ao exportar:\n{exc}")

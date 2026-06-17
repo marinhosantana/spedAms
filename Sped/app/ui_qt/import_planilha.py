@@ -1669,7 +1669,16 @@ class ImportPlanilhaDialog(QDialog):
             else:
                 df_err.to_csv(path, index=False, encoding="utf-8-sig")
             from PySide6.QtWidgets import QMessageBox
-            QMessageBox.information(self, "Exportado", f"Arquivo salvo em:\n{path}")
+            msg = QMessageBox(self)
+            msg.setIcon(QMessageBox.Information)
+            msg.setWindowTitle("Exportado")
+            msg.setText(f"Arquivo salvo em:\n{path}\n\nDeseja abrir o arquivo?")
+            btn_sim = msg.addButton("Sim", QMessageBox.YesRole)
+            msg.addButton("Nao", QMessageBox.NoRole)
+            msg.exec()
+            if msg.clickedButton() == btn_sim:
+                import os
+                os.startfile(path)
         except Exception as exc:
             from PySide6.QtWidgets import QMessageBox
             QMessageBox.critical(self, "Erro ao exportar", str(exc))

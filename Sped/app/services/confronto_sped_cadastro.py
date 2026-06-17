@@ -99,8 +99,7 @@ def build_confronto_data(
                 issues.append("CST")
             if any(_cfop_diverges(p.strip(), cat_cfop) for p in sped_cfop.split("|")):
                 issues.append("CFOP")
-            if _aliq_diverges(sped_aliq, cat_aliq):
-                issues.append("Aliq")
+            # Aliquota exibida apenas para referencia, sem entrar na comparacao
             grp_status = _status(issues, True)
         else:
             grp_status = "Nao Cadastrado"
@@ -146,8 +145,7 @@ def build_confronto_data(
                     d_issues.append("CST")
                 if _cfop_diverges(d_cfop, dc_cfop):
                     d_issues.append("CFOP")
-                if _aliq_diverges(d_aliq, dc_aliq):
-                    d_issues.append("Aliq")
+                # Aliquota exibida apenas para referencia, sem entrar na comparacao
                 d_status = _status(d_issues, True)
             else:
                 dc_cst = dc_cfop = dc_aliq = dc_pis = dc_cof = ""
