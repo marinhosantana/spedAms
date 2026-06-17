@@ -208,6 +208,10 @@ class ConfrontoDialog(QDialog):
         self._btn_export.clicked.connect(self._export)
         bar.addWidget(self._btn_export)
 
+        self._btn_report = QPushButton("Relatorio Cliente")
+        self._btn_report.clicked.connect(self._export_client_report)
+        bar.addWidget(self._btn_report)
+
         self._btn_rules = QPushButton("Gerar Regras Dinamicas")
         self._btn_rules.clicked.connect(self._gerar_regras)
         bar.addWidget(self._btn_rules)
@@ -516,6 +520,198 @@ class ConfrontoDialog(QDialog):
             return
         self.accepted_rules = list(self._runtime_rules)
         self.accept()
+
+    # ── Relatório Cliente ─────────────────────────────────────────────────────
+
+    def _export_client_report(self) -> None:
+        if not self._grouped_rows:
+            QMessageBox.warning(self, "Relatorio", "Gere o confronto antes de exportar o relatorio.")
+            return
+        path, _ = QFileDialog.getSaveFileName(
+            self,
+            "Salvar Relatorio Cliente",
+            f"relatorio_confronto_{self._operation_type.lower()}.xlsx",
+            "Arquivo Excel (*.xlsx)",
+        )
+        if not path:
+            return
+        try:
+            import datetime as dt
+            import os
+            from app.exporters.workbook_exporter import write_simple_excel_workbook
+            from app.exporters.excel_base import (
+                EXCEL_STYLE_DEFAULT, EXCEL_STYLE_HEADER, EXCEL_STYLE_HEADER_BLUE,
+                EXCEL_STYLE_STATUS_OK, EXCEL_STYLE_STATUS_DIV, EXCEL_STYLE_STATUS_NAO,
+                EXCEL_STYLE_ROW_OK,   EXCEL_STYLE_ROW_DIV,   EXCEL_STYLE_ROW_NAO,
+            )
+
+            grouped = self._grouped_rows
+            total    = len(grouped)
+            ok_rows  = [r for r in grouped if r.get("status") == "OK"]
+            div_rows = [r for r in grouped if "Divergencia" in str(r.get("status") or "")]
+            nao_rows = [r for r in grouped if "Cadastrado"  in str(r.get("status") or "")]
+            ok, div, nao = len(ok_rows), len(div_rows), len(nao_rows)
+
+            def pct(n: int) -> str:
+                return f"{n} ({n / total * 100:.1f}%)" if total > 0 else str(n)
+
+            periods = sorted({str(r.get("periodo") or "") for r in grouped if r.get("periodo")})
+            period_range = (
+                f"{periods[0]} a {periods[-1]}" if len(periods) > 1
+                else (periods[0] if periods else "-")
+            )
+            company_name = self._company_combo.currentText()
+            today = dt.date.today().strftime("%d/%m/%Y")
+
+            cst_only  = sum(1 for r in div_rows if "CST"  in str(r.get("status")) and "CFOP" not in str(r.get("status")))
+            cfop_only = sum(1 for r in div_rows if "CFOP" in str(r.get("status")) and "CST"  not in str(r.get("status")))
+            both      = sum(1 for r in div_rows if "CST"  in str(r.get("status")) and "CFOP" in str(r.get("status")))
+
+            # ── Aba 1: Resumo ──────────────────────────────────────────────────
+            SECAO  = [EXCEL_STYLE_HEADER_BLUE, EXCEL_STYLE_HEADER_BLUE]
+            DADO   = [EXCEL_STYLE_DEFAULT,      EXCEL_STYLE_DEFAULT]
+            VAZIO  = [EXCEL_STYLE_DEFAULT,      EXCEL_STYLE_DEFAULT]
+
+            sum_rows:   list[list] = []
+            sum_styles: list[list] = []
+
+            def _sec(titulo: str) -> None:
+                sum_rows.append([titulo, ""]); sum_styles.append(SECAO)
+
+            def _row(campo: str, valor: object) -> None:
+                sum_rows.append([campo, str(valor)]); sum_styles.append(DADO)
+
+            def _blank() -> None:
+                sum_rows.append(["", ""]); sum_styles.append(VAZIO)
+
+            _sec("IDENTIFICACAO")
+            _row("Empresa",            company_name)
+            _row("Periodo Analisado",  period_range)
+            _row("Tipo de Operacao",   f"{self._operation_type}s")
+            _row("Data de Geracao",    today)
+            _blank()
+
+            _sec("RESULTADO GERAL")
+            _row("Total de Produtos no SPED",         total)
+            _row("Produtos OK (sem divergencia)",      pct(ok))
+            _row("Com Divergencia de CST e/ou CFOP",  pct(div))
+            _row("Nao Cadastrados no Catalogo",        pct(nao))
+            _blank()
+
+            _sec("TIPOS DE DIVERGENCIA")
+            _row("Somente CST divergente",   cst_only)
+            _row("Somente CFOP divergente",  cfop_only)
+            _row("CST e CFOP divergentes",   both)
+
+            # ── Aba 2: Divergencias ────────────────────────────────────────────
+            DIV_HEADERS = [
+                "Tipo de Divergencia", "Codigo", "Descricao",
+                "Fornecedor/Emitente",
+                "CST no SPED", "CST no Catalogo",
+                "CFOP no SPED", "CFOP no Catalogo",
+                "Aliq. ICMS SPED", "Aliq. ICMS Catalogo",
+                "Descricao no Catalogo",
+            ]
+            DIV_FIELDS = [
+                "_div_tipo", "code", "descricao_sped",
+                "fornecedor",
+                "cst_sped", "cst_cad",
+                "cfop_sped", "cfop_cad",
+                "aliq_sped", "aliq_cad",
+                "descricao_cad",
+            ]
+
+            def _tipo_div(status: str) -> str:
+                has_cst  = "CST"  in status
+                has_cfop = "CFOP" in status
+                if has_cst and has_cfop: return "CST e CFOP"
+                if has_cst:              return "CST"
+                if has_cfop:             return "CFOP"
+                return ""
+
+            div_data:   list[list] = []
+            div_styles: list[list] = []
+            for r in div_rows:
+                enriched = dict(r, _div_tipo=_tipo_div(str(r.get("status") or "")))
+                div_data.append([str(enriched.get(f) or "") for f in DIV_FIELDS])
+                div_styles.append(
+                    [EXCEL_STYLE_STATUS_DIV] + [EXCEL_STYLE_ROW_DIV] * (len(DIV_FIELDS) - 1)
+                )
+
+            # ── Aba 3: Nao Cadastrados ─────────────────────────────────────────
+            NAO_HEADERS = [
+                "Codigo", "Descricao SPED", "Fornecedor/Emitente",
+                "CST no SPED", "CFOP no SPED", "Aliq. ICMS SPED",
+                "Observacao",
+            ]
+            NAO_FIELDS = [
+                "code", "descricao_sped", "fornecedor",
+                "cst_sped", "cfop_sped", "aliq_sped",
+                "_obs",
+            ]
+
+            nao_data:   list[list] = []
+            nao_styles: list[list] = []
+            for r in nao_rows:
+                enriched = dict(r, _obs="Produto nao encontrado no catalogo da empresa")
+                nao_data.append([str(enriched.get(f) or "") for f in NAO_FIELDS])
+                nao_styles.append(
+                    [EXCEL_STYLE_STATUS_NAO] + [EXCEL_STYLE_ROW_NAO] * (len(NAO_FIELDS) - 1)
+                )
+
+            # ── Aba 4: OK (referencia) ─────────────────────────────────────────
+            ok_data:   list[list] = []
+            ok_styles: list[list] = []
+            for r in ok_rows:
+                ok_data.append([str(r.get(f) or "") for f in [
+                    "code", "descricao_sped", "fornecedor",
+                    "cst_sped", "cfop_sped", "aliq_sped",
+                ]])
+                ok_styles.append(
+                    [EXCEL_STYLE_STATUS_OK] + [EXCEL_STYLE_ROW_OK] * 5
+                )
+
+            write_simple_excel_workbook(
+                Path(path),
+                [
+                    (
+                        "Resumo",
+                        ["Campo", "Resultado"],
+                        sum_rows,
+                        {"row_style_ids": sum_styles, "include_total": False},
+                    ),
+                    (
+                        f"Divergencias ({div})",
+                        DIV_HEADERS,
+                        div_data,
+                        {"row_style_ids": div_styles, "include_total": False},
+                    ),
+                    (
+                        f"Nao Cadastrados ({nao})",
+                        NAO_HEADERS,
+                        nao_data,
+                        {"row_style_ids": nao_styles, "include_total": False},
+                    ),
+                    (
+                        f"OK ({ok})",
+                        ["Codigo", "Descricao SPED", "Fornecedor/Emitente",
+                         "CST no SPED", "CFOP no SPED", "Aliq. ICMS SPED"],
+                        ok_data,
+                        {"row_style_ids": ok_styles, "include_total": False},
+                    ),
+                ],
+            )
+            msg = QMessageBox(self)
+            msg.setIcon(QMessageBox.Information)
+            msg.setWindowTitle("Relatorio Cliente")
+            msg.setText(f"Relatorio gerado.\n\nDeseja abrir o arquivo?\n{path}")
+            btn_sim = msg.addButton("Sim", QMessageBox.YesRole)
+            msg.addButton("Nao", QMessageBox.NoRole)
+            msg.exec()
+            if msg.clickedButton() == btn_sim:
+                os.startfile(path)
+        except Exception as exc:
+            QMessageBox.critical(self, "Relatorio Cliente", f"Erro ao gerar relatorio:\n{exc}")
 
     # ── Exportar ─────────────────────────────────────────────────────────────
 
