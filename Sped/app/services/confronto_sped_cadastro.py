@@ -23,13 +23,17 @@ def _norm_aliq(v: object) -> Decimal | None:
 
 
 def _cst_diverges(sped_val: str, cat_val: str) -> bool:
-    s, c = _norm_cst(sped_val), _norm_cst(cat_val)
-    return bool(s and c and s != c)
+    s = _norm_cst(sped_val)
+    if not s:
+        return False  # SPED sem CST, nada a comparar
+    return s != _norm_cst(cat_val)  # cadastro vazio ou diferente = divergencia
 
 
 def _cfop_diverges(sped_val: str, cat_val: str) -> bool:
-    s, c = _norm_cfop(sped_val), _norm_cfop(cat_val)
-    return bool(s and c and s != c)
+    s = _norm_cfop(sped_val)
+    if not s:
+        return False  # SPED sem CFOP, nada a comparar
+    return s != _norm_cfop(cat_val)  # cadastro vazio ou diferente = divergencia
 
 
 def _aliq_diverges(sped_aliq: str, cat_aliq: str) -> bool:
