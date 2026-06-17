@@ -167,6 +167,8 @@ class ConfrontoDialog(QDialog):
         self._companies: list[dict] = []
         self._thread: QThread | None = None
         self._worker: _ConfrontoWorker | None = None
+        self._filter_mode: str = "Todos"
+        self._filter_btns: dict[str, QPushButton] = {}
 
         self.setWindowTitle(f"Confronto SPED x Cadastro — {operation_type}s")
         self.setMinimumSize(1200, 700)
@@ -229,6 +231,26 @@ class ConfrontoDialog(QDialog):
         self._status_label = QLabel("")
         self._status_label.setObjectName("muted")
         root.addWidget(self._status_label)
+
+        # Filtros rápidos
+        filter_bar = QHBoxLayout()
+        filter_bar.addWidget(QLabel("Filtrar:"))
+        _filter_styles = {
+            "Todos":           "QPushButton:checked { background-color: #2563eb; color: white; font-weight: bold; }",
+            "Divergentes":     "QPushButton:checked { background-color: #ffc7ce; color: #9c0006; font-weight: bold; }",
+            "Nao Cadastrados": "QPushButton:checked { background-color: #ffeb9c; color: #7d4a00; font-weight: bold; }",
+            "OK":              "QPushButton:checked { background-color: #c6efce; color: #276221; font-weight: bold; }",
+        }
+        for mode, css in _filter_styles.items():
+            btn = QPushButton(mode)
+            btn.setCheckable(True)
+            btn.setChecked(mode == "Todos")
+            btn.setStyleSheet(css)
+            btn.clicked.connect(lambda _checked, m=mode: self._set_filter(m))
+            self._filter_btns[mode] = btn
+            filter_bar.addWidget(btn)
+        filter_bar.addStretch()
+        root.addLayout(filter_bar)
 
         # Abas
         self._tabs = QTabWidget()
@@ -318,9 +340,12 @@ class ConfrontoDialog(QDialog):
         self._btn_gerar.setEnabled(True)
         self._grouped_rows = grouped
         self._detail_rows  = detail
-        self._fill_table(self._grouped_table, grouped, GROUPED_FIELDS)
-        self._fill_table(self._detail_table,  detail,  DETAIL_FIELDS)
         self._update_metrics(grouped, detail)
+        self._update_filter_btns(grouped)
+        self._filter_mode = "Todos"
+        for m, btn in self._filter_btns.items():
+            btn.setChecked(m == "Todos")
+        self._apply_filter()
         total_ok  = sum(1 for r in grouped if r.get("status") == "OK")
         total_div = sum(1 for r in grouped if "Divergencia" in str(r.get("status") or ""))
         total_nao = sum(1 for r in grouped if "Cadastrado" in str(r.get("status") or ""))
@@ -334,6 +359,39 @@ class ConfrontoDialog(QDialog):
         self._btn_gerar.setEnabled(True)
         self._status_label.setText("")
         QMessageBox.critical(self, "Confronto", f"Erro ao confrontar:\n{msg}")
+
+    def _set_filter(self, mode: str) -> None:
+        self._filter_mode = mode
+        for m, btn in self._filter_btns.items():
+            btn.setChecked(m == mode)
+        self._apply_filter()
+
+    def _apply_filter(self) -> None:
+        mode = self._filter_mode
+        if mode == "OK":
+            grp = [r for r in self._grouped_rows if r.get("status") == "OK"]
+            det = [r for r in self._detail_rows  if r.get("status") == "OK"]
+        elif mode == "Divergentes":
+            grp = [r for r in self._grouped_rows if "Divergencia" in str(r.get("status") or "")]
+            det = [r for r in self._detail_rows  if "Divergencia" in str(r.get("status") or "")]
+        elif mode == "Nao Cadastrados":
+            grp = [r for r in self._grouped_rows if "Cadastrado" in str(r.get("status") or "")]
+            det = [r for r in self._detail_rows  if "Cadastrado" in str(r.get("status") or "")]
+        else:
+            grp = self._grouped_rows
+            det = self._detail_rows
+        self._fill_table(self._grouped_table, grp, GROUPED_FIELDS)
+        self._fill_table(self._detail_table,  det,  DETAIL_FIELDS)
+
+    def _update_filter_btns(self, grouped: list[dict]) -> None:
+        total = len(grouped)
+        div   = sum(1 for r in grouped if "Divergencia" in str(r.get("status") or ""))
+        nao   = sum(1 for r in grouped if "Cadastrado"  in str(r.get("status") or ""))
+        ok    = sum(1 for r in grouped if r.get("status") == "OK")
+        self._filter_btns["Todos"].setText(f"Todos ({total})")
+        self._filter_btns["Divergentes"].setText(f"Divergentes ({div})")
+        self._filter_btns["Nao Cadastrados"].setText(f"Nao Cadastrados ({nao})")
+        self._filter_btns["OK"].setText(f"OK ({ok})")
 
     def _fill_table(self, table: QTableWidget, rows: list[dict], fields: list[str]) -> None:
         table.setUpdatesEnabled(False)
