@@ -26,6 +26,9 @@ from PySide6.QtWidgets import (
 
 from app.repositories.mysql_cadastro import MysqlCadastroRepository
 from app.services.confronto_sped_cadastro import build_confronto_data
+from app.services.confronto_rules_builder import (
+    LOG_FIELDS, LOG_HEADERS, build_rules_from_confronto,
+)
 
 # ── Colunas ───────────────────────────────────────────────────────────────────
 
@@ -169,6 +172,9 @@ class ConfrontoDialog(QDialog):
         self._worker: _ConfrontoWorker | None = None
         self._filter_mode: str = "Todos"
         self._filter_btns: dict[str, QPushButton] = {}
+        self._runtime_rules: list[dict] = []
+        self._log_entries: list[dict] = []
+        self.accepted_rules: list[dict] = []  # lido pelo pai após exec()
 
         self.setWindowTitle(f"Confronto SPED x Cadastro — {operation_type}s")
         self.setMinimumSize(1200, 700)
@@ -201,6 +207,17 @@ class ConfrontoDialog(QDialog):
         self._btn_export = QPushButton("Exportar Excel")
         self._btn_export.clicked.connect(self._export)
         bar.addWidget(self._btn_export)
+
+        self._btn_rules = QPushButton("Gerar Regras Dinamicas")
+        self._btn_rules.clicked.connect(self._gerar_regras)
+        bar.addWidget(self._btn_rules)
+
+        self._btn_reprocess = QPushButton("Reprocessar SPED com Regras")
+        self._btn_reprocess.setObjectName("primaryButton")
+        self._btn_reprocess.setEnabled(False)
+        self._btn_reprocess.clicked.connect(self._reprocessar_sped)
+        bar.addWidget(self._btn_reprocess)
+
         bar.addStretch()
         root.addLayout(bar)
 
@@ -256,8 +273,10 @@ class ConfrontoDialog(QDialog):
         self._tabs = QTabWidget()
         self._grouped_table = self._make_table(GROUPED_HEADERS)
         self._detail_table  = self._make_table(DETAIL_HEADERS)
+        self._log_table     = self._make_table(LOG_HEADERS)
         self._tabs.addTab(self._grouped_table, "Agrupado (por Produto)")
         self._tabs.addTab(self._detail_table,  "Detalhado (por Item)")
+        self._tabs.addTab(self._log_table,     "Log de Regras")
         root.addWidget(self._tabs, 1)
 
     # ── Helpers ───────────────────────────────────────────────────────────────
@@ -432,6 +451,72 @@ class ConfrontoDialog(QDialog):
             if lbl:
                 lbl.setText(str(val))
 
+    # ── Regras dinâmicas ─────────────────────────────────────────────────────
+
+    def _gerar_regras(self) -> None:
+        if not self._grouped_rows:
+            QMessageBox.warning(self, "Regras", "Gere o confronto antes de criar regras.")
+            return
+        self._runtime_rules, self._log_entries = build_rules_from_confronto(
+            self._grouped_rows, self._operation_type
+        )
+        self._fill_log_table(self._log_entries)
+        self._tabs.setCurrentWidget(self._log_table)
+        n_rules = len(self._runtime_rules)
+        n_nao = sum(1 for e in self._log_entries if e["tipo"] == "NAO ENCONTRADO")
+        n_sem = sum(1 for e in self._log_entries if e["tipo"] == "SEM CORRECAO")
+        self._btn_reprocess.setEnabled(n_rules > 0)
+        QMessageBox.information(
+            self, "Regras Geradas",
+            f"{n_rules} regra(s) gerada(s) para correcao automatica.\n"
+            f"{n_nao} produto(s) nao encontrado(s) no cadastro.\n"
+            f"{n_sem} produto(s) com divergencia mas sem valor de correcao no cadastro.\n\n"
+            + ("Clique em 'Reprocessar SPED com Regras' para aplicar." if n_rules > 0
+               else "Nenhuma regra gerada — verifique o cadastro de produtos."),
+        )
+
+    def _fill_log_table(self, entries: list[dict]) -> None:
+        _TYPE_COLORS = {
+            "REGRA GERADA":  (_BG_OK,  _FG_OK),
+            "NAO ENCONTRADO": (_BG_NAO, _FG_NAO),
+            "SEM CORRECAO":  (_BG_DIV, _FG_DIV),
+        }
+        self._log_table.setUpdatesEnabled(False)
+        self._log_table.setRowCount(len(entries))
+        for r, entry in enumerate(entries):
+            tipo = str(entry.get("tipo") or "")
+            bg, fg = _TYPE_COLORS.get(tipo, (_ROW_EVEN, _BG_OK))
+            row_bg = _ROW_EVEN if r % 2 == 0 else _ROW_ODD
+            for c, field in enumerate(LOG_FIELDS):
+                val = str(entry.get(field) or "")
+                item = QTableWidgetItem(val)
+                item.setTextAlignment(Qt.AlignVCenter | Qt.AlignLeft)
+                if c == 0:
+                    item.setBackground(bg)
+                    item.setForeground(fg)
+                    font = item.font(); font.setBold(True); item.setFont(font)
+                else:
+                    item.setBackground(row_bg)
+                self._log_table.setItem(r, c, item)
+        self._log_table.setUpdatesEnabled(True)
+
+    def _reprocessar_sped(self) -> None:
+        if not self._runtime_rules:
+            QMessageBox.warning(self, "Reprocessar", "Gere as regras antes de reprocessar.")
+            return
+        n = len(self._runtime_rules)
+        resp = QMessageBox.question(
+            self, "Reprocessar SPED",
+            f"{n} regra(s) serao aplicadas ao SPED.\n"
+            "As regras do Confronto serao combinadas com as regras dinamicas ja configuradas.\n\n"
+            "Deseja continuar?",
+            QMessageBox.Yes | QMessageBox.No,
+        )
+        if resp != QMessageBox.Yes:
+            return
+        self.accepted_rules = list(self._runtime_rules)
+        self.accept()
+
     # ── Exportar ─────────────────────────────────────────────────────────────
 
     def _export(self) -> None:
@@ -449,7 +534,6 @@ class ConfrontoDialog(QDialog):
         try:
             from app.exporters.workbook_exporter import write_simple_excel_workbook
             from app.exporters.excel_base import (
-                EXCEL_STYLE_HEADER,
                 EXCEL_STYLE_STATUS_OK, EXCEL_STYLE_STATUS_DIV, EXCEL_STYLE_STATUS_NAO,
                 EXCEL_STYLE_ROW_OK, EXCEL_STYLE_ROW_DIV, EXCEL_STYLE_ROW_NAO,
             )
@@ -468,8 +552,21 @@ class ConfrontoDialog(QDialog):
                     result.append([s] + [r] * (ncols - 1))
                 return result
 
+            _LOG_STYLE_MAP = {
+                "REGRA GERADA":   (EXCEL_STYLE_STATUS_OK,  EXCEL_STYLE_ROW_OK),
+                "NAO ENCONTRADO": (EXCEL_STYLE_STATUS_NAO, EXCEL_STYLE_ROW_NAO),
+                "SEM CORRECAO":   (EXCEL_STYLE_STATUS_DIV, EXCEL_STYLE_ROW_DIV),
+            }
+            def _log_row_styles(entries: list[dict]) -> list[list[int]]:
+                result = []
+                for entry in entries:
+                    s, r = _LOG_STYLE_MAP.get(str(entry.get("tipo") or ""), (EXCEL_STYLE_STATUS_DIV, EXCEL_STYLE_ROW_DIV))
+                    result.append([s] + [r] * (len(LOG_FIELDS) - 1))
+                return result
+
             grp_data = [[str(r.get(f) or "") for f in GROUPED_FIELDS] for r in self._grouped_rows]
             det_data = [[str(r.get(f) or "") for f in DETAIL_FIELDS]  for r in self._detail_rows]
+            log_data = [[str(e.get(f) or "") for f in LOG_FIELDS]     for e in self._log_entries]
             write_simple_excel_workbook(
                 Path(path),
                 [
@@ -484,6 +581,12 @@ class ConfrontoDialog(QDialog):
                         DETAIL_HEADERS,
                         det_data,
                         {"row_style_ids": _row_styles(self._detail_rows, DETAIL_FIELDS), "include_total": False},
+                    ),
+                    (
+                        "Log de Regras",
+                        LOG_HEADERS,
+                        log_data,
+                        {"row_style_ids": _log_row_styles(self._log_entries), "include_total": False},
                     ),
                 ],
             )

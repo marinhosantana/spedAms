@@ -5758,16 +5758,26 @@ class QtSpedApp(QMainWindow):
             unique_paths.append(path)
         return unique_paths
 
-    def generate_adjusted_sped_from_consultation(self, operation_type: str) -> None:
+    def generate_adjusted_sped_from_consultation(
+        self, operation_type: str, override_rules: list[dict] | None = None
+    ) -> None:
         if getattr(self, "reprocess_thread", None) is not None:
             QMessageBox.information(self, "Reprocessar SPED", "Ja existe um reprocessamento em andamento.")
             return
-        try:
-            runtime_rules = self.get_current_runtime_rules()
-        except Exception as exc:
-            QMessageBox.critical(self, "Reprocessar SPED", f"Corrija as regras dinamicas antes de reprocessar.\n\n{exc}")
-            self.update_reprocess_buttons_state()
-            return
+        if override_rules is not None:
+            # Regras do Confronto: combinam com as regras dinamicas existentes
+            try:
+                existing = self.get_current_runtime_rules()
+            except Exception:
+                existing = []
+            runtime_rules = override_rules + existing
+        else:
+            try:
+                runtime_rules = self.get_current_runtime_rules()
+            except Exception as exc:
+                QMessageBox.critical(self, "Reprocessar SPED", f"Corrija as regras dinamicas antes de reprocessar.\n\n{exc}")
+                self.update_reprocess_buttons_state()
+                return
         if not runtime_rules:
             QMessageBox.warning(self, "Reprocessar SPED", "Cadastre e valide ao menos uma regra dinamica.")
             self.update_reprocess_buttons_state()
@@ -7953,6 +7963,7 @@ class QtSpedApp(QMainWindow):
             QMessageBox.warning(self, "Confronto", "Nao ha dados de entrada. Processe o SPED primeiro.")
             return
         from app.ui_qt.confronto_dialog import ConfrontoDialog
+        from PySide6.QtWidgets import QDialog
         dlg = ConfrontoDialog(
             rows=self.filtered_entry_rows,
             operation_type="Entrada",
@@ -7960,13 +7971,15 @@ class QtSpedApp(QMainWindow):
             environment=self.environment,
             parent=self,
         )
-        dlg.exec()
+        if dlg.exec() == QDialog.Accepted and dlg.accepted_rules:
+            self.generate_adjusted_sped_from_consultation("Entrada", override_rules=dlg.accepted_rules)
 
     def open_confronto_sale(self) -> None:
         if not self.filtered_sale_rows:
             QMessageBox.warning(self, "Confronto", "Nao ha dados de saida. Processe o SPED primeiro.")
             return
         from app.ui_qt.confronto_dialog import ConfrontoDialog
+        from PySide6.QtWidgets import QDialog
         dlg = ConfrontoDialog(
             rows=self.filtered_sale_rows,
             operation_type="Saida",
@@ -7974,7 +7987,8 @@ class QtSpedApp(QMainWindow):
             environment=self.environment,
             parent=self,
         )
-        dlg.exec()
+        if dlg.exec() == QDialog.Accepted and dlg.accepted_rules:
+            self.generate_adjusted_sped_from_consultation("Saida", override_rules=dlg.accepted_rules)
 
     def open_sale_abc_popup(self) -> None:
         _periods, headers, _display_rows, export_rows = build_product_monthly_linear_dataset(self.filtered_sale_rows, "Saida")
