@@ -3,7 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from PySide6.QtCore import Qt, QThread, Signal, QObject
-from PySide6.QtGui import QColor
+from PySide6.QtGui import QBrush, QColor, QPalette
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QApplication,
@@ -15,6 +15,8 @@ from PySide6.QtWidgets import (
     QLabel,
     QMessageBox,
     QPushButton,
+    QStyle,
+    QStyledItemDelegate,
     QTableWidget,
     QTableWidgetItem,
     QTabWidget,
@@ -73,6 +75,50 @@ _FG_NAO = QColor("#7d4a00")   # laranja escuro
 # Cores de fundo das linhas (alternadas, aplicadas manualmente)
 _ROW_EVEN = QColor("#f3f6f9")
 _ROW_ODD  = QColor("#ffffff")
+
+
+# ── Delegate que garante setBackground() mesmo com stylesheet herdado ─────────
+
+class _BrushDelegate(QStyledItemDelegate):
+    """Pinta background/foreground dos itens a partir dos roles, ignorando CSS."""
+
+    def paint(self, painter, option, index) -> None:
+        painter.save()
+        is_selected = bool(option.state & QStyle.State_Selected)
+
+        # Fundo
+        bg = index.data(Qt.BackgroundRole)
+        if is_selected:
+            painter.fillRect(option.rect, option.palette.color(QPalette.Highlight))
+        elif bg is not None:
+            color = bg.color() if isinstance(bg, QBrush) else bg
+            painter.fillRect(option.rect, color)
+
+        # Texto
+        if is_selected:
+            painter.setPen(option.palette.color(QPalette.HighlightedText))
+        else:
+            fg = index.data(Qt.ForegroundRole)
+            if fg is not None:
+                painter.setPen(fg.color() if isinstance(fg, QBrush) else fg)
+            else:
+                painter.setPen(option.palette.color(QPalette.Text))
+
+        font = index.data(Qt.FontRole)
+        if font is not None:
+            painter.setFont(font)
+
+        painter.drawText(
+            option.rect.adjusted(4, 0, -4, 0),
+            Qt.AlignVCenter | Qt.AlignLeft,
+            str(index.data(Qt.DisplayRole) or ""),
+        )
+        painter.restore()
+
+    def sizeHint(self, option, index):
+        hint = super().sizeHint(option, index)
+        hint.setHeight(max(hint.height(), 22))
+        return hint
 
 
 # ── Worker assíncrono ─────────────────────────────────────────────────────────
@@ -198,15 +244,14 @@ class ConfrontoDialog(QDialog):
         t = QTableWidget()
         t.setColumnCount(len(headers))
         t.setHorizontalHeaderLabels(headers)
-        # Desabilitado: setAlternatingRowColors interfere com setBackground()
-        # das células individuais quando há stylesheet herdado da janela pai.
-        # As cores de linha são aplicadas manualmente em _fill_table.
         t.setAlternatingRowColors(False)
         t.setSelectionBehavior(QAbstractItemView.SelectRows)
         t.setEditTriggers(QAbstractItemView.NoEditTriggers)
         t.verticalHeader().setVisible(False)
         t.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeToContents)
         t.horizontalHeader().setStretchLastSection(True)
+        # Delegate garante que setBackground() não seja sobrescrito pelo stylesheet pai
+        t.setItemDelegate(_BrushDelegate(t))
         return t
 
     def _load_companies(self) -> None:
@@ -345,13 +390,43 @@ class ConfrontoDialog(QDialog):
             return
         try:
             from app.exporters.workbook_exporter import write_simple_excel_workbook
+            from app.exporters.excel_base import (
+                EXCEL_STYLE_HEADER,
+                EXCEL_STYLE_STATUS_OK, EXCEL_STYLE_STATUS_DIV, EXCEL_STYLE_STATUS_NAO,
+                EXCEL_STYLE_ROW_OK, EXCEL_STYLE_ROW_DIV, EXCEL_STYLE_ROW_NAO,
+            )
+
+            def _row_styles(rows: list[dict], fields: list[str]) -> list[list[int]]:
+                result = []
+                ncols = len(fields)
+                for row in rows:
+                    status = str(row.get("status") or "")
+                    if status == "OK":
+                        s, r = EXCEL_STYLE_STATUS_OK, EXCEL_STYLE_ROW_OK
+                    elif "Cadastrado" in status:
+                        s, r = EXCEL_STYLE_STATUS_NAO, EXCEL_STYLE_ROW_NAO
+                    else:
+                        s, r = EXCEL_STYLE_STATUS_DIV, EXCEL_STYLE_ROW_DIV
+                    result.append([s] + [r] * (ncols - 1))
+                return result
+
             grp_data = [[str(r.get(f) or "") for f in GROUPED_FIELDS] for r in self._grouped_rows]
             det_data = [[str(r.get(f) or "") for f in DETAIL_FIELDS]  for r in self._detail_rows]
             write_simple_excel_workbook(
                 Path(path),
                 [
-                    (f"Agrupado {self._operation_type}", GROUPED_HEADERS, grp_data),
-                    (f"Detalhado {self._operation_type}", DETAIL_HEADERS, det_data),
+                    (
+                        f"Agrupado {self._operation_type}",
+                        GROUPED_HEADERS,
+                        grp_data,
+                        {"row_style_ids": _row_styles(self._grouped_rows, GROUPED_FIELDS), "include_total": False},
+                    ),
+                    (
+                        f"Detalhado {self._operation_type}",
+                        DETAIL_HEADERS,
+                        det_data,
+                        {"row_style_ids": _row_styles(self._detail_rows, DETAIL_FIELDS), "include_total": False},
+                    ),
                 ],
             )
             msg = QMessageBox(self)

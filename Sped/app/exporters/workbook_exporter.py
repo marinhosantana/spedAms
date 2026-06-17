@@ -55,6 +55,8 @@ def write_simple_excel_workbook(
             footer_rows=list(options.get("footer_rows", [])),
             include_total=bool(options.get("include_total", True)),
         )
+        if "row_style_ids" in options:
+            row_style_ids = list(options["row_style_ids"])
         workbook_sheets.append((candidate, headers, prepared_rows, row_style_ids))
 
     sheet_entries = []

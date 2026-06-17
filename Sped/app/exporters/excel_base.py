@@ -102,6 +102,13 @@ EXCEL_STYLE_PERCENT_BLUE = 15
 EXCEL_STYLE_PERCENT_YELLOW = 16
 EXCEL_STYLE_NUMBER_BLUE = 17
 EXCEL_STYLE_NUMBER_YELLOW = 18
+# Confronto status styles
+EXCEL_STYLE_STATUS_OK = 19   # bold + verde escuro (#C6EFCE)
+EXCEL_STYLE_STATUS_DIV = 20  # bold + vermelho escuro (#FFC7CE)
+EXCEL_STYLE_STATUS_NAO = 21  # bold + amarelo escuro (#FFEB9C)
+EXCEL_STYLE_ROW_OK = 22      # normal + verde claro (#EBF7ED)
+EXCEL_STYLE_ROW_DIV = 23     # normal + vermelho claro (#FFF0F1)
+EXCEL_STYLE_ROW_NAO = 24     # normal + amarelo claro (#FFFDE8)
 
 
 def normalize_excel_header_text(value: object) -> str:
@@ -296,13 +303,19 @@ def build_excel_styles_xml() -> str:
     <font><sz val="11"/><name val="Calibri"/><family val="2"/></font>
     <font><b/><sz val="11"/><name val="Calibri"/><family val="2"/></font>
   </fonts>
-  <fills count="6">
+  <fills count="12">
     <fill><patternFill patternType="none"/></fill>
     <fill><patternFill patternType="gray125"/></fill>
     <fill><patternFill patternType="solid"><fgColor rgb="FFD9EAF7"/><bgColor indexed="64"/></patternFill></fill>
     <fill><patternFill patternType="solid"><fgColor rgb="FFFBE7C6"/><bgColor indexed="64"/></patternFill></fill>
     <fill><patternFill patternType="solid"><fgColor rgb="FFEEF6FC"/><bgColor indexed="64"/></patternFill></fill>
     <fill><patternFill patternType="solid"><fgColor rgb="FFFEF4DF"/><bgColor indexed="64"/></patternFill></fill>
+    <fill><patternFill patternType="solid"><fgColor rgb="FFC6EFCE"/><bgColor indexed="64"/></patternFill></fill>
+    <fill><patternFill patternType="solid"><fgColor rgb="FFFFC7CE"/><bgColor indexed="64"/></patternFill></fill>
+    <fill><patternFill patternType="solid"><fgColor rgb="FFFFEB9C"/><bgColor indexed="64"/></patternFill></fill>
+    <fill><patternFill patternType="solid"><fgColor rgb="FFEBF7ED"/><bgColor indexed="64"/></patternFill></fill>
+    <fill><patternFill patternType="solid"><fgColor rgb="FFFFF0F1"/><bgColor indexed="64"/></patternFill></fill>
+    <fill><patternFill patternType="solid"><fgColor rgb="FFFFFDEA"/><bgColor indexed="64"/></patternFill></fill>
   </fills>
   <borders count="1">
     <border><left/><right/><top/><bottom/><diagonal/></border>
@@ -310,7 +323,7 @@ def build_excel_styles_xml() -> str:
   <cellStyleXfs count="1">
     <xf numFmtId="0" fontId="0" fillId="0" borderId="0"/>
   </cellStyleXfs>
-  <cellXfs count="19">
+  <cellXfs count="25">
     <xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/>
     <xf numFmtId="0" fontId="1" fillId="0" borderId="0" xfId="0" applyFont="1"/>
     <xf numFmtId="164" fontId="0" fillId="0" borderId="0" xfId="0" applyNumberFormat="1"/>
@@ -330,6 +343,12 @@ def build_excel_styles_xml() -> str:
     <xf numFmtId="165" fontId="0" fillId="5" borderId="0" xfId="0" applyFill="1" applyNumberFormat="1"/>
     <xf numFmtId="166" fontId="0" fillId="4" borderId="0" xfId="0" applyFill="1" applyNumberFormat="1"/>
     <xf numFmtId="166" fontId="0" fillId="5" borderId="0" xfId="0" applyFill="1" applyNumberFormat="1"/>
+    <xf numFmtId="0" fontId="1" fillId="6" borderId="0" xfId="0" applyFont="1" applyFill="1"/>
+    <xf numFmtId="0" fontId="1" fillId="7" borderId="0" xfId="0" applyFont="1" applyFill="1"/>
+    <xf numFmtId="0" fontId="1" fillId="8" borderId="0" xfId="0" applyFont="1" applyFill="1"/>
+    <xf numFmtId="0" fontId="0" fillId="9" borderId="0" xfId="0" applyFill="1"/>
+    <xf numFmtId="0" fontId="0" fillId="10" borderId="0" xfId="0" applyFill="1"/>
+    <xf numFmtId="0" fontId="0" fillId="11" borderId="0" xfId="0" applyFill="1"/>
   </cellXfs>
   <cellStyles count="1">
     <cellStyle name="Normal" xfId="0" builtinId="0"/>
