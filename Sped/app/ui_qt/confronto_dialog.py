@@ -32,7 +32,6 @@ GROUPED_HEADERS = [
     "CST ICMS (SPED)", "CST ICMS (Cad.)",
     "CFOP (SPED)", "CFOP (Cad.)",
     "Aliq ICMS (SPED)", "Aliq ICMS (Cad.)",
-    "CST PIS (Cad.)", "CST COFINS (Cad.)",
     "Descricao Cadastro", "NCM SPED", "NCM Cad.", "Fornecedor Cadastro",
     "Total Operacao", "Base ICMS", "Valor ICMS",
 ]
@@ -41,7 +40,6 @@ GROUPED_FIELDS = [
     "cst_sped", "cst_cad",
     "cfop_sped", "cfop_cad",
     "aliq_sped", "aliq_cad",
-    "cst_pis_cad", "cst_cofins_cad",
     "descricao_cad", "ncm_sped", "ncm_cad", "fornecedor_cad",
     "total_operacao", "base_icms", "icms_value",
 ]
@@ -52,7 +50,6 @@ DETAIL_HEADERS = [
     "CST ICMS (SPED)", "CST ICMS (Cad.)",
     "CFOP (SPED)", "CFOP (Cad.)",
     "Aliq ICMS (SPED)", "Aliq ICMS (Cad.)",
-    "CST PIS (Cad.)", "CST COFINS (Cad.)",
     "Valor Operacao", "Base ICMS", "Valor ICMS",
 ]
 DETAIL_FIELDS = [
@@ -61,19 +58,21 @@ DETAIL_FIELDS = [
     "cst_sped", "cst_cad",
     "cfop_sped", "cfop_cad",
     "aliq_sped", "aliq_cad",
-    "cst_pis_cad", "cst_cofins_cad",
     "sale_value", "base_icms", "icms_value",
 ]
 
-# Cor de fundo da célula Status (mais visível que apenas cor de texto)
+# Cores da célula Status (fundo + texto)
 _BG_OK  = QColor("#c6efce")   # verde claro
 _BG_DIV = QColor("#ffc7ce")   # vermelho claro
-_BG_NAO = QColor("#ffeb9c")   # laranja/amarelo claro
+_BG_NAO = QColor("#ffeb9c")   # amarelo/laranja claro
 
-# Cor do texto da célula Status
 _FG_OK  = QColor("#276221")   # verde escuro
 _FG_DIV = QColor("#9c0006")   # vermelho escuro
 _FG_NAO = QColor("#7d4a00")   # laranja escuro
+
+# Cores de fundo das linhas (alternadas, aplicadas manualmente)
+_ROW_EVEN = QColor("#f3f6f9")
+_ROW_ODD  = QColor("#ffffff")
 
 
 # ── Worker assíncrono ─────────────────────────────────────────────────────────
@@ -199,7 +198,10 @@ class ConfrontoDialog(QDialog):
         t = QTableWidget()
         t.setColumnCount(len(headers))
         t.setHorizontalHeaderLabels(headers)
-        t.setAlternatingRowColors(True)
+        # Desabilitado: setAlternatingRowColors interfere com setBackground()
+        # das células individuais quando há stylesheet herdado da janela pai.
+        # As cores de linha são aplicadas manualmente em _fill_table.
+        t.setAlternatingRowColors(False)
         t.setSelectionBehavior(QAbstractItemView.SelectRows)
         t.setEditTriggers(QAbstractItemView.NoEditTriggers)
         t.verticalHeader().setVisible(False)
@@ -293,18 +295,22 @@ class ConfrontoDialog(QDialog):
         table.setRowCount(len(rows))
         for r, row in enumerate(rows):
             status = str(row.get("status") or "")
-            bg, fg = self._status_colors(status)
+            bg_status, fg_status = self._status_colors(status)
+            row_bg = _ROW_EVEN if r % 2 == 0 else _ROW_ODD
             for c, field in enumerate(fields):
                 val = str(row.get(field) or "")
                 item = QTableWidgetItem(val)
                 item.setTextAlignment(Qt.AlignVCenter | Qt.AlignLeft)
                 if c == 0:
-                    # Célula de status: fundo colorido + texto em negrito
-                    item.setBackground(bg)
-                    item.setForeground(fg)
+                    # Status: fundo forte colorido + texto negrito
+                    item.setBackground(bg_status)
+                    item.setForeground(fg_status)
                     font = item.font()
                     font.setBold(True)
                     item.setFont(font)
+                else:
+                    # Demais células: alternância manual (não depende do stylesheet)
+                    item.setBackground(row_bg)
                 table.setItem(r, c, item)
         table.setUpdatesEnabled(True)
 
