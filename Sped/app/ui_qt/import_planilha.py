@@ -280,6 +280,27 @@ def _needs_update(existing: dict, incoming: dict) -> bool:
     return False
 
 
+def _build_update_data(existing: dict, incoming: dict) -> dict:
+    """Mescla dados para atualização: preserva valores do banco para campos vazios na planilha.
+
+    Apenas campos com valor não-vazio na planilha sobrescrevem o banco.
+    Isso protege dados vindos de XML/SPED de serem apagados por colunas não mapeadas.
+    """
+    result = dict(existing)
+    for field, value in incoming.items():
+        if field == "id":
+            continue
+        if field == "tipo_produto_id":
+            # None = campo não mapeado na planilha; não apaga o tipo existente
+            if value is not None:
+                result[field] = value
+            continue
+        v_str = str(value or "").strip()
+        if v_str != "":
+            result[field] = value
+    return result
+
+
 def _build_product_cache(repo: MysqlCadastroRepository, supplier_id: int) -> dict[str, dict]:
     """Carrega todos os produtos de um fornecedor em memória para lookups O(1)."""
     cache: dict[str, dict] = {}
@@ -484,6 +505,10 @@ def _execute_import(
                 stats["sem_alteracao"] += 1
                 continue
 
+            # Para produto existente: mescla apenas campos não-vazios da planilha,
+            # preservando valores do banco (XML/SPED) nos campos não mapeados.
+            effective_data = _build_update_data(existing_prod, data) if existing_prod else data
+
             # Reserva o slot no cache imediatamente para evitar duplicatas dentro do lote
             placeholder = {"id": None, "ean": ean, "codigo_fornecedor": codigo}
             if ean:
@@ -491,7 +516,7 @@ def _execute_import(
             if codigo:
                 cache[f"cod:{codigo}"] = placeholder
 
-            pending.append((idx, fornecedor_id, forn_nome, data, existing_prod, ean, codigo))
+            pending.append((idx, fornecedor_id, forn_nome, effective_data, existing_prod, ean, codigo))
 
             if len(pending) >= BATCH_SIZE:
                 flush_batch()
