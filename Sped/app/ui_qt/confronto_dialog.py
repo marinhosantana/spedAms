@@ -9,10 +9,14 @@ from PySide6.QtWidgets import (
     QApplication,
     QComboBox,
     QDialog,
+    QDialogButtonBox,
     QFileDialog,
+    QFormLayout,
     QHBoxLayout,
     QHeaderView,
     QLabel,
+    QLineEdit,
+    QMenu,
     QMessageBox,
     QPushButton,
     QStyle,
@@ -281,6 +285,8 @@ class ConfrontoDialog(QDialog):
         self._tabs.addTab(self._grouped_table, "Agrupado (por Produto)")
         self._tabs.addTab(self._detail_table,  "Detalhado (por Item)")
         self._tabs.addTab(self._log_table,     "Log de Regras")
+        self._log_table.setContextMenuPolicy(Qt.CustomContextMenu)
+        self._log_table.customContextMenuRequested.connect(self._log_context_menu)
         root.addWidget(self._tabs, 1)
 
     # ── Helpers ───────────────────────────────────────────────────────────────
@@ -293,9 +299,8 @@ class ConfrontoDialog(QDialog):
         t.setSelectionBehavior(QAbstractItemView.SelectRows)
         t.setEditTriggers(QAbstractItemView.NoEditTriggers)
         t.verticalHeader().setVisible(False)
-        t.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeToContents)
+        t.horizontalHeader().setSectionResizeMode(QHeaderView.Interactive)
         t.horizontalHeader().setStretchLastSection(True)
-        # Delegate garante que setBackground() não seja sobrescrito pelo stylesheet pai
         t.setItemDelegate(_BrushDelegate(t))
         return t
 
@@ -363,11 +368,15 @@ class ConfrontoDialog(QDialog):
         self._btn_gerar.setEnabled(True)
         self._grouped_rows = grouped
         self._detail_rows  = detail
+        # Preenche tabelas UMA VEZ com todos os dados
+        self._fill_table(self._grouped_table, grouped, GROUPED_FIELDS)
+        self._fill_table(self._detail_table,  detail,  DETAIL_FIELDS)
         self._update_metrics(grouped, detail)
         self._update_filter_btns(grouped)
         self._filter_mode = "Todos"
         for m, btn in self._filter_btns.items():
             btn.setChecked(m == "Todos")
+        # Filtro inicial = Todos → apenas garante que tudo está visível
         self._apply_filter()
         total_ok  = sum(1 for r in grouped if r.get("status") == "OK")
         total_div = sum(1 for r in grouped if "Divergencia" in str(r.get("status") or ""))
@@ -389,22 +398,27 @@ class ConfrontoDialog(QDialog):
             btn.setChecked(m == mode)
         self._apply_filter()
 
+    @staticmethod
+    def _row_visible(row: dict, mode: str) -> bool:
+        status = str(row.get("status") or "")
+        if mode == "OK":
+            return status == "OK"
+        if mode == "Divergentes":
+            return "Divergencia" in status
+        if mode == "Nao Cadastrados":
+            return "Cadastrado" in status
+        return True  # Todos
+
     def _apply_filter(self) -> None:
         mode = self._filter_mode
-        if mode == "OK":
-            grp = [r for r in self._grouped_rows if r.get("status") == "OK"]
-            det = [r for r in self._detail_rows  if r.get("status") == "OK"]
-        elif mode == "Divergentes":
-            grp = [r for r in self._grouped_rows if "Divergencia" in str(r.get("status") or "")]
-            det = [r for r in self._detail_rows  if "Divergencia" in str(r.get("status") or "")]
-        elif mode == "Nao Cadastrados":
-            grp = [r for r in self._grouped_rows if "Cadastrado" in str(r.get("status") or "")]
-            det = [r for r in self._detail_rows  if "Cadastrado" in str(r.get("status") or "")]
-        else:
-            grp = self._grouped_rows
-            det = self._detail_rows
-        self._fill_table(self._grouped_table, grp, GROUPED_FIELDS)
-        self._fill_table(self._detail_table,  det,  DETAIL_FIELDS)
+        for t, rows in (
+            (self._grouped_table, self._grouped_rows),
+            (self._detail_table,  self._detail_rows),
+        ):
+            t.setUpdatesEnabled(False)
+            for r, row in enumerate(rows):
+                t.setRowHidden(r, not self._row_visible(row, mode))
+            t.setUpdatesEnabled(True)
 
     def _update_filter_btns(self, grouped: list[dict]) -> None:
         total = len(grouped)
@@ -428,16 +442,15 @@ class ConfrontoDialog(QDialog):
                 item = QTableWidgetItem(val)
                 item.setTextAlignment(Qt.AlignVCenter | Qt.AlignLeft)
                 if c == 0:
-                    # Status: fundo forte colorido + texto negrito
                     item.setBackground(bg_status)
                     item.setForeground(fg_status)
                     font = item.font()
                     font.setBold(True)
                     item.setFont(font)
                 else:
-                    # Demais células: alternância manual (não depende do stylesheet)
                     item.setBackground(row_bg)
                 table.setItem(r, c, item)
+        table.resizeColumnsToContents()
         table.setUpdatesEnabled(True)
 
     def _update_metrics(self, grouped: list[dict], detail: list[dict]) -> None:
@@ -464,6 +477,12 @@ class ConfrontoDialog(QDialog):
         self._runtime_rules, self._log_entries = build_rules_from_confronto(
             self._grouped_rows, self._operation_type
         )
+        # Vincula índice da regra a cada entrada "REGRA GERADA" para edição via menu
+        rule_idx = 0
+        for entry in self._log_entries:
+            if entry["tipo"] == "REGRA GERADA":
+                entry["_rule_idx"] = rule_idx
+                rule_idx += 1
         self._fill_log_table(self._log_entries)
         self._tabs.setCurrentWidget(self._log_table)
         n_rules = len(self._runtime_rules)
@@ -481,9 +500,10 @@ class ConfrontoDialog(QDialog):
 
     def _fill_log_table(self, entries: list[dict]) -> None:
         _TYPE_COLORS = {
-            "REGRA GERADA":  (_BG_OK,  _FG_OK),
+            "REGRA GERADA":   (_BG_OK,  _FG_OK),
             "NAO ENCONTRADO": (_BG_NAO, _FG_NAO),
-            "SEM CORRECAO":  (_BG_DIV, _FG_DIV),
+            "SEM CORRECAO":   (_BG_DIV, _FG_DIV),
+            "REGRA EXCLUIDA": (QColor("#e0e0e0"), QColor("#888888")),
         }
         self._log_table.setUpdatesEnabled(False)
         self._log_table.setRowCount(len(entries))
@@ -503,6 +523,143 @@ class ConfrontoDialog(QDialog):
                     item.setBackground(row_bg)
                 self._log_table.setItem(r, c, item)
         self._log_table.setUpdatesEnabled(True)
+
+    # ── Menu de contexto do Log de Regras ─────────────────────────────────────
+
+    def _log_context_menu(self, pos) -> None:
+        row = self._log_table.rowAt(pos.y())
+        if row < 0 or row >= len(self._log_entries):
+            return
+        entry = self._log_entries[row]
+        rule_idx = entry.get("_rule_idx")
+        excluida = entry.get("tipo") == "REGRA EXCLUIDA"
+
+        menu = QMenu(self)
+        act_ver  = menu.addAction("Ver Regra")
+        act_edit = menu.addAction("Editar Regra") if rule_idx is not None and not excluida else None
+        if rule_idx is not None and not excluida:
+            menu.addSeparator()
+            act_del = menu.addAction("Excluir Regra")
+        else:
+            act_del = None
+
+        action = menu.exec(self._log_table.viewport().mapToGlobal(pos))
+        if action == act_ver:
+            self._view_or_edit_rule(entry, read_only=True)
+        elif act_edit and action == act_edit:
+            self._view_or_edit_rule(entry, read_only=False)
+        elif act_del and action == act_del:
+            self._delete_rule(row, entry)
+
+    def _view_or_edit_rule(self, entry: dict, read_only: bool) -> None:
+        rule_idx = entry.get("_rule_idx")
+        rule = self._runtime_rules[rule_idx] if rule_idx is not None else None
+
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Detalhes da Regra" if read_only else "Editar Regra")
+        dlg.setMinimumWidth(440)
+        layout = QVBoxLayout(dlg)
+        form = QFormLayout()
+        form.setLabelAlignment(Qt.AlignRight)
+        layout.addLayout(form)
+
+        def ro(val: object) -> QLineEdit:
+            f = QLineEdit(str(val or ""))
+            f.setReadOnly(True)
+            f.setStyleSheet("background: #f5f5f5;")
+            return f
+
+        form.addRow("Tipo:", ro(entry.get("tipo")))
+        form.addRow("Codigo:", ro(entry.get("codigo")))
+        form.addRow("Descricao:", ro(entry.get("descricao")))
+        form.addRow("CST no SPED:", ro(entry.get("cst_sped")))
+        form.addRow("CFOP no SPED:", ro(entry.get("cfop_sped")))
+
+        if rule is not None:
+            codes = ", ".join(sorted(rule.get("match_codes", set())))
+            form.addRow("Codigo(s):", ro(codes))
+
+            fld_cst = QLineEdit(str(rule.get("new_cst") or ""))
+            fld_cst.setReadOnly(read_only)
+            form.addRow("Novo CST:", fld_cst)
+
+            fld_cfop = QLineEdit(str(rule.get("new_cfop") or ""))
+            fld_cfop.setReadOnly(read_only)
+            form.addRow("Novo CFOP:", fld_cfop)
+
+            fld_cnpj = QLineEdit(str(rule.get("document_tax_id") or ""))
+            fld_cnpj.setReadOnly(read_only)
+            form.addRow("CNPJ Fornecedor:", fld_cnpj)
+        else:
+            form.addRow("Acao:", ro(entry.get("acao")))
+
+        if read_only:
+            btns = QDialogButtonBox(QDialogButtonBox.Close)
+            btns.rejected.connect(dlg.reject)
+        else:
+            btns = QDialogButtonBox(QDialogButtonBox.Save | QDialogButtonBox.Cancel)
+            btns.accepted.connect(dlg.accept)
+            btns.rejected.connect(dlg.reject)
+        layout.addWidget(btns)
+
+        if dlg.exec() == QDialog.Accepted and not read_only and rule is not None:
+            cst  = fld_cst.text().strip()
+            cfop = fld_cfop.text().strip()
+            cnpj = "".join(c for c in fld_cnpj.text() if c.isdigit())
+
+            if cst:
+                rule["new_cst"] = cst
+            else:
+                rule.pop("new_cst", None)
+
+            if cfop:
+                rule["new_cfop"] = cfop
+            else:
+                rule.pop("new_cfop", None)
+
+            if cnpj and len(cnpj) in {11, 14}:
+                rule["document_tax_id"] = cnpj
+            else:
+                rule.pop("document_tax_id", None)
+
+            # Atualiza exibição do log
+            parts = []
+            if cst:
+                parts.append(f"CST: {entry.get('cst_sped')} → {cst}")
+            if cfop:
+                parts.append(f"CFOP: {entry.get('cfop_sped')} → {cfop}")
+            entry["cst_cad"]  = cst
+            entry["cfop_cad"] = cfop
+            entry["cnpj_fornecedor"] = fld_cnpj.text().strip()
+            entry["acao"] = " | ".join(parts) if parts else "Sem alteracoes definidas"
+            self._fill_log_table(self._log_entries)
+
+    def _delete_rule(self, row: int, entry: dict) -> None:
+        rule_idx = entry.get("_rule_idx")
+        if rule_idx is None:
+            return
+        resp = QMessageBox.question(
+            self, "Excluir Regra",
+            f"Excluir regra do produto '{entry.get('codigo')} — {entry.get('descricao')}'?",
+            QMessageBox.Yes | QMessageBox.No,
+        )
+        if resp != QMessageBox.Yes:
+            return
+
+        self._runtime_rules.pop(rule_idx)
+
+        # Reajusta índices das entradas subsequentes
+        for e in self._log_entries:
+            idx = e.get("_rule_idx")
+            if idx is not None and idx > rule_idx:
+                e["_rule_idx"] = idx - 1
+
+        entry.pop("_rule_idx", None)
+        entry["tipo"] = "REGRA EXCLUIDA"
+        entry["acao"] = "Regra excluida manualmente"
+
+        self._fill_log_table(self._log_entries)
+        self._btn_reprocess.setEnabled(len(self._runtime_rules) > 0)
 
     def _reprocessar_sped(self) -> None:
         if not self._runtime_rules:
