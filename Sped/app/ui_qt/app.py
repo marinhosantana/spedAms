@@ -418,6 +418,25 @@ class ProductReviewImportWorker(QObject):
             self.failed.emit(str(exc))
 
 
+class BackupDatabaseWorker(QObject):
+    finished = Signal(Path)
+    failed = Signal(str)
+    progress = Signal(int, int, str)
+
+    def __init__(self, connection_config: dict[str, object], dest_path: Path) -> None:
+        super().__init__()
+        self.connection_config = connection_config
+        self.dest_path = dest_path
+
+    def run(self) -> None:
+        from app.services.database_backup import backup_database
+        try:
+            backup_database(self.connection_config, self.dest_path, self.progress.emit)
+            self.finished.emit(self.dest_path)
+        except Exception as exc:
+            self.failed.emit(str(exc))
+
+
 def extract_nfe_keys_from_sped_file(sped_path: Path) -> list[dict[str, object]]:
     def classify_document_type(document_model: str, document_key: str) -> str:
         model = str(document_model or "").strip()
@@ -2102,6 +2121,32 @@ class QtSpedApp(QMainWindow):
         panel_layout.addWidget(self.mysql_status_label)
         self.load_mysql_settings()
         layout.addWidget(panel)
+
+        backup_panel = self.create_panel()
+        backup_layout = QVBoxLayout(backup_panel)
+        backup_layout.setContentsMargins(16, 16, 16, 16)
+        backup_layout.setSpacing(8)
+        backup_title = QLabel("Backup do Banco de Dados")
+        backup_title.setObjectName("sectionTitle")
+        backup_layout.addWidget(backup_title)
+        backup_desc = QLabel("Gera um arquivo .sql com toda a estrutura e dados do banco atual.")
+        backup_desc.setObjectName("muted")
+        backup_layout.addWidget(backup_desc)
+        backup_row = QHBoxLayout()
+        self.backup_btn = self.create_button("Fazer Backup do Banco...", self.run_database_backup, primary=True)
+        backup_row.addWidget(self.backup_btn)
+        self.backup_progress_bar = QProgressBar()
+        self.backup_progress_bar.setVisible(False)
+        self.backup_progress_bar.setMaximum(100)
+        self.backup_progress_bar.setFixedWidth(260)
+        backup_row.addWidget(self.backup_progress_bar)
+        backup_row.addStretch()
+        backup_layout.addLayout(backup_row)
+        self.backup_status_label = QLabel("")
+        self.backup_status_label.setObjectName("muted")
+        backup_layout.addWidget(self.backup_status_label)
+        layout.addWidget(backup_panel)
+
         layout.addStretch()
         return page
 
@@ -5578,6 +5623,69 @@ class QtSpedApp(QMainWindow):
             QMessageBox.information(self, "Configuracoes", "Conexao MySQL OK.")
         except Exception as exc:
             QMessageBox.critical(self, "Configuracoes", str(exc))
+
+    def run_database_backup(self) -> None:
+        from app.services.database_backup import suggest_backup_filename
+        self.save_mysql_settings()
+        config = self.mysql_repo.load_config()
+        database_name = config.get("database", "banco")
+        initial_filename = suggest_backup_filename(str(database_name))
+        dest, _ = QFileDialog.getSaveFileName(
+            self,
+            "Salvar backup do banco de dados",
+            initial_filename,
+            "SQL Dump (*.sql);;Todos os arquivos (*)",
+        )
+        if not dest:
+            return
+        dest_path = Path(dest)
+        connection_config = {
+            "host": config.get("host", "127.0.0.1"),
+            "port": int(str(config.get("port", "3306")) or "3306"),
+            "user": config.get("user", "root"),
+            "password": config.get("password", ""),
+            "database": database_name,
+            "connection_timeout": 10,
+        }
+        self.backup_btn.setEnabled(False)
+        self.backup_progress_bar.setVisible(True)
+        self.backup_progress_bar.setValue(0)
+        self.backup_status_label.setText("Iniciando backup...")
+        self.statusBar().showMessage("Backup do banco em andamento...")
+
+        self._backup_thread = QThread(self)
+        self._backup_worker = BackupDatabaseWorker(connection_config, dest_path)
+        self._backup_worker.moveToThread(self._backup_thread)
+        self._backup_thread.started.connect(self._backup_worker.run)
+        self._backup_worker.progress.connect(self._on_backup_progress)
+        self._backup_worker.finished.connect(self._on_backup_success)
+        self._backup_worker.failed.connect(self._on_backup_error)
+        self._backup_worker.finished.connect(self._backup_thread.quit)
+        self._backup_worker.failed.connect(self._backup_thread.quit)
+        self._backup_thread.start()
+
+    def _on_backup_progress(self, current: int, total: int, message: str) -> None:
+        if total > 0:
+            self.backup_progress_bar.setValue(int(current * 100 / total))
+        self.backup_status_label.setText(message)
+
+    def _on_backup_success(self, dest_path: Path) -> None:
+        self.backup_btn.setEnabled(True)
+        self.backup_progress_bar.setVisible(False)
+        size_kb = round(dest_path.stat().st_size / 1024, 1)
+        msg = f"Backup concluido: {dest_path.name} ({size_kb} KB)"
+        self.backup_status_label.setText(msg)
+        self.statusBar().showMessage(msg)
+        reply = QMessageBox.question(self, "Backup", f"{msg}\n\nDeseja abrir a pasta do arquivo?")
+        if reply == QMessageBox.Yes:
+            os.startfile(str(dest_path.parent))
+
+    def _on_backup_error(self, error: str) -> None:
+        self.backup_btn.setEnabled(True)
+        self.backup_progress_bar.setVisible(False)
+        self.backup_status_label.setText(f"Erro: {error}")
+        self.statusBar().showMessage("Falha no backup do banco.")
+        QMessageBox.critical(self, "Backup", f"Falha ao gerar backup:\n\n{error}")
 
     def process_entry_query(self) -> None:
         try:

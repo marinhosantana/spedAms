@@ -74,19 +74,23 @@ CAMPOS_GRUPOS: list[tuple[str, list[tuple[str, str]]]] = [
         ("reducao_bc_icms", "Redução BC ICMS %"),
         ("cst_ipi", "CST IPI"),
         ("aliquota_ipi", "Alíquota IPI %"),
+        ("cst_pis_cofins", "CST PIS/COFINS Entrada Empresa"),
         ("cst_pis", "CST PIS"),
         ("cst_cofins", "CST COFINS"),
         ("aliquota_pis", "Alíquota PIS %"),
         ("aliquota_cofins", "Alíquota COFINS %"),
+        ("natureza_receita_entrada", "Natureza da Receita Entrada"),
         ("mva", "MVA %"),
         ("aliquota_icms_st", "Alíquota ICMS ST %"),
         ("bc_st", "Base ICMS ST"),
         ("valor_icms_st", "Valor ICMS ST"),
+        ("cfop_saida_fornecedor", "CFOP Saída Fornecedor"),
         ("cst_icms_saida", "CST ICMS Saída"),
         ("cfop_saida_empresa", "CFOP Saída Empresa"),
         ("aliquota_icms_saida", "Alíquota ICMS Saída %"),
         ("cst_pis_saida", "CST PIS Saída"),
         ("cst_cofins_saida", "CST COFINS Saída"),
+        ("natureza_receita_saida", "Natureza da Receita Saída"),
         ("c_classtrib", "Class. Tributária"),
         ("c_benef", "Cód. Benefício Fiscal"),
     ]),
@@ -128,10 +132,16 @@ _SINONIMOS: dict[str, list[str]] = {
     "reducao_bc_icms":    ["reducao bc icms", "reducao bc", "red bc icms"],
     "cst_ipi":            ["cst ipi"],
     "aliquota_ipi":       ["aliquota ipi", "aliq ipi"],
-    "cst_pis":            ["cst pis"],
-    "cst_cofins":         ["cst cofins"],
+    "cst_pis_cofins":     ["cst pis cofins entrada", "cst piscofins", "cst pis/cofins entrada", "cst pis cofins emp"],
+    "cst_pis":            ["cst pis entrada", "cst pis"],
+    "cst_cofins":         ["cst cofins entrada", "cst cofins"],
     "aliquota_pis":       ["aliquota pis", "aliq pis"],
     "aliquota_cofins":    ["aliquota cofins", "aliq cofins"],
+    "natureza_receita_entrada": ["natureza receita entrada", "nat receita ent", "natureza receita",
+                                 "natureza da receita", "nat da receita"],
+    "natureza_receita_saida":   ["natureza receita saida", "nat receita sai",
+                                 "natureza da receita 1", "natureza da receita saida", "nat da receita sai"],
+    "cfop_saida_fornecedor":    ["cfop saida fornecedor", "cfop sai forn", "cfop fornecedor"],
     "mva":                ["mva"],
     "aliquota_icms_st":   ["aliquota icms st", "aliq icms st", "aliquota st"],
     "valor_icms_st":      ["valor icms st", "valor st"],
@@ -257,7 +267,10 @@ def _needs_update(existing: dict, incoming: dict) -> bool:
         return "".join(c for c in str(v or "") if c.isdigit())
 
     for f in ("descricao", "status_produto", "codigo_empresa", "origem_entrada",
-              "cst_icms", "cst_ipi", "cst_pis", "cst_cofins"):
+              "cfop_entrada", "cfop_saida", "cfop_saida_fornecedor", "cfop_saida_empresa",
+              "cst_icms", "cst_ipi", "cst_pis", "cst_cofins",
+              "cst_pis_cofins", "natureza_receita_entrada", "natureza_receita_saida",
+              "cst_icms_saida", "cst_pis_saida", "cst_cofins_saida"):
         v_in = nt(incoming.get(f, ""))
         if v_in and v_in != nt(existing.get(f, "")):
             return True
@@ -332,6 +345,7 @@ def _execute_import(
         "fornecedores_criados": 0,
         "tipos_criados": 0,
         "erros": [],
+        "nao_atualizados": [],  # {"linha", "fornecedor", "codigo", "ean", "descricao", "motivo"}
     }
 
     BATCH_SIZE = 500  # produtos por transação
@@ -342,6 +356,10 @@ def _execute_import(
         t["nome"]: int(t["id"]) for t in repo.list_product_types(environment)
     }
     supplier_product_cache: dict[int, dict[str, dict]] = {}
+    # Mapa lazy por empresa: {empresa_id: {codigo_empresa: cfop_entrada}}
+    # Carregado na primeira vez que a empresa aparece; permite herdar CFOP
+    # de outro fornecedor que já tenha o mesmo codigo_empresa configurado.
+    cfop_map_by_empresa: dict[int, dict[str, str]] = {}
 
     total = len(df)
     notify_step = max(1, total // 200)
@@ -352,6 +370,12 @@ def _execute_import(
     def _err(idx_l: int, forn: str, cod: str, ean_v: str, desc: str, msg: str) -> dict:
         return {"linha": idx_l + 2, "fornecedor": forn, "codigo": cod,
                 "ean": ean_v, "descricao": desc[:80], "erro": msg}
+
+    def _skip(idx_l: int, forn: str, cod: str, ean_v: str, desc: str, motivo: str) -> None:
+        stats["nao_atualizados"].append(
+            {"linha": idx_l + 2, "fornecedor": forn, "codigo": cod,
+             "ean": ean_v, "descricao": desc[:80], "motivo": motivo}
+        )
 
     def flush_batch() -> None:
         if not pending:
@@ -416,12 +440,14 @@ def _execute_import(
                 empresa_id = default_company_id
             else:
                 stats["ignorados"] += 1
+                _skip(idx, "", "", "", get("descricao"), "Sem empresa (campo empresa_nome vazio e sem empresa padrão)")
                 continue
 
             # ── Fornecedor ───────────────────────────────────────────────────
             forn_nome = get("fornecedor_nome")
             if not forn_nome:
                 stats["ignorados"] += 1
+                _skip(idx, "", "", "", get("descricao"), "Sem fornecedor (campo fornecedor_nome vazio)")
                 continue
 
             forn_cnpj   = get("fornecedor_cnpj")
@@ -456,6 +482,7 @@ def _execute_import(
                 codigo = ean or descricao[:80]
             if not codigo:
                 stats["ignorados"] += 1
+                _skip(idx, forn_nome, "", "", "", "Sem identificador (código, EAN e descrição todos vazios)")
                 continue
 
             if fornecedor_id not in supplier_product_cache:
@@ -482,27 +509,45 @@ def _execute_import(
                 "reducao_bc_icms":     get("reducao_bc_icms"),
                 "cst_ipi":             get("cst_ipi"),
                 "aliquota_ipi":        get("aliquota_ipi"),
+                "cst_pis_cofins":      get("cst_pis_cofins"),
                 "cst_pis":             get("cst_pis"),
                 "cst_cofins":          get("cst_cofins"),
                 "aliquota_pis":        get("aliquota_pis"),
                 "aliquota_cofins":     get("aliquota_cofins"),
+                "natureza_receita_entrada": get("natureza_receita_entrada"),
                 "mva":                 get("mva"),
                 "aliquota_icms_st":    get("aliquota_icms_st"),
                 "bc_st":               get("bc_st"),
                 "valor_icms_st":       get("valor_icms_st"),
+                "cfop_saida_fornecedor": get("cfop_saida_fornecedor"),
                 "cst_icms_saida":      get("cst_icms_saida"),
                 "cfop_saida_empresa":  get("cfop_saida_empresa"),
                 "aliquota_icms_saida": get("aliquota_icms_saida"),
                 "cst_pis_saida":       get("cst_pis_saida"),
                 "cst_cofins_saida":    get("cst_cofins_saida"),
+                "natureza_receita_saida": get("natureza_receita_saida"),
                 "c_classtrib":         get("c_classtrib"),
                 "c_benef":             get("c_benef"),
                 "fornecedor_codigo":   get("fornecedor_codigo"),
             }
 
+            # ── Herança de CFOP por codigo_empresa ───────────────────────────
+            # Se a planilha não trouxe cfop_entrada, mas o produto tem
+            # codigo_empresa e outro fornecedor da mesma empresa já tem
+            # esse CFOP configurado → herda o valor.
+            if not data.get("cfop_entrada"):
+                cod_emp = str(data.get("codigo_empresa") or "").strip()
+                if cod_emp and empresa_id is not None:
+                    if empresa_id not in cfop_map_by_empresa:
+                        cfop_map_by_empresa[empresa_id] = repo.get_cfop_map_by_empresa_id(empresa_id)
+                    inherited = cfop_map_by_empresa[empresa_id].get(cod_emp, "")
+                    if inherited:
+                        data["cfop_entrada"] = inherited
+
             # Se produto já existe e nenhum campo mudou → pula sem gravar
             if existing_prod and not _needs_update(existing_prod, data):
                 stats["sem_alteracao"] += 1
+                _skip(idx, forn_nome, codigo, ean, descricao, "Sem alteração — dados da planilha já iguais ao banco")
                 continue
 
             # Para produto existente: mescla apenas campos não-vazios da planilha,
@@ -1462,6 +1507,42 @@ class ImportPlanilhaDialog(QDialog):
         err_layout.addWidget(self._btn_export_errors, 0, Qt.AlignRight)
 
         self._import_tabs.addTab(err_page, "Erros (0)")
+
+        # Aba de não atualizados (sem alteração + ignorados)
+        skip_page = QWidget()
+        skip_page.setStyleSheet("background: #ffffff;")
+        skip_layout = QVBoxLayout(skip_page)
+        skip_layout.setContentsMargins(8, 8, 8, 8)
+        skip_layout.setSpacing(6)
+
+        self._skip_table = QTableWidget()
+        self._skip_table.setColumnCount(6)
+        self._skip_table.setHorizontalHeaderLabels(
+            ["Linha", "Fornecedor", "Código", "EAN", "Descrição", "Motivo"]
+        )
+        self._skip_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self._skip_table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self._skip_table.setAlternatingRowColors(True)
+        self._skip_table.horizontalHeader().setSectionResizeMode(4, QHeaderView.Stretch)
+        self._skip_table.horizontalHeader().setSectionResizeMode(5, QHeaderView.Stretch)
+        self._skip_table.setColumnWidth(0, 55)
+        self._skip_table.setColumnWidth(1, 160)
+        self._skip_table.setColumnWidth(2, 100)
+        self._skip_table.setColumnWidth(3, 110)
+        self._skip_table.setStyleSheet(
+            "QTableWidget { background: #ffffff; border: none; }"
+            "QHeaderView::section { background: #edf3f7; color: #1d2730; "
+            "font-weight: bold; border: 1px solid #d6e0e8; padding: 4px; }"
+        )
+        skip_layout.addWidget(self._skip_table, 1)
+
+        self._btn_export_skipped = QPushButton("Exportar não atualizados (CSV)…")
+        self._btn_export_skipped.setFixedWidth(230)
+        self._btn_export_skipped.clicked.connect(self._export_skipped)
+        self._btn_export_skipped.hide()
+        skip_layout.addWidget(self._btn_export_skipped, 0, Qt.AlignRight)
+
+        self._import_tabs.addTab(skip_page, "Não Atualizados (0)")
         layout.addWidget(self._import_tabs, 1)
 
         self._import_summary = QLabel("")
@@ -1528,8 +1609,11 @@ class ImportPlanilhaDialog(QDialog):
                 self._import_summary.clear()
                 self._error_table.setRowCount(0)
                 self._import_tabs.setTabText(1, "Erros (0)")
+                self._skip_table.setRowCount(0)
+                self._import_tabs.setTabText(2, "Não Atualizados (0)")
                 self._import_tabs.setCurrentIndex(0)
                 self._btn_export_errors.hide()
+                self._btn_export_skipped.hide()
                 self._import_status_label.setText("Pronto para importar.")
                 self._btn_fechar.hide()
                 self._btn_importar.show()
@@ -1637,6 +1721,34 @@ class ImportPlanilhaDialog(QDialog):
         else:
             self._import_tabs.setTabText(1, "Erros (0)")
 
+        # Popula aba de não atualizados
+        nao_atualizados = stats.get("nao_atualizados", [])
+        n_skip = len(nao_atualizados)
+        self._skip_table.setRowCount(0)
+        if n_skip:
+            self._skip_table.setRowCount(n_skip)
+            warn_color = QColor("#b56b12")
+            muted_color = QColor("#5d6e7d")
+            for r, s in enumerate(nao_atualizados):
+                vals = [
+                    str(s.get("linha", "")),
+                    s.get("fornecedor", ""),
+                    s.get("codigo", ""),
+                    s.get("ean", ""),
+                    s.get("descricao", ""),
+                    s.get("motivo", ""),
+                ]
+                for c, v in enumerate(vals):
+                    item = QTableWidgetItem(v)
+                    if c == 5:
+                        color = warn_color if "Ignorado" in v or "Sem " in v else muted_color
+                        item.setForeground(color)
+                    self._skip_table.setItem(r, c, item)
+            self._import_tabs.setTabText(2, f"Não Atualizados ({n_skip})")
+            self._btn_export_skipped.show()
+        else:
+            self._import_tabs.setTabText(2, "Não Atualizados (0)")
+
         sem_alt = stats.get("sem_alteracao", 0)
         self._import_status_label.setText(
             f"<b style='color:{ok_color}'>Pronto:</b> "
@@ -1668,6 +1780,44 @@ class ImportPlanilhaDialog(QDialog):
                 df_err.to_excel(path, index=False)
             else:
                 df_err.to_csv(path, index=False, encoding="utf-8-sig")
+            from PySide6.QtWidgets import QMessageBox
+            msg = QMessageBox(self)
+            msg.setIcon(QMessageBox.Information)
+            msg.setWindowTitle("Exportado")
+            msg.setText(f"Arquivo salvo em:\n{path}\n\nDeseja abrir o arquivo?")
+            btn_sim = msg.addButton("Sim", QMessageBox.YesRole)
+            msg.addButton("Nao", QMessageBox.NoRole)
+            msg.exec()
+            if msg.clickedButton() == btn_sim:
+                import os
+                os.startfile(path)
+        except Exception as exc:
+            from PySide6.QtWidgets import QMessageBox
+            QMessageBox.critical(self, "Erro ao exportar", str(exc))
+
+    def _export_skipped(self) -> None:
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Exportar não atualizados", "nao_atualizados_importacao.csv",
+            "CSV (*.csv);;Excel (*.xlsx)"
+        )
+        if not path:
+            return
+        rows = []
+        for r in range(self._skip_table.rowCount()):
+            rows.append({
+                "Linha":      self._skip_table.item(r, 0).text() if self._skip_table.item(r, 0) else "",
+                "Fornecedor": self._skip_table.item(r, 1).text() if self._skip_table.item(r, 1) else "",
+                "Código":     self._skip_table.item(r, 2).text() if self._skip_table.item(r, 2) else "",
+                "EAN":        self._skip_table.item(r, 3).text() if self._skip_table.item(r, 3) else "",
+                "Descrição":  self._skip_table.item(r, 4).text() if self._skip_table.item(r, 4) else "",
+                "Motivo":     self._skip_table.item(r, 5).text() if self._skip_table.item(r, 5) else "",
+            })
+        try:
+            df_skip = pd.DataFrame(rows)
+            if path.endswith(".xlsx"):
+                df_skip.to_excel(path, index=False)
+            else:
+                df_skip.to_csv(path, index=False, encoding="utf-8-sig")
             from PySide6.QtWidgets import QMessageBox
             msg = QMessageBox(self)
             msg.setIcon(QMessageBox.Information)

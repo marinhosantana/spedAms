@@ -22,6 +22,10 @@ def _norm_aliq(v: object) -> Decimal | None:
         return None
 
 
+def _norm_ncm(v: object) -> str:
+    return "".join(c for c in str(v or "") if c.isdigit())
+
+
 def _cst_diverges(sped_val: str, cat_val: str) -> bool:
     s = _norm_cst(sped_val)
     if not s:
@@ -30,15 +34,28 @@ def _cst_diverges(sped_val: str, cat_val: str) -> bool:
 
 
 def _cfop_diverges(sped_val: str, cat_val: str) -> bool:
+    """Ambos têm CFOP mas os valores diferem."""
     s = _norm_cfop(sped_val)
-    if not s:
-        return False  # SPED sem CFOP, nada a comparar
-    return s != _norm_cfop(cat_val)  # cadastro vazio ou diferente = divergencia
+    c = _norm_cfop(cat_val)
+    return bool(s) and bool(c) and s != c
+
+
+def _cfop_zerado(sped_val: str, cat_val: str) -> bool:
+    """SPED tem CFOP mas o cadastro está vazio/zerado."""
+    s = _norm_cfop(sped_val)
+    c = _norm_cfop(cat_val)
+    return bool(s) and not bool(c)
 
 
 def _aliq_diverges(sped_aliq: str, cat_aliq: str) -> bool:
     s, c = _norm_aliq(sped_aliq), _norm_aliq(cat_aliq)
     return s is not None and c is not None and s != c
+
+
+def _ncm_diverges(sped_ncm: str, cat_ncm: str) -> bool:
+    s = _norm_ncm(sped_ncm)
+    c = _norm_ncm(cat_ncm)
+    return bool(s) and bool(c) and s != c
 
 
 def _status(issues: list[str], cat_found: bool) -> str:
@@ -47,16 +64,31 @@ def _status(issues: list[str], cat_found: bool) -> str:
     return "OK" if not issues else "Divergencia: " + ", ".join(dict.fromkeys(issues))
 
 
+# Campos disponíveis para seleção pelo usuário
+COMPARE_FIELD_LABELS: dict[str, str] = {
+    "cst":      "CST ICMS",
+    "cfop":     "CFOP",
+    "aliquota": "Alíquota ICMS %",
+    "ncm":      "NCM",
+}
+
+DEFAULT_COMPARE_FIELDS: frozenset[str] = frozenset({"cst", "cfop"})
+
+
 def build_confronto_data(
     rows: list[dict],
     catalog_products: list[dict],
     operation_type: str,
+    compare_fields: frozenset[str] | set[str] = DEFAULT_COMPARE_FIELDS,
 ) -> tuple[list[dict], list[dict]]:
     """
     Compara lançamentos do SPED (com launch_details) contra o cadastro local de produtos.
 
-    Para Entrada compara: cst_icms / cfop_entrada / aliquota_icms do cadastro.
-    Para Saida compara:   cst_icms_saida / cfop_saida_empresa / aliquota_icms_saida.
+    compare_fields controla quais campos entram na detecção de divergência:
+      "cst"      → CST ICMS
+      "cfop"     → CFOP
+      "aliquota" → Alíquota ICMS %
+      "ncm"      → NCM
 
     Retorna (grouped_rows, detail_rows).
     """
@@ -73,12 +105,27 @@ def build_confronto_data(
         pis_f  = "cst_pis_saida"
         cof_f  = "cst_cofins_saida"
 
-    # Indexa cadastro por codigo_empresa (primeiro encontrado por código)
+    check_cst  = "cst"      in compare_fields
+    check_cfop = "cfop"     in compare_fields
+    check_aliq = "aliquota" in compare_fields
+    check_ncm  = "ncm"      in compare_fields
+
+    # Indexa cadastro por codigo_empresa, mesclando campos de todos os registros
+    # do mesmo código. Campos vazios num registro são preenchidos pelo próximo
+    # registro com valor — garante que se qualquer fornecedor tem CFOP/CST
+    # configurado, o confronto enxerga esse valor.
     by_code: dict[str, dict] = {}
     for prod in catalog_products:
         code = str(prod.get("codigo_empresa") or "").strip()
-        if code and code not in by_code:
-            by_code[code] = prod
+        if not code:
+            continue
+        if code not in by_code:
+            by_code[code] = dict(prod)
+        else:
+            existing = by_code[code]
+            for key, val in prod.items():
+                if not str(existing.get(key) or "").strip() and str(val or "").strip():
+                    existing[key] = val
 
     grouped_rows: list[dict] = []
     detail_rows: list[dict] = []
@@ -88,6 +135,7 @@ def build_confronto_data(
         sped_cst  = str(row.get("cst_icms") or "").strip()
         sped_cfop = str(row.get("cfop") or "").strip()
         sped_aliq = str(row.get("display_icms_rate") or row.get("icms_rate") or "").strip()
+        sped_ncm  = str(row.get("ncm") or "").strip()
 
         cat = by_code.get(code)
         cat_cst   = str(cat.get(cst_f) or "")  if cat else ""
@@ -95,15 +143,22 @@ def build_confronto_data(
         cat_aliq  = str(cat.get(aliq_f) or "") if cat else ""
         cat_pis   = str(cat.get(pis_f) or "")  if cat else ""
         cat_cof   = str(cat.get(cof_f) or "")  if cat else ""
+        cat_ncm   = str(cat.get("ncm") or "")  if cat else ""
 
         if cat:
             issues: list[str] = []
-            # Campos do SPED podem ter múltiplos valores separados por |
-            if any(_cst_diverges(p.strip(), cat_cst) for p in sped_cst.split("|")):
+            if check_cst and any(_cst_diverges(p.strip(), cat_cst) for p in sped_cst.split("|")):
                 issues.append("CST")
-            if any(_cfop_diverges(p.strip(), cat_cfop) for p in sped_cfop.split("|")):
-                issues.append("CFOP")
-            # Aliquota exibida apenas para referencia, sem entrar na comparacao
+            if check_cfop:
+                cfop_parts = sped_cfop.split("|")
+                if any(_cfop_zerado(p.strip(), cat_cfop) for p in cfop_parts):
+                    issues.append("CFOP zerado")
+                elif any(_cfop_diverges(p.strip(), cat_cfop) for p in cfop_parts):
+                    issues.append("CFOP")
+            if check_aliq and _aliq_diverges(sped_aliq, cat_aliq):
+                issues.append("Alíquota")
+            if check_ncm and _ncm_diverges(sped_ncm, cat_ncm):
+                issues.append("NCM")
             grp_status = _status(issues, True)
         else:
             grp_status = "Nao Cadastrado"
@@ -123,8 +178,8 @@ def build_confronto_data(
             "cst_pis_cad":   cat_pis,
             "cst_cofins_cad": cat_cof,
             "descricao_cad": str(cat.get("descricao") or "")      if cat else "",
-            "ncm_sped":      str(row.get("ncm") or "").strip(),
-            "ncm_cad":       str(cat.get("ncm") or "")             if cat else "",
+            "ncm_sped":      sped_ncm,
+            "ncm_cad":       cat_ncm,
             "fornecedor_cad":       str(cat.get("fornecedor_nome") or "")  if cat else "",
             "cnpj_fornecedor_cad":  str(cat.get("fornecedor_cnpj") or "")  if cat else "",
             "total_operacao": str(row.get("sale_value") or ""),
@@ -138,6 +193,7 @@ def build_confronto_data(
             d_cst  = str(detail.get("cst_icms") or "").strip()
             d_cfop = str(detail.get("cfop") or "").strip()
             d_aliq = str(detail.get("icms_rate") or "").strip()
+            d_ncm  = str(detail.get("ncm") or "").strip() or sped_ncm
 
             if d_cat:
                 dc_cst  = str(d_cat.get(cst_f) or "")
@@ -145,15 +201,22 @@ def build_confronto_data(
                 dc_aliq = str(d_cat.get(aliq_f) or "")
                 dc_pis  = str(d_cat.get(pis_f) or "")
                 dc_cof  = str(d_cat.get(cof_f) or "")
+                dc_ncm  = str(d_cat.get("ncm") or "")
                 d_issues: list[str] = []
-                if _cst_diverges(d_cst, dc_cst):
+                if check_cst and _cst_diverges(d_cst, dc_cst):
                     d_issues.append("CST")
-                if _cfop_diverges(d_cfop, dc_cfop):
-                    d_issues.append("CFOP")
-                # Aliquota exibida apenas para referencia, sem entrar na comparacao
+                if check_cfop:
+                    if _cfop_zerado(d_cfop, dc_cfop):
+                        d_issues.append("CFOP zerado")
+                    elif _cfop_diverges(d_cfop, dc_cfop):
+                        d_issues.append("CFOP")
+                if check_aliq and _aliq_diverges(d_aliq, dc_aliq):
+                    d_issues.append("Alíquota")
+                if check_ncm and _ncm_diverges(d_ncm, dc_ncm):
+                    d_issues.append("NCM")
                 d_status = _status(d_issues, True)
             else:
-                dc_cst = dc_cfop = dc_aliq = dc_pis = dc_cof = ""
+                dc_cst = dc_cfop = dc_aliq = dc_pis = dc_cof = dc_ncm = ""
                 d_status = "Nao Cadastrado"
 
             detail_rows.append({

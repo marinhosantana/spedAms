@@ -9,4 +9,4 @@ if (-not (Test-Path $pythonExe)) {
     $pythonExe = "python"
 }
 
-& $pythonExe .\Sped\main.py
+& $pythonExe .\Sped\NovoRevisorQt.py

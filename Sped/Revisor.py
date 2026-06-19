@@ -1,26 +1,31 @@
 from __future__ import annotations
 
-import ctypes
-from tkinter import Tk
+import faulthandler
+import sys
+from pathlib import Path
 
-from app.ui.app import SpedApp
+from PySide6.QtCore import Qt
+from PySide6.QtWidgets import QApplication
 
-
-def _enable_dpi_awareness() -> None:
-    try:
-        ctypes.windll.shcore.SetProcessDpiAwareness(1)
-    except Exception:
-        try:
-            ctypes.windll.user32.SetProcessDPIAware()
-        except Exception:
-            pass
+from app.ui_qt.app import QtSpedApp
 
 
 def main() -> None:
-    _enable_dpi_awareness()
-    root = Tk()
-    SpedApp(root)
-    root.mainloop()
+    crash_log = Path(__file__).resolve().parent / "qt_crash.log"
+    try:
+        crash_file = crash_log.open("a", encoding="utf-8")
+        faulthandler.enable(crash_file)
+    except Exception:
+        crash_file = None
+    app = QApplication.instance() or QApplication(sys.argv)
+    app.setHighDpiScaleFactorRoundingPolicy(Qt.HighDpiScaleFactorRoundingPolicy.PassThrough)
+    window = QtSpedApp()
+    window.showMaximized()
+    try:
+        sys.exit(app.exec())
+    finally:
+        if crash_file is not None:
+            crash_file.close()
 
 
 if __name__ == "__main__":

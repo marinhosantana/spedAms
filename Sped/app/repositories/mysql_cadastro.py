@@ -2439,3 +2439,34 @@ class MysqlCadastroRepository:
             return [dict(row) for row in cursor.fetchall()]
         finally:
             connection.close()
+
+    def get_cfop_map_by_empresa_id(self, empresa_id: int) -> dict[str, str]:
+        """
+        Retorna {codigo_empresa: cfop_entrada} para todos os produtos da empresa
+        que já tenham cfop_entrada preenchido (de qualquer fornecedor).
+        Usado na importação para herdar CFOP de outro fornecedor com mesmo código.
+        """
+        connection = self.get_connection()
+        try:
+            cursor = connection.cursor(dictionary=True)
+            cursor.execute(
+                """
+                SELECT p.codigo_empresa, p.cfop_entrada
+                FROM cad_produtos_fornecedor p
+                JOIN cad_fornecedores f ON f.id = p.fornecedor_id
+                WHERE f.empresa_id = %s
+                  AND p.codigo_empresa != ''
+                  AND p.cfop_entrada   != ''
+                ORDER BY p.codigo_empresa
+                """,
+                (empresa_id,),
+            )
+            result: dict[str, str] = {}
+            for row in cursor.fetchall():
+                code = str(row["codigo_empresa"] or "").strip()
+                cfop = str(row["cfop_entrada"] or "").strip()
+                if code and cfop and code not in result:
+                    result[code] = cfop
+            return result
+        finally:
+            connection.close()

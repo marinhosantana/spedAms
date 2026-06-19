@@ -7,11 +7,13 @@ from PySide6.QtGui import QBrush, QColor, QPalette
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QApplication,
+    QCheckBox,
     QComboBox,
     QDialog,
     QDialogButtonBox,
     QFileDialog,
     QFormLayout,
+    QGroupBox,
     QHBoxLayout,
     QHeaderView,
     QLabel,
@@ -74,10 +76,12 @@ DETAIL_FIELDS = [
 _BG_OK  = QColor("#c6efce")   # verde claro
 _BG_DIV = QColor("#ffc7ce")   # vermelho claro
 _BG_NAO = QColor("#ffeb9c")   # amarelo/laranja claro
+_BG_ZER = QColor("#ffe0b2")   # laranja suave — CFOP zerado no cadastro
 
 _FG_OK  = QColor("#276221")   # verde escuro
 _FG_DIV = QColor("#9c0006")   # vermelho escuro
 _FG_NAO = QColor("#7d4a00")   # laranja escuro
+_FG_ZER = QColor("#5d2e00")   # marrom escuro
 
 # Cores de fundo das linhas (alternadas, aplicadas manualmente)
 _ROW_EVEN = QColor("#f3f6f9")
@@ -139,15 +143,19 @@ class _ConfrontoWorker(QObject):
         rows: list[dict],
         catalog: list[dict],
         operation_type: str,
+        compare_fields: frozenset,
     ) -> None:
         super().__init__()
         self._rows = rows
         self._catalog = catalog
         self._operation_type = operation_type
+        self._compare_fields = compare_fields
 
     def run(self) -> None:
         try:
-            grouped, detail = build_confronto_data(self._rows, self._catalog, self._operation_type)
+            grouped, detail = build_confronto_data(
+                self._rows, self._catalog, self._operation_type, self._compare_fields
+            )
             self.finished.emit(grouped, detail)
         except Exception as exc:
             self.failed.emit(str(exc))
@@ -229,6 +237,26 @@ class ConfrontoDialog(QDialog):
         bar.addStretch()
         root.addLayout(bar)
 
+        # Painel de seleção: o que comparar
+        from app.services.confronto_sped_cadastro import COMPARE_FIELD_LABELS, DEFAULT_COMPARE_FIELDS
+        sel_box = QGroupBox("O que comparar:")
+        sel_box.setStyleSheet(
+            "QGroupBox { font-weight: bold; border: 1px solid #d6e0e8; border-radius: 4px; "
+            "margin-top: 6px; padding: 4px 8px; } "
+            "QGroupBox::title { subcontrol-origin: margin; left: 8px; padding: 0 4px; }"
+        )
+        sel_layout = QHBoxLayout(sel_box)
+        sel_layout.setContentsMargins(8, 4, 8, 4)
+        sel_layout.setSpacing(16)
+        self._compare_checks: dict[str, QCheckBox] = {}
+        for field_key, field_label in COMPARE_FIELD_LABELS.items():
+            chk = QCheckBox(field_label)
+            chk.setChecked(field_key in DEFAULT_COMPARE_FIELDS)
+            self._compare_checks[field_key] = chk
+            sel_layout.addWidget(chk)
+        sel_layout.addStretch()
+        root.addWidget(sel_box)
+
         # Métricas
         metrics_row = QHBoxLayout()
         self._metric_labels: dict[str, QLabel] = {}
@@ -261,10 +289,11 @@ class ConfrontoDialog(QDialog):
         filter_bar = QHBoxLayout()
         filter_bar.addWidget(QLabel("Filtrar:"))
         _filter_styles = {
-            "Todos":           "QPushButton:checked { background-color: #2563eb; color: white; font-weight: bold; }",
-            "Divergentes":     "QPushButton:checked { background-color: #ffc7ce; color: #9c0006; font-weight: bold; }",
-            "Nao Cadastrados": "QPushButton:checked { background-color: #ffeb9c; color: #7d4a00; font-weight: bold; }",
-            "OK":              "QPushButton:checked { background-color: #c6efce; color: #276221; font-weight: bold; }",
+            "Todos":              "QPushButton:checked { background-color: #2563eb; color: white; font-weight: bold; }",
+            "Divergentes":        "QPushButton:checked { background-color: #ffc7ce; color: #9c0006; font-weight: bold; }",
+            "CFOP zerado no cad.":"QPushButton:checked { background-color: #ffe0b2; color: #5d2e00; font-weight: bold; }",
+            "Nao Cadastrados":    "QPushButton:checked { background-color: #ffeb9c; color: #7d4a00; font-weight: bold; }",
+            "OK":                 "QPushButton:checked { background-color: #c6efce; color: #276221; font-weight: bold; }",
         }
         for mode, css in _filter_styles.items():
             btn = QPushButton(mode)
@@ -318,6 +347,8 @@ class ConfrontoDialog(QDialog):
             return _BG_OK, _FG_OK
         if "Cadastrado" in status:
             return _BG_NAO, _FG_NAO
+        if status == "Divergencia: CFOP zerado":
+            return _BG_ZER, _FG_ZER
         return _BG_DIV, _FG_DIV
 
     # ── Gerar confronto ───────────────────────────────────────────────────────
@@ -349,8 +380,15 @@ class ConfrontoDialog(QDialog):
 
         self._status_label.setText(f"Comparando {len(self._rows)} produto(s) contra {len(catalog)} produto(s) do cadastro...")
 
+        compare_fields = frozenset(k for k, chk in self._compare_checks.items() if chk.isChecked())
+        if not compare_fields:
+            QMessageBox.warning(self, "Confronto", "Selecione ao menos um campo para comparar.")
+            self._btn_gerar.setEnabled(True)
+            QApplication.restoreOverrideCursor()
+            return
+
         self._thread = QThread(self)
-        self._worker = _ConfrontoWorker(self._rows, catalog, self._operation_type)
+        self._worker = _ConfrontoWorker(self._rows, catalog, self._operation_type, compare_fields)
         self._worker.moveToThread(self._thread)
         self._thread.started.connect(self._worker.run)
         self._worker.finished.connect(self._on_done)
@@ -380,10 +418,12 @@ class ConfrontoDialog(QDialog):
         self._apply_filter()
         total_ok  = sum(1 for r in grouped if r.get("status") == "OK")
         total_div = sum(1 for r in grouped if "Divergencia" in str(r.get("status") or ""))
+        total_zer = sum(1 for r in grouped if "CFOP zerado" in str(r.get("status") or ""))
         total_nao = sum(1 for r in grouped if "Cadastrado" in str(r.get("status") or ""))
         self._status_label.setText(
             f"Confronto gerado: {len(grouped)} produtos — "
-            f"{total_ok} OK · {total_div} com divergencia · {total_nao} nao cadastrados"
+            f"{total_ok} OK · {total_div} com divergencia "
+            f"({total_zer} CFOP zerado no cad.) · {total_nao} nao cadastrados"
         )
 
     def _on_failed(self, msg: str) -> None:
@@ -404,7 +444,9 @@ class ConfrontoDialog(QDialog):
         if mode == "OK":
             return status == "OK"
         if mode == "Divergentes":
-            return "Divergencia" in status
+            return "Divergencia" in status and "CFOP zerado" not in status
+        if mode == "CFOP zerado no cad.":
+            return "CFOP zerado" in status
         if mode == "Nao Cadastrados":
             return "Cadastrado" in status
         return True  # Todos
@@ -423,10 +465,12 @@ class ConfrontoDialog(QDialog):
     def _update_filter_btns(self, grouped: list[dict]) -> None:
         total = len(grouped)
         div   = sum(1 for r in grouped if "Divergencia" in str(r.get("status") or ""))
+        zer   = sum(1 for r in grouped if "CFOP zerado" in str(r.get("status") or ""))
         nao   = sum(1 for r in grouped if "Cadastrado"  in str(r.get("status") or ""))
         ok    = sum(1 for r in grouped if r.get("status") == "OK")
         self._filter_btns["Todos"].setText(f"Todos ({total})")
         self._filter_btns["Divergentes"].setText(f"Divergentes ({div})")
+        self._filter_btns["CFOP zerado no cad."].setText(f"CFOP zerado no cad. ({zer})")
         self._filter_btns["Nao Cadastrados"].setText(f"Nao Cadastrados ({nao})")
         self._filter_btns["OK"].setText(f"OK ({ok})")
 
@@ -474,8 +518,9 @@ class ConfrontoDialog(QDialog):
         if not self._grouped_rows:
             QMessageBox.warning(self, "Regras", "Gere o confronto antes de criar regras.")
             return
+        compare_fields = frozenset(k for k, chk in self._compare_checks.items() if chk.isChecked())
         self._runtime_rules, self._log_entries = build_rules_from_confronto(
-            self._grouped_rows, self._operation_type
+            self._grouped_rows, self._operation_type, compare_fields
         )
         # Vincula índice da regra a cada entrada "REGRA GERADA" para edição via menu
         rule_idx = 0

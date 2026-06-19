@@ -14,6 +14,7 @@ LOG_FIELDS = [
 def build_rules_from_confronto(
     grouped_rows: list[dict],
     operation_type: str,
+    compare_fields: frozenset[str] | set[str] | None = None,
 ) -> tuple[list[dict], list[dict]]:
     """
     Gera runtime_rules e log a partir dos resultados do confronto.
@@ -26,6 +27,7 @@ def build_rules_from_confronto(
     """
     op = operation_type.strip().lower()
     is_entry = op == "entrada"
+    _fields = compare_fields if compare_fields is not None else frozenset({"cst", "cfop"})
 
     rules: list[dict] = []
     log_entries: list[dict] = []
@@ -90,10 +92,10 @@ def build_rules_from_confronto(
                 rule["document_tax_id"] = digits
 
         parts: list[str] = []
-        if cst_cad:
+        if "cst" in _fields and cst_cad:
             rule["new_cst"] = cst_cad
             parts.append(f"CST: {cst_sped} → {cst_cad}")
-        if cfop_cad:
+        if "cfop" in _fields and cfop_cad:
             rule["new_cfop"] = cfop_cad
             parts.append(f"CFOP: {cfop_sped} → {cfop_cad}")
 
