@@ -2,6 +2,24 @@
 .venv-prod/
 __pycache__/
 *.py[cod]
+*.log
+*.tmp
+*.bak
+
+# Dados fiscais, planilhas de trabalho e backups locais.
+# Nao versionar bases de cliente, SPEDs, XMLs, relatorios exportados ou dumps.
+*.xlsx
+*.xls
+*.xlsm
+*.csv
+*.sql
+*.zip
+*.rar
+*.7z
+*.txt
+
+test_*_temp.py
+Sped/app/ui_legacy/
 Sped/app/ui/logs/
 Sped/logs/
 Sped/build/

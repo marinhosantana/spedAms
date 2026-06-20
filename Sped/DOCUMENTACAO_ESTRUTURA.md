@@ -4,13 +4,15 @@ Este documento resume como o projeto esta organizado, onde fica cada responsabil
 
 ## Visao geral
 
-O sistema e uma aplicacao desktop em Tkinter para leitura, analise, conciliacao, comparacao, ajuste e exportacao de dados SPED/XML/planilhas.
+O sistema e uma aplicacao desktop em Python com interface Qt/PySide6 para leitura, analise, conciliacao, comparacao, ajuste e exportacao de dados SPED/XML/planilhas.
+
+A interface Tkinter antiga foi arquivada em `Sped/app/ui_legacy/`. Ela pode servir como referencia historica, mas manutencoes novas devem ser feitas na interface Qt e nas camadas de servico/parser/exportacao.
 
 Fluxo geral:
 
 1. `main.py` chama `Revisor.py`.
-2. `Revisor.py` cria a janela Tkinter e instancia `SpedApp`.
-3. `app/ui/app.py` monta a interface, recebe a acao do usuario e chama servicos.
+2. `Revisor.py` cria a aplicacao Qt e instancia `QtSpedApp`.
+3. `app/ui_qt/app.py` monta a interface, recebe a acao do usuario e chama servicos.
 4. `app/services/` executa as regras de negocio.
 5. `app/parsers/` le arquivos SPED, XML e Excel.
 6. `app/exporters/` grava Excel, CSV e Word.
@@ -22,33 +24,45 @@ Fluxo geral:
   - Ponto de entrada simples.
   - Importa `main` de `Revisor.py`.
 
+- `Sped/NovoRevisorQt.py`
+  - Ponto de entrada direto da interface Qt.
+  - Cria `QApplication`.
+  - Instancia `QtSpedApp`.
+  - Inicia `app.exec()`.
+
 - `Sped/Revisor.py`
-  - Cria `Tk()`.
-  - Instancia `SpedApp`.
-  - Inicia `root.mainloop()`.
+  - Ponto de entrada compativel com os builds.
+  - Cria ou reutiliza `QApplication`.
+  - Instancia `QtSpedApp`.
+  - Inicia `app.exec()`.
 
 ## UI
 
-- `Sped/app/ui/app.py`
+- `Sped/app/ui_qt/app.py`
   - Arquivo principal da interface.
-  - Contem a classe `SpedApp`.
+  - Contem a classe `QtSpedApp`.
   - Responsavel por telas, botoes, grids, menus, filtros, popups, mensagens e chamadas aos servicos.
   - Deve orquestrar fluxos, mas nao deve concentrar regra de negocio nova quando ela puder morar em `services/`.
 
-- `Sped/app/ui/progress_dialog.py`
-  - Contem `ProgressDialogHandle`.
-  - Centraliza atualizar, resetar e fechar progress dialogs.
-  - O `app.py` monta a janela em `open_progress_dialog()` e usa `progress_dialog()` como context manager.
-  - Fluxos que reutilizam progresso entre etapas devem passar `external_progress`.
+- `Sped/app/ui_qt/confronto_dialog.py`
+  - Dialogos e telas auxiliares do confronto SPED/cadastro.
 
-- `Sped/app/ui/app_config.json`
+- `Sped/app/ui_qt/import_planilha.py`
+  - Fluxos de importacao de planilhas na interface Qt.
+
+- `Sped/app/ui_legacy/`
+  - Interface Tkinter arquivada.
+  - Nao adicionar funcionalidade nova aqui sem decisao explicita.
+
+- Arquivos `app_config.*.json`
   - Configuracao visual/local da aplicacao, como titulos.
 
-- `Sped/app/ui/mysql_config.json`
+- Arquivos `mysql_config.*.json`
   - Configuracao local de conexao MySQL.
 
-- `Sped/app/ui/logs/`
-  - Pasta de logs/auditoria gerados em runtime.
+- Pastas `logs/` e `storage/`
+  - Guardam logs/auditoria e arquivos preservados em runtime.
+  - Ficam fora do Git.
 
 ## Configuracao e modelos
 
@@ -221,8 +235,8 @@ Pasta: `Sped/app/repositories/`
 - `Sped/explicacao_conciliacao_sped.md`
   - Documento explicativo existente sobre conciliacao SPED.
 
-- `Sped/.gitignore`
-  - Regras de ignorados do projeto.
+- `.gitignore` e `Sped/.gitignore`
+  - Regras de ignorados do projeto, incluindo ambientes virtuais, builds, logs, storage, planilhas, dumps SQL e arquivos fiscais locais.
 
 ## Fluxos principais e onde mexer
 
@@ -230,31 +244,11 @@ Pasta: `Sped/app/repositories/`
 
 Alterar:
 
-- `app/ui/app.py`
+- `app/ui_qt/app.py`
+- `app/ui_qt/confronto_dialog.py`
+- `app/ui_qt/import_planilha.py`
 
 Se a alteracao virar regra reaproveitavel, mover para `app/services/`.
-
-### Progress dialog
-
-Alterar:
-
-- Estrutura/comportamento do handle: `app/ui/progress_dialog.py`
-- Aparencia da janela: metodo `open_progress_dialog()` em `app/ui/app.py`
-- Uso em fluxo: `with self.progress_dialog(...) as progress:`
-
-Padrao atual:
-
-```python
-with self.progress_dialog("Titulo", "Mensagem inicial") as progress:
-    servico(..., progress_callback=progress.update)
-    progress.reset("Proxima etapa...")
-```
-
-Quando um fluxo chama outro e quer reaproveitar a mesma janela:
-
-```python
-self.outro_fluxo(external_progress=progress)
-```
 
 ### Leitura de SPED/XML/Excel
 
@@ -290,7 +284,7 @@ Alterar:
 
 - Queries e persistencia: `app/repositories/mysql_cadastro.py`
 - Config padrao: `app/config.py`
-- Config local: `app/ui/mysql_config.json`
+- Config local/runtime: arquivos `mysql_config.*.json`
 
 ### Historico e auditoria
 
@@ -302,8 +296,11 @@ Alterar:
 
 ## Convencao de responsabilidades
 
-- `ui/`
+- `ui_qt/`
   - Deve cuidar de tela, eventos, mensagens, selecao de arquivos e chamada dos servicos.
+
+- `ui_legacy/`
+  - Arquivo historico da interface Tkinter. Nao e a UI principal.
 
 - `services/`
   - Deve conter calculo, regra fiscal, conciliacao, importacao e montagem de linhas/datasets.
@@ -320,22 +317,10 @@ Alterar:
 - `models.py`
   - Deve conter dataclasses compartilhadas.
 
-## Estado atual do refactor de progresso
+## Cuidados de governanca
 
-O modelo de progress dialog ficou assim:
-
-- `ProgressDialogHandle` mora em `app/ui/progress_dialog.py`.
-- `SpedApp.open_progress_dialog()` cria os widgets Tkinter.
-- `SpedApp.progress_dialog()` abre ou reutiliza uma janela e fecha automaticamente quando for dona dela.
-- Fluxos usam `progress.update` como callback.
-- Fluxos encadeados usam `progress.reset(...)` antes de chamar a proxima etapa.
-
-Pontos ja convertidos:
-
-- Previa/importacao de produtos.
-- Consultas ICMS de entrada e saida.
-- Consultas PIS/COFINS de entrada e saida.
-- Atualizacao de telas apos regra dinamica.
-
-As barras fixas embutidas nas telas de XML e comparacao continuam em `app.py`, porque nao sao dialogs reaproveitaveis.
+- Nao versionar planilhas, XMLs, SPEDs, dumps SQL, backups ou exports de cliente.
+- Antes de commit, revisar `git status --short` e confirmar que so ha codigo/documentacao intencional.
+- Validar alteracoes com `python -m compileall -q Sped` e, quando aplicavel, testes manuais pela UI Qt em ambiente `dev`.
+- Usar `dev` para desenvolvimento e `prod` apenas para validacao/uso estavel.
 
