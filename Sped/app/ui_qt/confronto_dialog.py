@@ -335,9 +335,12 @@ class ConfrontoDialog(QDialog):
 
     def _load_companies(self) -> None:
         try:
-            self._companies = self._repository.list_companies(self._environment)
-            for c in self._companies:
-                self._company_combo.addItem(c["nome"], c["id"])
+            companies = self._repository.list_companies_for_confronto(self._environment)
+            for c in companies:
+                label = str(c["nome"] or "").strip() or str(c["cnpj"] or "")
+                self._company_combo.addItem(label, str(c["cnpj"] or ""))
+            if len(companies) == 1:
+                self._company_combo.setCurrentIndex(0)
         except Exception:
             pass
 
@@ -357,13 +360,10 @@ class ConfrontoDialog(QDialog):
         if not self._rows:
             QMessageBox.warning(self, "Confronto", "Nao ha dados de consulta para confrontar. Processe o SPED primeiro.")
             return
-        company_id = self._company_combo.currentData()
-        if company_id is None:
+        company_cnpj = str(self._company_combo.currentData() or "").strip()
+        if not company_cnpj:
             QMessageBox.warning(self, "Confronto", "Selecione uma empresa.")
             return
-
-        company = next((c for c in self._companies if c["id"] == company_id), None)
-        company_cnpj = str(company.get("cnpj") or "") if company else ""
 
         self._btn_gerar.setEnabled(False)
         self._status_label.setText("Carregando cadastro de produtos...")

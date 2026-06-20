@@ -110,22 +110,26 @@ def build_confronto_data(
     check_aliq = "aliquota" in compare_fields
     check_ncm  = "ncm"      in compare_fields
 
-    # Indexa cadastro por codigo_empresa, mesclando campos de todos os registros
-    # do mesmo código. Campos vazios num registro são preenchidos pelo próximo
-    # registro com valor — garante que se qualquer fornecedor tem CFOP/CST
-    # configurado, o confronto enxerga esse valor.
-    by_code: dict[str, dict] = {}
-    for prod in catalog_products:
-        code = str(prod.get("codigo_empresa") or "").strip()
-        if not code:
-            continue
-        if code not in by_code:
-            by_code[code] = dict(prod)
+    # Indexa catálogo por codigo_empresa e por ean (ambos com merge de campos).
+    # O código do SPED pode ser o codigo_empresa (código interno) ou o EAN
+    # do produto — a busca tenta codigo_empresa primeiro, depois EAN.
+    def _merge_into(index: dict[str, dict], key: str, prod: dict) -> None:
+        if not key:
+            return
+        if key not in index:
+            index[key] = dict(prod)
         else:
-            existing = by_code[code]
-            for key, val in prod.items():
-                if not str(existing.get(key) or "").strip() and str(val or "").strip():
-                    existing[key] = val
+            existing = index[key]
+            for k, v in prod.items():
+                if not str(existing.get(k) or "").strip() and str(v or "").strip():
+                    existing[k] = v
+
+    by_code: dict[str, dict] = {}   # codigo_empresa → produto mesclado
+    by_ean:  dict[str, dict] = {}   # ean (só dígitos) → produto mesclado
+    for prod in catalog_products:
+        _merge_into(by_code, str(prod.get("codigo_empresa") or "").strip(), prod)
+        ean_digits = "".join(c for c in str(prod.get("ean") or "") if c.isdigit())
+        _merge_into(by_ean, ean_digits, prod)
 
     grouped_rows: list[dict] = []
     detail_rows: list[dict] = []
@@ -137,7 +141,12 @@ def build_confronto_data(
         sped_aliq = str(row.get("display_icms_rate") or row.get("icms_rate") or "").strip()
         sped_ncm  = str(row.get("ncm") or "").strip()
 
+        # Tenta por codigo_empresa; se não achar, tenta pelo EAN (só dígitos)
         cat = by_code.get(code)
+        if cat is None:
+            code_digits = "".join(c for c in code if c.isdigit())
+            if code_digits:
+                cat = by_ean.get(code_digits)
         cat_cst   = str(cat.get(cst_f) or "")  if cat else ""
         cat_cfop  = str(cat.get(cfop_f) or "") if cat else ""
         cat_aliq  = str(cat.get(aliq_f) or "") if cat else ""
@@ -189,7 +198,12 @@ def build_confronto_data(
 
         for detail in row.get("launch_details", []):
             d_code = str(detail.get("code") or "").strip() or code
-            d_cat  = by_code.get(d_code, cat)
+            d_cat  = by_code.get(d_code)
+            if d_cat is None:
+                d_digits = "".join(c for c in d_code if c.isdigit())
+                d_cat = by_ean.get(d_digits) if d_digits else None
+            if d_cat is None:
+                d_cat = cat
             d_cst  = str(detail.get("cst_icms") or "").strip()
             d_cfop = str(detail.get("cfop") or "").strip()
             d_aliq = str(detail.get("icms_rate") or "").strip()

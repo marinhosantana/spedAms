@@ -362,6 +362,36 @@ class MysqlCadastroRepository:
         finally:
             connection.close()
 
+    def list_companies_for_confronto(self, environment: str) -> list[dict[str, str]]:
+        """
+        Retorna lista de empresas para o combo do confronto.
+        Tenta cad_empresas primeiro; se vazio, usa sped_perfis como fallback
+        para que o confronto funcione mesmo sem produtos importados.
+        Cada item: {"nome": str, "cnpj": str}.
+        """
+        rows = self.list_companies(environment)
+        if rows:
+            return [{"nome": str(r["nome"] or ""), "cnpj": str(r["cnpj"] or "")} for r in rows]
+
+        # Fallback: empresas presentes nos perfis SPED
+        connection = self.get_connection()
+        try:
+            cursor = connection.cursor(dictionary=True)
+            cursor.execute(
+                """
+                SELECT empresa_nome_sped AS nome, empresa_cnpj_sped AS cnpj
+                FROM sped_perfis
+                WHERE ambiente = %s
+                  AND empresa_cnpj_sped != ''
+                GROUP BY empresa_cnpj_sped
+                ORDER BY empresa_nome_sped
+                """,
+                (environment,),
+            )
+            return [{"nome": str(r["nome"] or ""), "cnpj": str(r["cnpj"] or "")} for r in cursor.fetchall()]
+        finally:
+            connection.close()
+
     def save_company(self, environment: str, data: dict[str, object]) -> int:
         company_id = int(data.get("id") or 0)
         values = (
