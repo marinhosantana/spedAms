@@ -730,6 +730,13 @@ class QtSpedApp(QMainWindow):
                 background: #203041;
                 color: #ffffff;
             }}
+            QScrollArea#navScroll {{
+                background: transparent;
+                border: 0;
+            }}
+            QScrollArea#navScroll QWidget {{
+                background: transparent;
+            }}
             QPushButton#sidebarToggle {{
                 background: #203041;
                 color: #ffffff;
@@ -746,6 +753,20 @@ class QtSpedApp(QMainWindow):
                 color: {COLORS["text"]};
                 font-size: {s(24)}px;
                 font-weight: 750;
+            }}
+            QLabel#envBadgeDev {{
+                background: #274766;
+                color: #ffffff;
+                border-radius: {s(6)}px;
+                padding: {s(7)}px {s(8)}px;
+                font-weight: 800;
+            }}
+            QLabel#envBadgeProd {{
+                background: #8f1d2c;
+                color: #ffffff;
+                border-radius: {s(6)}px;
+                padding: {s(7)}px {s(8)}px;
+                font-weight: 900;
             }}
             QLabel#muted {{
                 color: {COLORS["muted"]};
@@ -1006,8 +1027,9 @@ class QtSpedApp(QMainWindow):
         sidebar.setObjectName("sidebar")
         sidebar.setFixedWidth(self._s(230))
         self.sidebar = sidebar
-        self.sidebar_expanded_width = self._s(230)
-        self.sidebar_collapsed_width = self._s(48)
+        self.sidebar_expanded_width = self._s(260)
+        self.sidebar_collapsed_width = self._s(76)
+        self.sidebar_collapsed = False
         nav_layout = QVBoxLayout(sidebar)
         nav_layout.setContentsMargins(self._s(6), self._s(10), self._s(6), self._s(10))
         nav_layout.setSpacing(self._s(4))
@@ -1023,16 +1045,26 @@ class QtSpedApp(QMainWindow):
         sidebar_content_layout.setSpacing(self._s(4))
         brand = QLabel(self.app_home_title)
         brand.setObjectName("brand")
+        brand.setWordWrap(True)
+        self.sidebar_brand_label = brand
         sidebar_content_layout.addWidget(brand)
-        sidebar_content_layout.addSpacing(self._s(12))
+        env_badge = QLabel()
+        env_badge.setAlignment(Qt.AlignCenter)
+        env_badge.setObjectName("envBadgeDev" if self.environment == "dev" else "envBadgeProd")
+        env_badge.setToolTip(f"Ambiente atual: {self.environment}")
+        self.sidebar_env_label = env_badge
+        sidebar_content_layout.addWidget(env_badge)
+        sidebar_content_layout.addSpacing(self._s(10))
 
         self.nav_buttons: list[QPushButton] = []
         self.nav_page_indices: list[int] = []
+        self.nav_button_entries: list[tuple[QPushButton, str, int, str]] = []
         self.nav_group_buttons: dict[str, QPushButton] = {}
         self.nav_group_containers: dict[str, QWidget] = {}
+        self.nav_page_groups: dict[int, str] = {}
         nav_groups = (
             (
-                "Consultas",
+                "Operacao Fiscal",
                 (
                     ("Dashboard", 0),
                     ("ICMS/IPI Entradas", 1),
@@ -1042,28 +1074,28 @@ class QtSpedApp(QMainWindow):
                     ("XML", 5),
                     ("SPED x XML", 6),
                     ("Analise Entrada e Saida", 17),
+                    ("Extrair chave NF-e", 16),
                 ),
             ),
             (
-                "Cadastros",
+                "Cadastros e Regras",
                 (
                     ("Empresas", 9),
                     ("Fornecedores", 10),
                     ("Classificacao do Produto", 11),
                     ("Produtos", 12),
                     ("NCM", 18),
+                    ("Importacao XML Cadastros", 13),
                     ("Limpeza Duplicados", 15),
+                    ("Regras Dinamicas", 7),
                 ),
             ),
             (
-                "Sistema",
+                "Arquivo e Administracao",
                 (
-                    ("Regras Dinamicas", 7),
                     ("SPEDs Arquivados", 8),
-                    ("Importacao XML Cadastros", 13),
                     ("Usuarios E Permissoes", 19),
                     ("Configuracoes", 14),
-                    ("Extrair chave NFe", 16),
                 ),
             ),
         )
@@ -1071,13 +1103,14 @@ class QtSpedApp(QMainWindow):
             group_button = QPushButton(f"> {group_title}")
             group_button.setObjectName("navGroup")
             group_button.setCheckable(True)
-            group_button.setChecked(group_title == "Consultas")
+            group_button.setToolTip(group_title)
+            group_button.setChecked(group_title == "Operacao Fiscal")
             group_button.clicked.connect(lambda checked=False, current=group_title: self.toggle_nav_group(current))
             sidebar_content_layout.addWidget(group_button)
             self.nav_group_buttons[group_title] = group_button
 
             group_container = QWidget()
-            group_container.setVisible(group_title == "Consultas")
+            group_container.setVisible(group_title == "Operacao Fiscal")
             group_layout = QVBoxLayout(group_container)
             group_layout.setContentsMargins(self._s(8), 0, 0, 0)
             group_layout.setSpacing(self._s(4))
@@ -1085,17 +1118,29 @@ class QtSpedApp(QMainWindow):
                 button = QPushButton(title)
                 button.setObjectName("navButton")
                 button.setCheckable(True)
+                button.setToolTip(title)
                 button.clicked.connect(lambda _checked=False, current=index, label=title: self.show_page(current, label))
                 group_layout.addWidget(button)
                 self.nav_buttons.append(button)
                 self.nav_page_indices.append(index)
+                self.nav_button_entries.append((button, title, index, group_title))
+                self.nav_page_groups[index] = group_title
             sidebar_content_layout.addWidget(group_container)
             self.nav_group_containers[group_title] = group_container
         sidebar_content_layout.addStretch()
-        nav_layout.addWidget(self.sidebar_content, 1)
+        sidebar_scroll = QScrollArea()
+        sidebar_scroll.setObjectName("navScroll")
+        sidebar_scroll.setWidgetResizable(True)
+        sidebar_scroll.setFrameShape(QFrame.NoFrame)
+        sidebar_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        sidebar_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        sidebar_scroll.setWidget(self.sidebar_content)
+        nav_layout.addWidget(sidebar_scroll, 1)
+        self.sidebar_scroll = sidebar_scroll
         shell.addWidget(sidebar)
         for group_title, container in self.nav_group_containers.items():
             self.set_nav_group_visible(group_title, container.isVisible())
+        self.update_sidebar_mode_labels()
 
         content = QWidget()
         content_layout = QVBoxLayout(content)
@@ -1150,7 +1195,9 @@ class QtSpedApp(QMainWindow):
             self.page_title.setText(title)
             for button_index, button in enumerate(self.nav_buttons):
                 button.setChecked(self.nav_page_indices[button_index] == index)
-            self.set_sidebar_collapsed(True)
+            active_group = self.nav_page_groups.get(index)
+            if active_group:
+                self.set_nav_group_visible(active_group, True)
             if title == "SPEDs Arquivados":
                 self.refresh_archives()
             if title in {"Empresas", "Fornecedores", "Classificacao do Produto"}:
@@ -1159,7 +1206,7 @@ class QtSpedApp(QMainWindow):
                 QTimer.singleShot(100, self.start_refresh_product_page_fast)
             if title == "Limpeza Duplicados":
                 self.refresh_duplicates_cleanup_page()
-            if title == "Consulta Saidas":
+            if title == "ICMS/IPI Saidas":
                 self.sync_sale_page_with_entry_cache()
             if title != "Produtos":
                 self.statusBar().showMessage(f"{title} carregada.")
@@ -1182,12 +1229,14 @@ class QtSpedApp(QMainWindow):
             self.refresh_sale_table()
 
     def toggle_sidebar(self) -> None:
-        self.set_sidebar_collapsed(self.sidebar_content.isVisible())
+        self.set_sidebar_collapsed(not self.sidebar_collapsed)
 
     def set_sidebar_collapsed(self, collapsed: bool) -> None:
-        self.sidebar_content.setVisible(not collapsed)
+        self.sidebar_collapsed = collapsed
         self.sidebar.setFixedWidth(self.sidebar_collapsed_width if collapsed else self.sidebar_expanded_width)
         self.sidebar_toggle_button.setText(">" if collapsed else "<")
+        self.sidebar_toggle_button.setToolTip("Expandir menu" if collapsed else "Recolher menu")
+        self.update_sidebar_mode_labels()
 
     def toggle_nav_group(self, group_title: str) -> None:
         container = self.nav_group_containers.get(group_title)
@@ -1202,7 +1251,29 @@ class QtSpedApp(QMainWindow):
             return
         container.setVisible(visible)
         button.setChecked(visible)
-        button.setText(f"v {group_title}" if visible else f"> {group_title}")
+        prefix = "v" if visible else ">"
+        label = self.compact_nav_label(group_title) if getattr(self, "sidebar_collapsed", False) else group_title
+        button.setText(f"{prefix} {label}")
+
+    def compact_nav_label(self, title: str) -> str:
+        words = [word for word in title.replace("/", " ").replace("-", " ").split() if word.lower() not in {"e", "de", "do", "da"}]
+        if not words:
+            return title[:3].upper()
+        if len(words) == 1:
+            return words[0][:3].upper()
+        return "".join(word[0].upper() for word in words)[:4]
+
+    def update_sidebar_mode_labels(self) -> None:
+        collapsed = getattr(self, "sidebar_collapsed", False)
+        if hasattr(self, "sidebar_brand_label"):
+            self.sidebar_brand_label.setVisible(not collapsed)
+        if hasattr(self, "sidebar_env_label"):
+            self.sidebar_env_label.setText(self.environment.upper() if collapsed else f"AMBIENTE {self.environment.upper()}")
+        for group_title, container in getattr(self, "nav_group_containers", {}).items():
+            self.set_nav_group_visible(group_title, container.isVisible())
+        for button, title, _index, _group_title in getattr(self, "nav_button_entries", []):
+            button.setText(self.compact_nav_label(title) if collapsed else title)
+            button.setToolTip(title)
 
     def build_dashboard_page(self) -> QWidget:
         page = QWidget()
