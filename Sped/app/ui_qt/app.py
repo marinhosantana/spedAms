@@ -638,10 +638,14 @@ class QtSpedApp(QMainWindow):
         self.current_user: dict[str, object] | None = None
         self.login_cancelled = False
         self.ensure_default_admin_user()
+        self.show_page(0, "Dashboard")
+
+    def authenticate_on_startup(self) -> bool:
         if self.show_login_dialog():
             self.show_page(0, "Dashboard")
-        else:
-            self.login_cancelled = True
+            return True
+        self.login_cancelled = True
+        return False
 
     def get_app_default_config(self) -> dict[str, str]:
         return dict(APP_DEFAULT_CONFIG)
@@ -2317,7 +2321,7 @@ class QtSpedApp(QMainWindow):
 
     def show_login_dialog(self) -> bool:
         while True:
-            dialog = LoginDialog(self.app_home_title, self.environment, None)
+            dialog = LoginDialog(self.app_home_title, self.environment, self)
             dialog.setStyleSheet(self.styleSheet())
             if dialog.exec() != QDialog.Accepted:
                 return False

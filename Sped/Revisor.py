@@ -21,6 +21,9 @@ def main() -> None:
     app.setHighDpiScaleFactorRoundingPolicy(Qt.HighDpiScaleFactorRoundingPolicy.PassThrough)
     window = QtSpedApp()
     window.showMaximized()
+    app.processEvents()
+    if not window.authenticate_on_startup():
+        sys.exit(0)
     try:
         sys.exit(app.exec())
     finally:
