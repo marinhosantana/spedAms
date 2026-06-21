@@ -107,6 +107,99 @@ COLORS = {
 
 CATALOG_IMPORT_POPUP_ROW_LIMIT = 2000
 
+USER_PERMISSION_GROUPS: tuple[tuple[str, tuple[tuple[str, str], ...]], ...] = (
+    (
+        "Consultas",
+        (
+            ("dashboard", "Dashboard"),
+            ("icms_ipi_entradas", "Icms/Ipi Entradas"),
+            ("icms_ipi_saidas", "Icms/Ipi Saidas"),
+            ("pis_cofins_entradas", "Pis/Cofins Entradas"),
+            ("pis_cofins_saidas", "Pis/Cofins Saidas"),
+            ("xml", "Xml"),
+            ("sped_xml", "Sped X Xml"),
+            ("analise_entrada_saida", "Analise Entrada E Saida"),
+        ),
+    ),
+    (
+        "Cadastros",
+        (
+            ("empresas", "Empresas"),
+            ("fornecedores", "Fornecedores"),
+            ("classificacao_produto", "Classificacao Do Produto"),
+            ("produtos", "Produtos"),
+            ("ncm", "Ncm"),
+            ("limpeza_duplicados", "Limpeza Duplicados"),
+        ),
+    ),
+    (
+        "Sistema",
+        (
+            ("regras_dinamicas", "Regras Dinamicas"),
+            ("speds_arquivados", "Speds Arquivados"),
+            ("importacao_xml_cadastros", "Importacao Xml Cadastros"),
+            ("usuarios_permissoes", "Usuarios E Permissoes"),
+            ("configuracoes", "Configuracoes"),
+            ("extrair_chave_nfe", "Extrair Chave Nfe"),
+        ),
+    ),
+)
+
+
+class LoginDialog(QDialog):
+    def __init__(self, app_title: str, environment: str, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Acesso Ao Sistema")
+        self.setModal(True)
+        self.resize(420, 240)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(18, 18, 18, 18)
+        layout.setSpacing(10)
+
+        title = QLabel(app_title)
+        title.setObjectName("sectionTitle")
+        layout.addWidget(title)
+
+        env_label = QLabel(f"Ambiente: {environment}")
+        env_label.setObjectName("muted")
+        layout.addWidget(env_label)
+
+        self.login_input = QLineEdit()
+        self.login_input.setPlaceholderText("Login")
+        self.password_input = QLineEdit()
+        self.password_input.setPlaceholderText("Senha")
+        self.password_input.setEchoMode(QLineEdit.Password)
+        self.message_label = QLabel("")
+        self.message_label.setObjectName("muted")
+
+        form = QGridLayout()
+        form.setHorizontalSpacing(8)
+        form.setVerticalSpacing(8)
+        form.addWidget(QLabel("Usuario"), 0, 0)
+        form.addWidget(self.login_input, 0, 1)
+        form.addWidget(QLabel("Senha"), 1, 0)
+        form.addWidget(self.password_input, 1, 1)
+        layout.addLayout(form)
+        layout.addWidget(self.message_label)
+
+        actions = QHBoxLayout()
+        actions.addStretch()
+        cancel_button = QPushButton("Cancelar")
+        cancel_button.clicked.connect(self.reject)
+        enter_button = QPushButton("Entrar")
+        enter_button.setObjectName("primaryButton")
+        enter_button.clicked.connect(self.accept)
+        actions.addWidget(cancel_button)
+        actions.addWidget(enter_button)
+        layout.addLayout(actions)
+
+        self.login_input.setText("admin")
+        self.password_input.setFocus()
+
+    def credentials(self) -> tuple[str, str]:
+        return self.login_input.text().strip(), self.password_input.text()
+
 
 class CompareWorker(QObject):
     finished = Signal(list, list, list, dict, str, str, str)
@@ -542,7 +635,13 @@ class QtSpedApp(QMainWindow):
         self.resize(*self.initial_window_size(1360, 820))
         self.apply_styles()
         self.build_shell()
-        self.show_page(0, "Dashboard")
+        self.current_user: dict[str, object] | None = None
+        self.login_cancelled = False
+        self.ensure_default_admin_user()
+        if self.show_login_dialog():
+            self.show_page(0, "Dashboard")
+        else:
+            self.login_cancelled = True
 
     def get_app_default_config(self) -> dict[str, str]:
         return dict(APP_DEFAULT_CONFIG)
@@ -953,6 +1052,7 @@ class QtSpedApp(QMainWindow):
                     ("Regras Dinamicas", 7),
                     ("SPEDs Arquivados", 8),
                     ("Importacao XML Cadastros", 13),
+                    ("Usuarios E Permissoes", 19),
                     ("Configuracoes", 14),
                     ("Extrair chave NFe", 16),
                 ),
@@ -1021,6 +1121,7 @@ class QtSpedApp(QMainWindow):
             self.build_nfe_key_extract_page(),
             self.build_entry_exit_page(),
             self.build_catalog_ncm_page(),
+            self.build_user_permissions_page(),
         )
         for page in pages:
             self.stack.addWidget(self.make_scrollable_page(page))
@@ -1708,13 +1809,13 @@ class QtSpedApp(QMainWindow):
         form_layout.addLayout(form)
         form_layout.addStretch()
         self.product_page_tabs.addTab(form_tab, "Cadastro / Edicao")
-        self.product_page_tabs.addTab(self._build_sped_catalog_check_tab(), "Conferencia SPED x Cadastro")
+        self.product_page_tabs.addTab(self._build_sped_catalog_check_tab(), "Conferência SPED x Cadastro")
         page.layout().addWidget(self.product_page_tabs, 1)
         self.product_page_table.selectionModel().selectionChanged.connect(lambda _selected, _deselected: self.handle_product_page_select())
         return page
 
     # ------------------------------------------------------------------
-    # Conferencia SPED x Cadastro
+    # Conferência SPED x Cadastro
     # ------------------------------------------------------------------
     def _build_sped_catalog_check_tab(self) -> QWidget:
         tab = QWidget()
@@ -1722,7 +1823,7 @@ class QtSpedApp(QMainWindow):
         layout.setContentsMargins(10, 10, 10, 10)
         layout.setSpacing(8)
 
-        title = QLabel("Conferencia: Produtos do SPED 0200 x Cadastro de Produtos")
+        title = QLabel("Conferência: Produtos C170 do SPED x Cadastro de Produtos")
         title.setObjectName("sectionTitle")
         layout.addWidget(title)
 
@@ -1744,7 +1845,7 @@ class QtSpedApp(QMainWindow):
         metrics_row = QHBoxLayout()
         self.sped_check_metric_labels: dict[str, QLabel] = {}
         for key, label in (
-            ("total", "Total 0200"),
+            ("total", "Produtos C170"),
             ("found", "Cadastrados"),
             ("missing", "Nao Cadastrados"),
             ("via_xml", "Via XML"),
@@ -1799,23 +1900,23 @@ class QtSpedApp(QMainWindow):
 
         file_path_str = self.sped_check_file_input.text().strip()
         if not file_path_str:
-            QMessageBox.warning(self, "Conferencia SPED x Cadastro", "Selecione um arquivo SPED antes de gerar o relatorio.")
+            QMessageBox.warning(self, "Conferência SPED x Cadastro", "Selecione um arquivo SPED antes de gerar o relatório.")
             return
         sped_path = Path(file_path_str)
         if not sped_path.exists():
-            QMessageBox.warning(self, "Conferencia SPED x Cadastro", "Arquivo SPED nao encontrado no caminho informado.")
+            QMessageBox.warning(self, "Conferência SPED x Cadastro", "Arquivo SPED não encontrado no caminho informado.")
             return
         try:
             QApplication.setOverrideCursor(Qt.WaitCursor)
-            company_cnpj, company_name, periodo_ini, periodo_fim, sped_products, entry_suppliers = read_sped_0200_products(sped_path)
+            company_cnpj, company_name, periodo_ini, periodo_fim, sped_products, entry_suppliers, c170_codes = read_sped_0200_products(sped_path)
             if not company_cnpj:
                 QApplication.restoreOverrideCursor()
-                QMessageBox.warning(self, "Conferencia SPED x Cadastro", "Nao foi possivel identificar o CNPJ da empresa no arquivo SPED (registro 0000 nao encontrado).")
+                QMessageBox.warning(self, "Conferência SPED x Cadastro", "Não foi possível identificar o CNPJ da empresa no arquivo SPED (registro 0000 não encontrado).")
                 return
             catalog_rows = self.mysql_repo.get_catalog_products_by_company_cnpj(self.environment, company_cnpj)
         except Exception as exc:
             QApplication.restoreOverrideCursor()
-            QMessageBox.critical(self, "Conferencia SPED x Cadastro", f"Erro ao processar:\n{exc}")
+            QMessageBox.critical(self, "Conferência SPED x Cadastro", f"Erro ao processar:\n{exc}")
             return
         finally:
             QApplication.restoreOverrideCursor()
@@ -1832,6 +1933,8 @@ class QtSpedApp(QMainWindow):
         for sped_prod in sped_products:
             sped_code = str(sped_prod.get("codigo") or "").strip()
             if sped_code in seen_sped_codes:
+                continue
+            if c170_codes and sped_code not in c170_codes:
                 continue
             seen_sped_codes.add(sped_code)
             matches = catalog_by_code.get(sped_code, [])
@@ -1893,12 +1996,12 @@ class QtSpedApp(QMainWindow):
         if periodo_ini and periodo_fim:
             try:
                 def fmt(d: str) -> str:
-                    return f"{d[4:6]}/{d[2:4]}/{d[:2]}" if len(d) == 8 else d
+                    return f"{d[:2]}/{d[2:4]}/{d[4:]}" if len(d) == 8 else d
                 periodo = f"{fmt(periodo_ini)} a {fmt(periodo_fim)}"
             except Exception:
                 periodo = f"{periodo_ini} - {periodo_fim}"
         self.sped_check_info_label.setText(
-            f"Empresa: {company_name}  |  CNPJ: {company_cnpj}  |  Periodo: {periodo}  |  {total} produtos no 0200"
+            f"Empresa: {company_name}  |  CNPJ: {company_cnpj}  |  Periodo: {periodo}  |  {total} produtos com C170"
         )
 
     def export_sped_catalog_check(self) -> None:
@@ -1923,9 +2026,9 @@ class QtSpedApp(QMainWindow):
                 if output_path.suffix.lower() != ".xlsx":
                     output_path = output_path.with_suffix(".xlsx")
                 write_simple_excel_workbook(output_path, [("Conferencia", headers, rows, {"include_total": False})])
-            self.handle_export_success("Conferencia SPED x Cadastro", output_path, "Relatorio exportado")
+            self.handle_export_success("Conferência SPED x Cadastro", output_path, "Relatório exportado")
         except Exception as exc:
-            self.handle_export_failure("Conferencia SPED x Cadastro", "conferencia", exc)
+            self.handle_export_failure("Conferência SPED x Cadastro", "conferencia", exc)
 
     def create_single_catalog_page(self, title: str) -> QWidget:
         page = QWidget()
@@ -2073,6 +2176,240 @@ class QtSpedApp(QMainWindow):
         layout.addLayout(form)
         grid.addWidget(panel, row, column)
         return table
+
+    def build_user_permissions_page(self) -> QWidget:
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(12)
+
+        list_panel = self.create_panel()
+        list_layout = QVBoxLayout(list_panel)
+        list_layout.setContentsMargins(16, 16, 16, 16)
+        list_layout.setSpacing(8)
+        title = QLabel("Usuarios E Permissoes")
+        title.setObjectName("sectionTitle")
+        list_layout.addWidget(title)
+
+        toolbar = QHBoxLayout()
+        toolbar.addWidget(self.create_button("Atualizar", self.refresh_system_users, primary=True))
+        toolbar.addWidget(self.create_button("Novo Usuario", self.clear_system_user_form))
+        toolbar.addStretch()
+        list_layout.addLayout(toolbar)
+
+        self.system_user_table = self.create_data_table(["ID", "Nome", "Login", "Ativo", "Permissoes", "Observacao"])
+        self.system_user_table.selectionModel().selectionChanged.connect(lambda _selected, _deselected: self.handle_system_user_select())
+        list_layout.addWidget(self.system_user_table, 1)
+        layout.addWidget(list_panel, 1)
+
+        form_panel = self.create_panel()
+        form_layout = QVBoxLayout(form_panel)
+        form_layout.setContentsMargins(16, 16, 16, 16)
+        form_layout.setSpacing(10)
+        form_title = QLabel("Cadastro Do Usuario")
+        form_title.setObjectName("sectionTitle")
+        form_layout.addWidget(form_title)
+
+        self.system_user_id = 0
+        self.system_user_name_input = QLineEdit()
+        self.system_user_login_input = QLineEdit()
+        self.system_user_password_input = QLineEdit()
+        self.system_user_password_input.setEchoMode(QLineEdit.Password)
+        self.system_user_password_input.setPlaceholderText("Preencha para criar ou alterar a senha")
+        self.system_user_active_check = QCheckBox("Usuario Ativo")
+        self.system_user_active_check.setChecked(True)
+        self.system_user_note_input = QTextEdit()
+        self.system_user_note_input.setFixedHeight(70)
+
+        form = QGridLayout()
+        form.setHorizontalSpacing(10)
+        form.setVerticalSpacing(8)
+        form.addWidget(QLabel("Nome"), 0, 0)
+        form.addWidget(self.system_user_name_input, 0, 1)
+        form.addWidget(QLabel("Login"), 0, 2)
+        form.addWidget(self.system_user_login_input, 0, 3)
+        form.addWidget(QLabel("Senha"), 1, 0)
+        form.addWidget(self.system_user_password_input, 1, 1, 1, 3)
+        form.addWidget(QLabel("Situacao"), 2, 0)
+        form.addWidget(self.system_user_active_check, 2, 1)
+        form.addWidget(QLabel("Observacao"), 3, 0)
+        form.addWidget(self.system_user_note_input, 3, 1, 1, 3)
+        form.setColumnStretch(1, 1)
+        form.setColumnStretch(3, 1)
+        form_layout.addLayout(form)
+
+        permissions_layout = QGridLayout()
+        permissions_layout.setHorizontalSpacing(10)
+        permissions_layout.setVerticalSpacing(10)
+        self.system_user_permission_checks: dict[str, QCheckBox] = {}
+        for group_index, (group_name, permissions) in enumerate(USER_PERMISSION_GROUPS):
+            group_box = QGroupBox(group_name)
+            group_inner = QVBoxLayout(group_box)
+            group_inner.setContentsMargins(10, 10, 10, 10)
+            group_inner.setSpacing(5)
+            for permission_key, permission_label in permissions:
+                check = QCheckBox(permission_label)
+                self.system_user_permission_checks[permission_key] = check
+                group_inner.addWidget(check)
+            group_inner.addStretch()
+            permissions_layout.addWidget(group_box, group_index // 3, group_index % 3)
+        form_layout.addLayout(permissions_layout)
+
+        actions = QHBoxLayout()
+        actions.addStretch()
+        actions.addWidget(self.create_button("Salvar Usuario", self.save_system_user, primary=True))
+        actions.addWidget(self.create_button("Novo", self.clear_system_user_form))
+        actions.addWidget(self.create_button("Excluir", self.delete_system_user))
+        form_layout.addLayout(actions)
+        layout.addWidget(form_panel)
+
+        QTimer.singleShot(0, self.refresh_system_users)
+        return page
+
+    def refresh_system_users(self) -> None:
+        try:
+            self.mysql_repo.ensure_schema()
+            rows = self.mysql_repo.list_system_users(self.environment)
+            table_rows = []
+            for row in rows:
+                table_rows.append([
+                    row.get("id", ""),
+                    row.get("nome", ""),
+                    row.get("login", ""),
+                    "Sim" if int(row.get("ativo") or 0) else "Nao",
+                    row.get("permissoes", "") or "",
+                    row.get("observacao", "") or "",
+                ])
+            self.set_table_rows(self.system_user_table, table_rows)
+            self.statusBar().showMessage(f"{len(table_rows)} usuario(s) carregado(s).")
+        except Exception as exc:
+            QMessageBox.critical(self, "Usuarios E Permissoes", str(exc))
+
+    def ensure_default_admin_user(self) -> None:
+        try:
+            self.mysql_repo.ensure_schema()
+            users = self.mysql_repo.list_system_users(self.environment)
+            for user in users:
+                if str(user.get("login") or "").strip().lower() == "admin":
+                    return
+            permissions = {
+                permission_key
+                for _group_name, group_permissions in USER_PERMISSION_GROUPS
+                for permission_key, _permission_label in group_permissions
+            }
+            self.mysql_repo.save_system_user(
+                self.environment,
+                None,
+                {
+                    "nome": "Administrador Padrao",
+                    "login": "admin",
+                    "senha": "admin",
+                    "ativo": True,
+                    "observacao": "Usuario administrador criado automaticamente para primeiro acesso.",
+                },
+                permissions,
+            )
+            if hasattr(self, "system_user_table"):
+                self.refresh_system_users()
+            self.statusBar().showMessage("Usuario admin criado para primeiro acesso.")
+        except Exception as exc:
+            self.statusBar().showMessage(f"Nao foi possivel criar usuario admin: {exc}")
+
+    def show_login_dialog(self) -> bool:
+        while True:
+            dialog = LoginDialog(self.app_home_title, self.environment, None)
+            dialog.setStyleSheet(self.styleSheet())
+            if dialog.exec() != QDialog.Accepted:
+                return False
+            login, password = dialog.credentials()
+            try:
+                user = self.mysql_repo.authenticate_system_user(self.environment, login, password)
+            except Exception as exc:
+                QMessageBox.critical(self, "Acesso Ao Sistema", str(exc))
+                continue
+            if user is None:
+                QMessageBox.warning(self, "Acesso Ao Sistema", "Usuario ou senha invalidos.")
+                continue
+            self.current_user = user
+            user_name = str(user.get("nome") or user.get("login") or "").strip()
+            self.statusBar().showMessage(f"Usuario autenticado: {user_name}.")
+            return True
+
+    def selected_system_user_id(self) -> int:
+        selected = self.system_user_table.selectionModel().selectedRows()
+        if not selected:
+            return 0
+        item = self.system_user_table.item(selected[0].row(), 0)
+        return int(item.text()) if item and item.text().isdigit() else 0
+
+    def handle_system_user_select(self) -> None:
+        selected = self.system_user_table.selectionModel().selectedRows()
+        if not selected:
+            return
+        row_index = selected[0].row()
+        self.system_user_id = self.selected_system_user_id()
+        self.system_user_name_input.setText(self.system_user_table.item(row_index, 1).text() if self.system_user_table.item(row_index, 1) else "")
+        self.system_user_login_input.setText(self.system_user_table.item(row_index, 2).text() if self.system_user_table.item(row_index, 2) else "")
+        active_text = self.system_user_table.item(row_index, 3).text() if self.system_user_table.item(row_index, 3) else ""
+        self.system_user_active_check.setChecked(active_text.lower() == "sim")
+        self.system_user_password_input.clear()
+        self.system_user_note_input.setPlainText(self.system_user_table.item(row_index, 5).text() if self.system_user_table.item(row_index, 5) else "")
+        permissions = self.mysql_repo.get_system_user_permissions(self.system_user_id)
+        for permission_key, check in self.system_user_permission_checks.items():
+            check.setChecked(permission_key in permissions)
+
+    def clear_system_user_form(self) -> None:
+        self.system_user_id = 0
+        self.system_user_name_input.clear()
+        self.system_user_login_input.clear()
+        self.system_user_password_input.clear()
+        self.system_user_active_check.setChecked(True)
+        self.system_user_note_input.clear()
+        for check in self.system_user_permission_checks.values():
+            check.setChecked(False)
+        self.system_user_table.clearSelection()
+
+    def save_system_user(self) -> None:
+        permissions = {
+            permission_key
+            for permission_key, check in self.system_user_permission_checks.items()
+            if check.isChecked()
+        }
+        data = {
+            "nome": self.system_user_name_input.text(),
+            "login": self.system_user_login_input.text(),
+            "senha": self.system_user_password_input.text(),
+            "ativo": self.system_user_active_check.isChecked(),
+            "observacao": self.system_user_note_input.toPlainText(),
+        }
+        try:
+            self.mysql_repo.ensure_schema()
+            self.system_user_id = self.mysql_repo.save_system_user(
+                self.environment,
+                self.system_user_id or None,
+                data,
+                permissions,
+            )
+            self.system_user_password_input.clear()
+            self.refresh_system_users()
+            QMessageBox.information(self, "Usuarios E Permissoes", "Usuario salvo com sucesso.")
+        except Exception as exc:
+            QMessageBox.critical(self, "Usuarios E Permissoes", str(exc))
+
+    def delete_system_user(self) -> None:
+        user_id = self.selected_system_user_id() or self.system_user_id
+        if not user_id:
+            QMessageBox.information(self, "Usuarios E Permissoes", "Selecione um usuario para excluir.")
+            return
+        if QMessageBox.question(self, "Usuarios E Permissoes", "Excluir este usuario?") != QMessageBox.Yes:
+            return
+        try:
+            self.mysql_repo.delete_system_user(self.environment, user_id)
+            self.clear_system_user_form()
+            self.refresh_system_users()
+            QMessageBox.information(self, "Usuarios E Permissoes", "Usuario excluido com sucesso.")
+        except Exception as exc:
+            QMessageBox.critical(self, "Usuarios E Permissoes", str(exc))
 
     def build_settings_page(self) -> QWidget:
         page = QWidget()

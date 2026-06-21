@@ -59,6 +59,8 @@ def main() -> None:
     app = QApplication(sys.argv)
     app.setHighDpiScaleFactorRoundingPolicy(Qt.HighDpiScaleFactorRoundingPolicy.PassThrough)
     window = QtSpedApp()
+    if getattr(window, "login_cancelled", False):
+        sys.exit(0)
     window.showMaximized()
     try:
         sys.exit(app.exec())

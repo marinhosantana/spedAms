@@ -333,17 +333,18 @@ def read_sped_file(
 
 def read_sped_0200_products(
     file_path: Path,
-) -> tuple[str, str, str, str, list[dict], dict[str, list[dict]]]:
+) -> tuple[str, str, str, str, list[dict], dict[str, list[dict]], set[str]]:
     """
     Le um arquivo SPED EFD fiscal em uma unica passagem e extrai:
     - CNPJ e nome da empresa (registro 0000)
     - Periodo inicio e fim (registro 0000)
     - Lista de produtos do registro 0200
     - Mapa produto->fornecedores de entrada (via 0150/C100/C170)
+    - Conjunto de codigos de produto que aparecem em C170 (entradas ou saidas)
 
-    Retorna: (cnpj, nome, periodo_inicio, periodo_fim, produtos, entry_suppliers_by_product)
+    Retorna: (cnpj, nome, periodo_inicio, periodo_fim, produtos, entry_suppliers_by_product, c170_codes)
       entry_suppliers_by_product: {cod_produto: [{"nome": ..., "cnpj": ...}, ...]}
-      Cada lista contem os fornecedores distintos que deram entrada nesse produto.
+      c170_codes: codigos que tiveram lancamentos C170 no periodo
     """
     company_cnpj = ""
     company_name = ""
@@ -353,6 +354,7 @@ def read_sped_0200_products(
     participants: dict[str, dict] = {}
     entry_suppliers_by_product: dict[str, list[dict]] = {}
     seen_supplier_per_product: dict[str, set[str]] = {}
+    c170_codes: set[str] = set()
 
     current_is_entry = False
     current_participant_code = ""
@@ -397,18 +399,20 @@ def read_sped_0200_products(
                 current_participant_code = get_field(fields, 4)
                 continue
 
-            if register == "C170" and current_is_entry:
+            if register == "C170":
                 prod_code = get_field(fields, 3)
                 if not prod_code:
                     continue
-                participant = participants.get(current_participant_code, {})
-                sup_cnpj = participant.get("cnpj", "")
-                sup_nome = participant.get("nome", current_participant_code)
-                seen_key = f"{sup_cnpj}|{sup_nome}"
-                if seen_key not in seen_supplier_per_product.setdefault(prod_code, set()):
-                    seen_supplier_per_product[prod_code].add(seen_key)
-                    entry_suppliers_by_product.setdefault(prod_code, []).append(
-                        {"nome": sup_nome, "cnpj": sup_cnpj}
-                    )
+                c170_codes.add(prod_code)
+                if current_is_entry:
+                    participant = participants.get(current_participant_code, {})
+                    sup_cnpj = participant.get("cnpj", "")
+                    sup_nome = participant.get("nome", current_participant_code)
+                    seen_key = f"{sup_cnpj}|{sup_nome}"
+                    if seen_key not in seen_supplier_per_product.setdefault(prod_code, set()):
+                        seen_supplier_per_product[prod_code].add(seen_key)
+                        entry_suppliers_by_product.setdefault(prod_code, []).append(
+                            {"nome": sup_nome, "cnpj": sup_cnpj}
+                        )
 
-    return company_cnpj, company_name, periodo_inicio, periodo_fim, products, entry_suppliers_by_product
+    return company_cnpj, company_name, periodo_inicio, periodo_fim, products, entry_suppliers_by_product, c170_codes

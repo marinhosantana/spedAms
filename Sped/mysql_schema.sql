@@ -177,6 +177,31 @@ CREATE TABLE IF NOT EXISTS cad_tipos_produto (
     KEY idx_cad_tipos_produto_ambiente_nome (ambiente, nome)
 );
 
+CREATE TABLE IF NOT EXISTS sistema_usuarios (
+    id INT NOT NULL AUTO_INCREMENT PRIMARY KEY,
+    ambiente VARCHAR(10) NOT NULL DEFAULT 'dev',
+    nome VARCHAR(255) NOT NULL,
+    login VARCHAR(120) NOT NULL,
+    senha_hash CHAR(64) NOT NULL DEFAULT '',
+    senha_salt CHAR(32) NOT NULL DEFAULT '',
+    ativo TINYINT(1) NOT NULL DEFAULT 1,
+    observacao TEXT NULL,
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    UNIQUE KEY uq_sistema_usuarios_ambiente_login (ambiente, login),
+    KEY idx_sistema_usuarios_nome (nome),
+    KEY idx_sistema_usuarios_ativo (ativo)
+);
+
+CREATE TABLE IF NOT EXISTS sistema_usuario_permissoes (
+    usuario_id INT NOT NULL,
+    permissao VARCHAR(80) NOT NULL,
+    permitido TINYINT(1) NOT NULL DEFAULT 1,
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (usuario_id, permissao),
+    CONSTRAINT fk_sistema_usuario_permissoes_usuario FOREIGN KEY (usuario_id) REFERENCES sistema_usuarios (id) ON DELETE CASCADE
+);
+
 CREATE TABLE IF NOT EXISTS ncm (
     id BIGINT NOT NULL AUTO_INCREMENT PRIMARY KEY,
     ambiente VARCHAR(10) NOT NULL DEFAULT 'dev',
