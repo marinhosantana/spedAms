@@ -651,7 +651,12 @@ class QtSpedApp(QMainWindow):
         return dict(APP_DEFAULT_CONFIG)
 
     def get_mysql_default_config(self) -> dict[str, str]:
-        return dict(MYSQL_DEFAULT_CONFIG)
+        config = dict(MYSQL_DEFAULT_CONFIG)
+        if self.environment == "dev":
+            config["database"] = "sped_icms_dev"
+        elif self.environment == "prod":
+            config["database"] = "sped_icms"
+        return config
 
     def _compute_scale(self) -> float:
         screen = QApplication.primaryScreen()
