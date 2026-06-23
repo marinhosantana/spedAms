@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 
 from PySide6.QtCore import Qt, QThread, Signal, QObject
@@ -56,7 +57,7 @@ GROUPED_FIELDS = [
 ]
 
 DETAIL_HEADERS = [
-    "Status", "Periodo", "Num. Doc.", "Data", "Fornecedor/Cliente",
+    "Status", "Periodo", "Num. Doc.", "Chave NFe", "Data", "Fornecedor/Cliente",
     "Cod. Produto", "Descricao",
     "CST ICMS (SPED)", "CST ICMS (Cad.)",
     "CFOP (SPED)", "CFOP (Cad.)",
@@ -64,7 +65,7 @@ DETAIL_HEADERS = [
     "Valor Operacao", "Base ICMS", "Valor ICMS",
 ]
 DETAIL_FIELDS = [
-    "status", "periodo", "document_number", "document_date", "participant",
+    "status", "periodo", "document_number", "document_key", "document_date", "participant",
     "code", "description",
     "cst_sped", "cst_cad",
     "cfop_sped", "cfop_cad",
@@ -936,6 +937,43 @@ class ConfrontoDialog(QDialog):
                 EXCEL_STYLE_ROW_OK, EXCEL_STYLE_ROW_DIV, EXCEL_STYLE_ROW_NAO,
             )
 
+            from app.exporters.excel_base import EXCEL_STYLE_CURRENCY
+
+            MONEY_FIELDS = {"total_operacao", "sale_value", "base_icms", "icms_value"}
+
+            def _decimal_value(value: object) -> Decimal | str:
+                if isinstance(value, Decimal):
+                    return value.quantize(Decimal("0.01"))
+                text = str(value or "").strip()
+                if not text:
+                    return ""
+                normalized = text.replace("R$", "").replace(" ", "")
+                if "," in normalized and "." in normalized:
+                    normalized = normalized.replace(".", "").replace(",", ".")
+                else:
+                    normalized = normalized.replace(",", ".")
+                try:
+                    return Decimal(normalized).quantize(Decimal("0.01"))
+                except InvalidOperation:
+                    return text
+
+            def _export_value(row: dict, field: str) -> object:
+                value = row.get(field)
+                if field in MONEY_FIELDS:
+                    return _decimal_value(value)
+                return str(value or "")
+
+            def _document_keys_for_row(row: dict) -> list[str]:
+                keys = row.get("document_keys") or []
+                if isinstance(keys, (str, bytes)):
+                    keys = [keys]
+                result: list[str] = []
+                for key in keys:
+                    text = str(key or "").strip()
+                    if text and text not in result:
+                        result.append(text)
+                return result
+
             def _row_styles(rows: list[dict], fields: list[str]) -> list[list[int]]:
                 result = []
                 ncols = len(fields)
@@ -947,7 +985,11 @@ class ConfrontoDialog(QDialog):
                         s, r = EXCEL_STYLE_STATUS_NAO, EXCEL_STYLE_ROW_NAO
                     else:
                         s, r = EXCEL_STYLE_STATUS_DIV, EXCEL_STYLE_ROW_DIV
-                    result.append([s] + [r] * (ncols - 1))
+                    styles = [s] + [r] * (ncols - 1)
+                    for index, field in enumerate(fields):
+                        if field in MONEY_FIELDS:
+                            styles[index] = EXCEL_STYLE_CURRENCY
+                    result.append(styles)
                 return result
 
             _LOG_STYLE_MAP = {
@@ -962,17 +1004,27 @@ class ConfrontoDialog(QDialog):
                     result.append([s] + [r] * (len(LOG_FIELDS) - 1))
                 return result
 
-            grp_data = [[str(r.get(f) or "") for f in GROUPED_FIELDS] for r in self._grouped_rows]
-            det_data = [[str(r.get(f) or "") for f in DETAIL_FIELDS]  for r in self._detail_rows]
+            max_group_keys = max((len(_document_keys_for_row(r)) for r in self._grouped_rows), default=0)
+            grouped_key_headers = [f"Chave NFe {index}" for index in range(1, max_group_keys + 1)]
+            grouped_export_headers = GROUPED_HEADERS + grouped_key_headers
+            grouped_export_fields = GROUPED_FIELDS + [f"_document_key_{index}" for index in range(1, max_group_keys + 1)]
+
+            grp_data = []
+            for row in self._grouped_rows:
+                values = [_export_value(row, field) for field in GROUPED_FIELDS]
+                keys = _document_keys_for_row(row)
+                values.extend(keys + [""] * max(0, max_group_keys - len(keys)))
+                grp_data.append(values)
+            det_data = [[_export_value(r, f) for f in DETAIL_FIELDS] for r in self._detail_rows]
             log_data = [[str(e.get(f) or "") for f in LOG_FIELDS]     for e in self._log_entries]
             write_simple_excel_workbook(
                 Path(path),
                 [
                     (
                         f"Agrupado {self._operation_type}",
-                        GROUPED_HEADERS,
+                        grouped_export_headers,
                         grp_data,
-                        {"row_style_ids": _row_styles(self._grouped_rows, GROUPED_FIELDS), "include_total": False},
+                        {"row_style_ids": _row_styles(self._grouped_rows, grouped_export_fields), "include_total": False},
                     ),
                     (
                         f"Detalhado {self._operation_type}",

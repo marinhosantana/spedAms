@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from decimal import Decimal, InvalidOperation
 
+from app.parsers.sped_parser import normalize_document_key
+
 
 def _norm_cst(v: object) -> str:
     s = str(v or "").strip()
@@ -62,6 +64,12 @@ def _status(issues: list[str], cat_found: bool) -> str:
     if not cat_found:
         return "Nao Cadastrado"
     return "OK" if not issues else "Divergencia: " + ", ".join(dict.fromkeys(issues))
+
+
+def _append_unique_document_key(keys: list[str], value: object) -> None:
+    key = normalize_document_key(str(value or "")) or str(value or "").strip()
+    if key and key not in keys:
+        keys.append(key)
 
 
 # Campos disponíveis para seleção pelo usuário
@@ -172,7 +180,8 @@ def build_confronto_data(
         else:
             grp_status = "Nao Cadastrado"
 
-        grouped_rows.append({
+        group_document_keys: list[str] = []
+        grouped_row = {
             "status":        grp_status,
             "periodo":       str(row.get("period") or ""),
             "code":          code,
@@ -194,7 +203,8 @@ def build_confronto_data(
             "total_operacao": str(row.get("sale_value") or ""),
             "base_icms":     str(row.get("base_icms") or ""),
             "icms_value":    str(row.get("icms_value") or ""),
-        })
+            "document_keys":  group_document_keys,
+        }
 
         for detail in row.get("launch_details", []):
             d_code = str(detail.get("code") or "").strip() or code
@@ -233,10 +243,15 @@ def build_confronto_data(
                 dc_cst = dc_cfop = dc_aliq = dc_pis = dc_cof = dc_ncm = ""
                 d_status = "Nao Cadastrado"
 
+            detail_document_key = normalize_document_key(str(detail.get("document_key") or "")) or str(detail.get("document_key") or "").strip()
+            if d_status != "OK":
+                _append_unique_document_key(group_document_keys, detail_document_key or detail.get("document_number"))
+
             detail_rows.append({
                 "status":          d_status,
                 "periodo":         str(row.get("period") or ""),
                 "document_number": str(detail.get("document_number") or ""),
+                "document_key":    detail_document_key,
                 "document_date":   str(detail.get("document_date") or ""),
                 "participant":     str(detail.get("participant_name") or "").strip(),
                 "code":            d_code,
@@ -253,5 +268,14 @@ def build_confronto_data(
                 "base_icms":       str(detail.get("base_icms") or ""),
                 "icms_value":      str(detail.get("icms_value") or ""),
             })
+
+        if grp_status != "OK" and not group_document_keys:
+            source_keys = row.get("document_keys") or []
+            if isinstance(source_keys, (str, bytes)):
+                source_keys = [source_keys]
+            for key in source_keys:
+                _append_unique_document_key(group_document_keys, key)
+
+        grouped_rows.append(grouped_row)
 
     return grouped_rows, detail_rows

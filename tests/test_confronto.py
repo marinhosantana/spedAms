@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import tempfile
+from decimal import Decimal
 from pathlib import Path
 
 from app.exporters.excel_base import (
@@ -122,7 +123,23 @@ def test_build_confronto_data_includes_supplier_tax_id() -> None:
             "sale_value": "100",
             "base_icms": "100",
             "icms_value": "18",
-            "launch_details": [],
+            "document_keys": {"35190512345678000199550010000000011000000010"},
+            "launch_details": [
+                {
+                    "document_number": "1",
+                    "document_key": "35190512345678000199550010000000011000000010",
+                    "document_date": "01052026",
+                    "participant_name": "FORNEC TESTE",
+                    "code": "PROD001",
+                    "description": "BISCOITO",
+                    "cst_icms": "060",
+                    "cfop": "1401",
+                    "icms_rate": "18",
+                    "sale_value": Decimal("100.00"),
+                    "base_icms": Decimal("100.00"),
+                    "icms_value": Decimal("18.00"),
+                }
+            ],
         },
         {
             "code": "PROD003",
@@ -144,6 +161,8 @@ def test_build_confronto_data_includes_supplier_tax_id() -> None:
 
     assert grouped_rows[0]["status"].startswith("Divergencia")
     assert grouped_rows[0]["cnpj_fornecedor_cad"] == "12345678000199"
+    assert grouped_rows[0]["document_keys"] == ["35190512345678000199550010000000011000000010"]
+    assert _detail_rows[0]["document_key"] == "35190512345678000199550010000000011000000010"
     assert grouped_rows[1]["status"] == "Nao Cadastrado"
 
 
