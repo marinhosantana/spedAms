@@ -186,9 +186,13 @@ class LoginDialog(QDialog):
         actions = QHBoxLayout()
         actions.addStretch()
         cancel_button = QPushButton("Cancelar")
+        cancel_button.setAutoDefault(False)
+        cancel_button.setDefault(False)
         cancel_button.clicked.connect(self.reject)
         enter_button = QPushButton("Entrar")
         enter_button.setObjectName("primaryButton")
+        enter_button.setAutoDefault(True)
+        enter_button.setDefault(True)
         enter_button.clicked.connect(self.accept)
         actions.addWidget(cancel_button)
         actions.addWidget(enter_button)
@@ -196,6 +200,7 @@ class LoginDialog(QDialog):
 
         self.login_input.setText("admin")
         self.password_input.setFocus()
+        self.password_input.returnPressed.connect(self.accept)
 
     def credentials(self) -> tuple[str, str]:
         return self.login_input.text().strip(), self.password_input.text()
@@ -643,6 +648,9 @@ class QtSpedApp(QMainWindow):
     def authenticate_on_startup(self) -> bool:
         if self.show_login_dialog():
             self.show_page(0, "Dashboard")
+            self.showMaximized()
+            self.raise_()
+            self.activateWindow()
             return True
         self.login_cancelled = True
         return False
