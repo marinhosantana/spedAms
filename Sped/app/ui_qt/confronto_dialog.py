@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 
 from PySide6.QtCore import Qt, QThread, Signal, QObject
@@ -20,6 +21,7 @@ from PySide6.QtWidgets import (
     QLineEdit,
     QMenu,
     QMessageBox,
+    QProgressBar,
     QPushButton,
     QStyle,
     QStyledItemDelegate,
@@ -56,7 +58,7 @@ GROUPED_FIELDS = [
 ]
 
 DETAIL_HEADERS = [
-    "Status", "Periodo", "Num. Doc.", "Data", "Fornecedor/Cliente",
+    "Status", "Periodo", "Num. Doc.", "Chave NFe", "Data", "Fornecedor/Cliente",
     "Cod. Produto", "Descricao",
     "CST ICMS (SPED)", "CST ICMS (Cad.)",
     "CFOP (SPED)", "CFOP (Cad.)",
@@ -64,7 +66,7 @@ DETAIL_HEADERS = [
     "Valor Operacao", "Base ICMS", "Valor ICMS",
 ]
 DETAIL_FIELDS = [
-    "status", "periodo", "document_number", "document_date", "participant",
+    "status", "periodo", "document_number", "document_key", "document_date", "participant",
     "code", "description",
     "cst_sped", "cst_cad",
     "cfop_sped", "cfop_cad",
@@ -132,6 +134,314 @@ class _BrushDelegate(QStyledItemDelegate):
         return hint
 
 
+# ── Worker: cadastrar produtos não cadastrados ────────────────────────────────
+
+class _CadastrarWorker(QObject):
+    progress = Signal(int, int, str)
+    finished = Signal(dict)
+    failed = Signal(str)
+
+    def __init__(
+        self,
+        nao_cad: list[dict],
+        operation_type: str,
+        company_cnpj: str,
+        company_name: str,
+        fallback_supplier_id: int | None,
+        repository: MysqlCadastroRepository,
+        environment: str,
+    ) -> None:
+        super().__init__()
+        self._nao_cad = nao_cad
+        self._operation_type = operation_type
+        self._company_cnpj = company_cnpj
+        self._company_name = company_name
+        self._fallback_supplier_id = fallback_supplier_id
+        self._repo = repository
+        self._env = environment
+
+    def run(self) -> None:
+        try:
+            stats = {"cadastrados": 0, "ignorados": 0, "erros": []}
+            total = len(self._nao_cad)
+
+            # Resolve empresa_id
+            empresa_id = self._repo.find_company_id(self._env, self._company_name, self._company_cnpj)
+            if empresa_id is None:
+                self.failed.emit(f"Empresa não encontrada: {self._company_name} / {self._company_cnpj}")
+                return
+
+            for idx, grp in enumerate(self._nao_cad):
+                self.progress.emit(idx, total, f"Cadastrando {idx + 1}/{total}...")
+                code        = str(grp.get("code") or "").strip()
+                descricao   = str(grp.get("descricao_sped") or "").strip()
+                ncm         = str(grp.get("ncm_sped") or "").strip()
+                cst_sped    = str(grp.get("cst_sped") or "").strip().split("|")[0].strip()
+                cfop_sped   = str(grp.get("cfop_sped") or "").strip().split("|")[0].strip()
+                aliq_sped   = str(grp.get("aliq_sped") or "").strip()
+                forn_sped   = str(grp.get("fornecedor") or "").strip()
+
+                if not code:
+                    stats["ignorados"] += 1
+                    continue
+
+                # Alíquota: SPED tem percentual (18.00), DB armazena fração (0.18)
+                try:
+                    aliq_frac = str(round(Decimal(aliq_sped.replace(",", ".")) / 100, 4)) if aliq_sped else "0"
+                except InvalidOperation:
+                    aliq_frac = "0"
+
+                # Tenta encontrar fornecedor pelo nome do SPED
+                forn_nomes = [p.strip() for p in forn_sped.split("|") if p.strip()]
+                supplier_id: int | None = None
+                for forn_nome in forn_nomes:
+                    supplier_id = self._repo.find_supplier_id(empresa_id, forn_nome, "")
+                    if supplier_id:
+                        break
+                if not supplier_id and forn_nomes:
+                    # Cria o fornecedor automaticamente com o primeiro nome do SPED
+                    supplier_id = self._repo.ensure_supplier(empresa_id, forn_nomes[0])
+                    stats.setdefault("fornecedores_criados", 0)
+                    stats["fornecedores_criados"] += 1
+                if not supplier_id:
+                    supplier_id = self._fallback_supplier_id
+                if not supplier_id:
+                    stats["ignorados"] += 1
+                    stats["erros"].append({"code": code, "erro": "Sem nome de fornecedor no SPED e sem fallback"})
+                    continue
+
+                data: dict = {
+                    "codigo_fornecedor": code,
+                    "codigo_empresa":    code,
+                    "ean":               code,
+                    "descricao":         descricao,
+                    "ncm":               ncm,
+                    "status_produto":    "ATIVO",
+                }
+                if self._operation_type == "Entrada":
+                    data["cst_icms"]     = cst_sped
+                    data["cfop_entrada"] = cfop_sped
+                    data["aliquota_icms"] = aliq_frac
+                else:
+                    data["cst_icms_saida"]      = cst_sped
+                    data["cfop_saida_empresa"]   = cfop_sped
+                    data["aliquota_icms_saida"]  = aliq_frac
+
+                try:
+                    self._repo.save_supplier_product(supplier_id, data)
+                    stats["cadastrados"] += 1
+                except ValueError as exc:
+                    if "Ja existe produto com o mesmo Codigo do Fornecedor" in str(exc):
+                        # Produto já existe com codigo_fornecedor mas sem codigo_empresa —
+                        # atualiza apenas o codigo_empresa para ficar visível no confronto.
+                        existing = self._repo.fetch_supplier_product_by_fornecedor_code(
+                            supplier_id, code
+                        )
+                        if existing and not str(existing.get("codigo_empresa") or "").strip():
+                            data["id"] = existing["id"]
+                            try:
+                                self._repo.save_supplier_product(supplier_id, data)
+                                stats["cadastrados"] += 1
+                            except Exception as exc2:
+                                stats["erros"].append({"code": code, "erro": str(exc2)})
+                        else:
+                            ja_tem = str(existing.get("codigo_empresa") or "") if existing else "?"
+                            stats["erros"].append({
+                                "code": code,
+                                "erro": f"Ja cadastrado (codigo_empresa='{ja_tem}'). Edite manualmente se necessario.",
+                            })
+                    else:
+                        stats["erros"].append({"code": code, "erro": str(exc)})
+                except Exception as exc:
+                    stats["erros"].append({"code": code, "erro": str(exc)})
+
+            self.progress.emit(total, total, "Concluído.")
+            self.finished.emit(stats)
+        except Exception as exc:
+            self.failed.emit(str(exc))
+
+
+# ── Dialog: selecionar produtos e fornecedor fallback ────────────────────────
+
+class _CadastrarNaoCadastradosDialog(QDialog):
+    def __init__(
+        self,
+        nao_cad: list[dict],
+        operation_type: str,
+        company_cnpj: str,
+        company_name: str,
+        repository: MysqlCadastroRepository,
+        environment: str,
+        parent: QWidget | None = None,
+    ) -> None:
+        super().__init__(parent)
+        self._nao_cad = nao_cad
+        self._operation_type = operation_type
+        self._company_cnpj = company_cnpj
+        self._company_name = company_name
+        self._repository = repository
+        self._environment = environment
+        self._thread: QThread | None = None
+        self._worker: _CadastrarWorker | None = None
+
+        self.setWindowTitle("Cadastrar Produtos Não Cadastrados")
+        self.setMinimumSize(900, 580)
+        if parent:
+            self.setStyleSheet(parent.styleSheet())
+        self.resize(1050, 640)
+
+        root = QVBoxLayout(self)
+        root.setContentsMargins(16, 16, 16, 16)
+        root.setSpacing(12)
+
+        info = QLabel(
+            f"<b>{len(nao_cad)}</b> produto(s) sem cadastro encontrado(s) no confronto.<br>"
+            "Serão cadastrados com <b>codigo_empresa = codigo_fornecedor = EAN = código do SPED</b>.<br>"
+            "O fornecedor é resolvido pelo nome do SPED: se existir, usa; se não existir, <b>cria automaticamente</b>.<br>"
+            "O fornecedor de fallback abaixo é usado apenas quando o produto não tem nome de fornecedor no SPED."
+        )
+        info.setWordWrap(True)
+        root.addWidget(info)
+
+        # Fornecedor fallback
+        forn_box = QGroupBox("Fornecedor Fallback (Quando Não Encontrado pelo Nome do SPED)")
+        fb = QHBoxLayout(forn_box)
+        fb.addWidget(QLabel("Fornecedor:"))
+        self._forn_combo = QComboBox()
+        self._forn_combo.setMinimumWidth(300)
+        self._forn_combo.addItem("(Nenhum — ignorar se não achar)", None)
+        self._load_suppliers()
+        fb.addWidget(self._forn_combo, 1)
+        root.addWidget(forn_box)
+
+        # Tabela de produtos
+        table_box = QGroupBox("Produtos a Cadastrar")
+        tb = QVBoxLayout(table_box)
+        self._table = QTableWidget()
+        self._table.setColumnCount(7)
+        self._table.setHorizontalHeaderLabels([
+            "Código SPED", "Descrição SPED", "NCM", "CST ICMS", "CFOP", "Alíq. ICMS", "Fornecedor (SPED)",
+        ])
+        self._table.horizontalHeader().setSectionResizeMode(1, QHeaderView.Stretch)
+        self._table.horizontalHeader().setSectionResizeMode(6, QHeaderView.Stretch)
+        self._table.setAlternatingRowColors(True)
+        self._table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self._table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self._table.verticalHeader().setVisible(False)
+        for grp in nao_cad:
+            r = self._table.rowCount()
+            self._table.insertRow(r)
+            cfop_sped = str(grp.get("cfop_sped") or "").strip().split("|")[0].strip()
+            for c, v in enumerate([
+                grp.get("code", ""),
+                grp.get("descricao_sped", ""),
+                grp.get("ncm_sped", ""),
+                str(grp.get("cst_sped", "")).split("|")[0].strip(),
+                cfop_sped,
+                grp.get("aliq_sped", ""),
+                grp.get("fornecedor", ""),
+            ]):
+                self._table.setItem(r, c, QTableWidgetItem(str(v or "")))
+        tb.addWidget(self._table)
+        root.addWidget(table_box, 1)
+
+        # Progresso
+        self._progress = QProgressBar()
+        self._progress.setRange(0, 100)
+        self._progress.setValue(0)
+        self._progress.hide()
+        root.addWidget(self._progress)
+
+        self._status_lbl = QLabel("")
+        self._status_lbl.setWordWrap(True)
+        root.addWidget(self._status_lbl)
+
+        # Botões
+        btn_row = QHBoxLayout()
+        btn_row.addStretch()
+        self._btn_cadastrar = QPushButton("Cadastrar Todos")
+        self._btn_cadastrar.setObjectName("primaryButton")
+        self._btn_cadastrar.clicked.connect(self._start)
+        btn_row.addWidget(self._btn_cadastrar)
+        self._btn_fechar = QPushButton("Fechar")
+        self._btn_fechar.clicked.connect(self.reject)
+        btn_row.addWidget(self._btn_fechar)
+        root.addLayout(btn_row)
+
+    def _load_suppliers(self) -> None:
+        try:
+            empresa_id = self._repository.find_company_id(
+                self._environment, self._company_name, self._company_cnpj
+            )
+            if empresa_id is None:
+                return
+            suppliers = self._repository.list_suppliers(empresa_id)
+            for s in suppliers:
+                label = str(s.get("nome") or "")
+                cnpj  = str(s.get("cnpj") or "")
+                if cnpj:
+                    label += f" ({cnpj})"
+                self._forn_combo.addItem(label, int(s["id"]))
+        except Exception:
+            pass
+
+    def _start(self) -> None:
+        self._btn_cadastrar.setEnabled(False)
+        self._progress.show()
+        self._progress.setValue(0)
+        self._status_lbl.setText("Iniciando...")
+
+        fallback_id: int | None = self._forn_combo.currentData()
+
+        self._thread = QThread(self)
+        self._worker = _CadastrarWorker(
+            self._nao_cad,
+            self._operation_type,
+            self._company_cnpj,
+            self._company_name,
+            fallback_id,
+            self._repository,
+            self._environment,
+        )
+        self._worker.moveToThread(self._thread)
+        self._thread.started.connect(self._worker.run)
+        self._worker.progress.connect(self._on_progress)
+        self._worker.finished.connect(self._on_finished)
+        self._worker.failed.connect(self._on_failed)
+        self._thread.start()
+
+    def _on_progress(self, current: int, total: int, msg: str) -> None:
+        if total > 0:
+            self._progress.setValue(int(current / total * 100))
+        self._status_lbl.setText(msg)
+
+    def _on_finished(self, stats: dict) -> None:
+        if self._thread:
+            self._thread.quit()
+        self._progress.setValue(100)
+        erros = stats.get("erros", [])
+        txt = (
+            f"Produtos cadastrados: <b>{stats['cadastrados']}</b> | "
+            f"Fornecedores criados: <b>{stats.get('fornecedores_criados', 0)}</b> | "
+            f"Ignorados: <b>{stats['ignorados']}</b> | "
+            f"Erros: <b>{len(erros)}</b>"
+        )
+        if erros:
+            detalhe = "\n".join(f"  [{e['code']}] {e['erro']}" for e in erros[:20])
+            txt += f"<br><pre>{detalhe}</pre>"
+        self._status_lbl.setText(txt)
+        self._btn_fechar.setText("Fechar e Regerar")
+        self._btn_fechar.clicked.disconnect()
+        self._btn_fechar.clicked.connect(lambda: self.accept())
+
+    def _on_failed(self, msg: str) -> None:
+        if self._thread:
+            self._thread.quit()
+        self._progress.setValue(0)
+        self._status_lbl.setText(f"<b style='color:red'>Erro:</b> {msg}")
+        self._btn_cadastrar.setEnabled(True)
+
+
 # ── Worker assíncrono ─────────────────────────────────────────────────────────
 
 class _ConfrontoWorker(QObject):
@@ -187,6 +497,10 @@ class ConfrontoDialog(QDialog):
         self._runtime_rules: list[dict] = []
         self._log_entries: list[dict] = []
         self.accepted_rules: list[dict] = []  # lido pelo pai após exec()
+        self._catalog_by_code: dict[str, dict] = {}
+        self._catalog_by_ean: dict[str, dict] = {}
+        self._catalog_company_name: str = ""
+        self._catalog_company_cnpj: str = ""
 
         self.setWindowTitle(f"Confronto SPED x Cadastro — {operation_type}s")
         self.setMinimumSize(1200, 700)
@@ -219,6 +533,15 @@ class ConfrontoDialog(QDialog):
         self._btn_export = QPushButton("Exportar Excel")
         self._btn_export.clicked.connect(self._export)
         bar.addWidget(self._btn_export)
+
+        self._btn_export_modelo = QPushButton("Exportar Modelo Produto")
+        self._btn_export_modelo.clicked.connect(self._export_modelo_produto)
+        bar.addWidget(self._btn_export_modelo)
+
+        self._btn_cadastrar_nc = QPushButton("Cadastrar Nao Cadastrados")
+        self._btn_cadastrar_nc.setObjectName("primaryButton")
+        self._btn_cadastrar_nc.clicked.connect(self._cadastrar_nao_cadastrados)
+        bar.addWidget(self._btn_cadastrar_nc)
 
         self._btn_report = QPushButton("Relatorio Cliente")
         self._btn_report.clicked.connect(self._export_client_report)
@@ -344,6 +667,19 @@ class ConfrontoDialog(QDialog):
         except Exception:
             pass
 
+    def _export_filename(self, prefix: str) -> str:
+        import re
+        cnpj = re.sub(r"\D", "", self._catalog_company_cnpj or "")
+        name = re.sub(r"[^\w\s-]", "", self._catalog_company_name or "").strip()
+        name = re.sub(r"\s+", "_", name)[:40]
+        op   = self._operation_type.lower()
+        parts = [prefix, op]
+        if cnpj:
+            parts.append(cnpj)
+        if name:
+            parts.append(name)
+        return "_".join(parts) + ".xlsx"
+
     def _status_colors(self, status: str) -> tuple[QColor, QColor]:
         """Retorna (bg_color, fg_color) para o status dado."""
         if status == "OK":
@@ -379,6 +715,17 @@ class ConfrontoDialog(QDialog):
             return
 
         self._status_label.setText(f"Comparando {len(self._rows)} produto(s) contra {len(catalog)} produto(s) do cadastro...")
+        self._catalog_company_name = self._company_combo.currentText()
+        self._catalog_company_cnpj = str(self._company_combo.currentData() or "").strip()
+        self._catalog_by_code = {}
+        self._catalog_by_ean = {}
+        for _prod in catalog:
+            _code = str(_prod.get("codigo_empresa") or _prod.get("codigo_fornecedor") or "").strip()
+            if _code and _code not in self._catalog_by_code:
+                self._catalog_by_code[_code] = _prod
+            _ean = "".join(c for c in str(_prod.get("ean") or "") if c.isdigit())
+            if _ean and _ean not in self._catalog_by_ean:
+                self._catalog_by_ean[_ean] = _prod
 
         compare_fields = frozenset(k for k, chk in self._compare_checks.items() if chk.isChecked())
         if not compare_fields:
@@ -732,7 +1079,7 @@ class ConfrontoDialog(QDialog):
         path, _ = QFileDialog.getSaveFileName(
             self,
             "Salvar Relatorio Cliente",
-            f"relatorio_confronto_{self._operation_type.lower()}.xlsx",
+            self._export_filename("relatorio_confronto"),
             "Arquivo Excel (*.xlsx)",
         )
         if not path:
@@ -915,6 +1262,168 @@ class ConfrontoDialog(QDialog):
         except Exception as exc:
             QMessageBox.critical(self, "Relatorio Cliente", f"Erro ao gerar relatorio:\n{exc}")
 
+    # ── Exportar Modelo Produto ───────────────────────────────────────────────
+
+    def _export_modelo_produto(self) -> None:
+        if not self._grouped_rows:
+            QMessageBox.warning(self, "Exportar Modelo Produto", "Gere o confronto antes de exportar.")
+            return
+
+        path, _ = QFileDialog.getSaveFileName(
+            self,
+            "Salvar Exportacao de Produtos",
+            self._export_filename("confronto_produtos"),
+            "Arquivo Excel (*.xlsx)",
+        )
+        if not path:
+            return
+
+        try:
+            import os
+            from app.exporters.workbook_exporter import write_simple_excel_workbook
+
+            HEADERS = [
+                "Status",
+                "ID",
+                "Empresa",
+                "Fornecedor",
+                "UF",
+                "Classificação",
+                "Cod. Forn.",
+                "Cod. Empresa",
+                "Descrição",
+                "EAN",
+                "NCM",
+                "CEST",
+                "Origem (entrada)",
+                "CST ICMS (entrada)",
+                "% Red BC ICMS",
+                "CFOP saída fornecedor",
+                "% ICMS (entrada)",
+                "CFOP entrada empresa",
+                "CST IPI",
+                "% IPI",
+                "CST PIS (entrada)",
+                "CST PIS_COFINS (ENTRADA EMPRESA)",
+                "% PIS",
+                "CST COFINS (entrada)",
+                "% COFINS",
+                "Natureza da receita",
+                "MVA",
+                "Valor ICMS-ST",
+                "cClassTrib",
+                "cBenef",
+                "Origem (saída)",
+                "CST ICMS (saída)",
+                "CFOP saída empresa",
+                "% ICMS (saída)",
+                "CST PIS (saída)",
+                "CST COFINS (saída)",
+                "Natureza da receita",
+                "Chave NFe origem",
+            ]
+
+            def _pct(v: object) -> str:
+                s = str(v or "").strip()
+                if not s:
+                    return ""
+                try:
+                    result = round(float(s.replace(",", ".")) * 100, 2)
+                    return f"{result:.2f}".replace(".", ",")
+                except (ValueError, TypeError):
+                    return s
+
+            rows: list[list[object]] = []
+            for grp in self._grouped_rows:
+                code = str(grp.get("code") or "").strip()
+                cat = self._catalog_by_code.get(code)
+                if cat is None:
+                    code_digits = "".join(c for c in code if c.isdigit())
+                    cat = self._catalog_by_ean.get(code_digits) if code_digits else None
+
+                status = str(grp.get("status") or "")
+                if cat:
+                    row: list[object] = [
+                        status,
+                        str(cat.get("id") or ""),
+                        self._catalog_company_name,
+                        str(cat.get("fornecedor_nome") or ""),
+                        str(cat.get("fornecedor_uf") or ""),
+                        str(cat.get("tipo_produto") or ""),
+                        str(cat.get("codigo_fornecedor") or "") or code,
+                        str(cat.get("codigo_empresa") or ""),
+                        str(cat.get("descricao") or ""),
+                        str(cat.get("ean") or ""),
+                        str(cat.get("ncm") or ""),
+                        str(cat.get("cest") or ""),
+                        str(cat.get("origem_entrada") or ""),
+                        str(cat.get("cst_icms") or ""),
+                        _pct(cat.get("reducao_bc_icms")),
+                        str(cat.get("cfop_saida_fornecedor") or ""),
+                        _pct(cat.get("aliquota_icms")),
+                        str(cat.get("cfop_entrada") or ""),
+                        str(cat.get("cst_ipi") or ""),
+                        _pct(cat.get("aliquota_ipi")),
+                        str(cat.get("cst_pis") or ""),
+                        str(cat.get("cst_pis_cofins") or ""),
+                        _pct(cat.get("aliquota_pis")),
+                        str(cat.get("cst_cofins") or ""),
+                        _pct(cat.get("aliquota_cofins")),
+                        str(cat.get("natureza_receita_entrada") or ""),
+                        _pct(cat.get("mva")),
+                        str(cat.get("valor_icms_st") or ""),
+                        str(cat.get("c_classtrib") or ""),
+                        str(cat.get("c_benef") or ""),
+                        str(cat.get("origem_saida") or ""),
+                        str(cat.get("cst_icms_saida") or ""),
+                        str(cat.get("cfop_saida_empresa") or ""),
+                        _pct(cat.get("aliquota_icms_saida")),
+                        str(cat.get("cst_pis_saida") or ""),
+                        str(cat.get("cst_cofins_saida") or ""),
+                        str(cat.get("natureza_receita_saida") or ""),
+                        str(cat.get("chave_nfe_origem") or ""),
+                    ]
+                else:
+                    row = [
+                        status,
+                        "",
+                        self._catalog_company_name,
+                        str(grp.get("fornecedor") or ""),
+                        "",
+                        "",
+                        code,
+                        "",
+                        str(grp.get("descricao_sped") or ""),
+                        "",
+                        str(grp.get("ncm_sped") or ""),
+                        "",
+                        "",
+                        str(grp.get("cst_sped") or ""),
+                        "",
+                        "",
+                        str(grp.get("aliq_sped") or ""),
+                        "",
+                        "", "", "", "", "", "", "", "", "", "", "", "",
+                        "", "", "", "", "", "", "", "",
+                    ]
+                rows.append(row)
+
+            write_simple_excel_workbook(
+                Path(path),
+                [("BASE_COMPLETA", HEADERS, rows, {"include_total": False})],
+            )
+            msg = QMessageBox(self)
+            msg.setIcon(QMessageBox.Information)
+            msg.setWindowTitle("Exportar Modelo Produto")
+            msg.setText(f"Exportacao concluida.\n\nDeseja abrir o arquivo?\n{path}")
+            btn_sim = msg.addButton("Sim", QMessageBox.YesRole)
+            msg.addButton("Nao", QMessageBox.NoRole)
+            msg.exec()
+            if msg.clickedButton() == btn_sim:
+                os.startfile(path)
+        except Exception as exc:
+            QMessageBox.critical(self, "Exportar Modelo Produto", f"Erro ao exportar:\n{exc}")
+
     # ── Exportar ─────────────────────────────────────────────────────────────
 
     def _export(self) -> None:
@@ -924,7 +1433,7 @@ class ConfrontoDialog(QDialog):
         path, _ = QFileDialog.getSaveFileName(
             self,
             "Salvar Excel",
-            f"confronto_{self._operation_type.lower()}.xlsx",
+            self._export_filename("confronto"),
             "Arquivo Excel (*.xlsx)",
         )
         if not path:
@@ -935,6 +1444,43 @@ class ConfrontoDialog(QDialog):
                 EXCEL_STYLE_STATUS_OK, EXCEL_STYLE_STATUS_DIV, EXCEL_STYLE_STATUS_NAO,
                 EXCEL_STYLE_ROW_OK, EXCEL_STYLE_ROW_DIV, EXCEL_STYLE_ROW_NAO,
             )
+
+            from app.exporters.excel_base import EXCEL_STYLE_CURRENCY
+
+            MONEY_FIELDS = {"total_operacao", "sale_value", "base_icms", "icms_value"}
+
+            def _decimal_value(value: object) -> Decimal | str:
+                if isinstance(value, Decimal):
+                    return value.quantize(Decimal("0.01"))
+                text = str(value or "").strip()
+                if not text:
+                    return ""
+                normalized = text.replace("R$", "").replace(" ", "")
+                if "," in normalized and "." in normalized:
+                    normalized = normalized.replace(".", "").replace(",", ".")
+                else:
+                    normalized = normalized.replace(",", ".")
+                try:
+                    return Decimal(normalized).quantize(Decimal("0.01"))
+                except InvalidOperation:
+                    return text
+
+            def _export_value(row: dict, field: str) -> object:
+                value = row.get(field)
+                if field in MONEY_FIELDS:
+                    return _decimal_value(value)
+                return str(value or "")
+
+            def _document_keys_for_row(row: dict) -> list[str]:
+                keys = row.get("document_keys") or []
+                if isinstance(keys, (str, bytes)):
+                    keys = [keys]
+                result: list[str] = []
+                for key in keys:
+                    text = str(key or "").strip()
+                    if text and text not in result:
+                        result.append(text)
+                return result
 
             def _row_styles(rows: list[dict], fields: list[str]) -> list[list[int]]:
                 result = []
@@ -947,7 +1493,11 @@ class ConfrontoDialog(QDialog):
                         s, r = EXCEL_STYLE_STATUS_NAO, EXCEL_STYLE_ROW_NAO
                     else:
                         s, r = EXCEL_STYLE_STATUS_DIV, EXCEL_STYLE_ROW_DIV
-                    result.append([s] + [r] * (ncols - 1))
+                    styles = [s] + [r] * (ncols - 1)
+                    for index, field in enumerate(fields):
+                        if field in MONEY_FIELDS:
+                            styles[index] = EXCEL_STYLE_CURRENCY
+                    result.append(styles)
                 return result
 
             _LOG_STYLE_MAP = {
@@ -962,17 +1512,27 @@ class ConfrontoDialog(QDialog):
                     result.append([s] + [r] * (len(LOG_FIELDS) - 1))
                 return result
 
-            grp_data = [[str(r.get(f) or "") for f in GROUPED_FIELDS] for r in self._grouped_rows]
-            det_data = [[str(r.get(f) or "") for f in DETAIL_FIELDS]  for r in self._detail_rows]
+            max_group_keys = max((len(_document_keys_for_row(r)) for r in self._grouped_rows), default=0)
+            grouped_key_headers = [f"Chave NFe {index}" for index in range(1, max_group_keys + 1)]
+            grouped_export_headers = GROUPED_HEADERS + grouped_key_headers
+            grouped_export_fields = GROUPED_FIELDS + [f"_document_key_{index}" for index in range(1, max_group_keys + 1)]
+
+            grp_data = []
+            for row in self._grouped_rows:
+                values = [_export_value(row, field) for field in GROUPED_FIELDS]
+                keys = _document_keys_for_row(row)
+                values.extend(keys + [""] * max(0, max_group_keys - len(keys)))
+                grp_data.append(values)
+            det_data = [[_export_value(r, f) for f in DETAIL_FIELDS] for r in self._detail_rows]
             log_data = [[str(e.get(f) or "") for f in LOG_FIELDS]     for e in self._log_entries]
             write_simple_excel_workbook(
                 Path(path),
                 [
                     (
                         f"Agrupado {self._operation_type}",
-                        GROUPED_HEADERS,
+                        grouped_export_headers,
                         grp_data,
-                        {"row_style_ids": _row_styles(self._grouped_rows, GROUPED_FIELDS), "include_total": False},
+                        {"row_style_ids": _row_styles(self._grouped_rows, grouped_export_fields), "include_total": False},
                     ),
                     (
                         f"Detalhado {self._operation_type}",
@@ -1000,3 +1560,28 @@ class ConfrontoDialog(QDialog):
                 os.startfile(path)
         except Exception as exc:
             QMessageBox.critical(self, "Exportar", f"Erro ao exportar:\n{exc}")
+
+    # ── Cadastrar Nao Cadastrados ─────────────────────────────────────────────
+
+    def _cadastrar_nao_cadastrados(self) -> None:
+        if not self._grouped_rows:
+            QMessageBox.warning(self, "Cadastrar", "Gere o confronto antes de cadastrar produtos.")
+            return
+
+        nao_cad = [r for r in self._grouped_rows if r.get("status") == "Nao Cadastrado"]
+        if not nao_cad:
+            QMessageBox.information(self, "Cadastrar", "Nenhum produto 'Nao Cadastrado' encontrado no confronto.")
+            return
+
+        dlg = _CadastrarNaoCadastradosDialog(
+            nao_cad,
+            self._operation_type,
+            self._catalog_company_cnpj,
+            self._catalog_company_name,
+            self._repository,
+            self._environment,
+            self,
+        )
+        if dlg.exec() == QDialog.Accepted:
+            # Recarrega o confronto para refletir os produtos recém-cadastrados
+            self._run()

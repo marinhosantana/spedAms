@@ -1,6 +1,8 @@
 ﻿from __future__ import annotations
 
+import hashlib
 import json
+import secrets
 import sys
 import traceback
 from datetime import date, datetime
@@ -1215,8 +1217,10 @@ class MysqlCadastroRepository:
         inscricao_estadual: str = "",
         uf: str = "",
         regime_tributario: str = "LUCRO_REAL_PRESUMIDO",
+        codigo: str = "",
     ) -> int:
         normalized_name = str(name or "").strip()
+        normalized_codigo = str(codigo or "").strip()
         normalized_cnpj = self._only_digits(cnpj)
         normalized_ie = str(inscricao_estadual or "").strip()
         normalized_uf = self._trim_text(uf, 2).upper()
@@ -1255,7 +1259,8 @@ class MysqlCadastroRepository:
                             SET cnpj = CASE WHEN %s <> '' THEN %s ELSE cnpj END,
                                 inscricao_estadual = CASE WHEN %s <> '' THEN %s ELSE inscricao_estadual END,
                                 uf = CASE WHEN %s <> '' THEN %s ELSE uf END,
-                                regime_tributario = CASE WHEN %s <> '' THEN %s ELSE regime_tributario END
+                                regime_tributario = CASE WHEN %s <> '' THEN %s ELSE regime_tributario END,
+                                codigo = CASE WHEN %s <> '' THEN %s ELSE codigo END
                             WHERE id = %s
                             """,
                             (
@@ -1263,6 +1268,7 @@ class MysqlCadastroRepository:
                                 normalized_ie, normalized_ie,
                                 normalized_uf, normalized_uf,
                                 normalized_regime, normalized_regime,
+                                normalized_codigo, normalized_codigo,
                                 supplier_id,
                             ),
                         )
@@ -1274,7 +1280,8 @@ class MysqlCadastroRepository:
                                 cnpj = CASE WHEN %s <> '' THEN %s ELSE cnpj END,
                                 inscricao_estadual = CASE WHEN %s <> '' THEN %s ELSE inscricao_estadual END,
                                 uf = CASE WHEN %s <> '' THEN %s ELSE uf END,
-                                regime_tributario = CASE WHEN %s <> '' THEN %s ELSE regime_tributario END
+                                regime_tributario = CASE WHEN %s <> '' THEN %s ELSE regime_tributario END,
+                                codigo = CASE WHEN %s <> '' THEN %s ELSE codigo END
                             WHERE id = %s
                             """,
                             (
@@ -1283,6 +1290,7 @@ class MysqlCadastroRepository:
                                 normalized_ie, normalized_ie,
                                 normalized_uf, normalized_uf,
                                 normalized_regime, normalized_regime,
+                                normalized_codigo, normalized_codigo,
                                 supplier_id,
                             ),
                         )
@@ -1307,18 +1315,16 @@ class MysqlCadastroRepository:
                     SET cnpj = CASE WHEN %s <> '' THEN %s ELSE cnpj END,
                         inscricao_estadual = CASE WHEN %s <> '' THEN %s ELSE inscricao_estadual END,
                         uf = CASE WHEN %s <> '' THEN %s ELSE uf END,
-                        regime_tributario = CASE WHEN %s <> '' THEN %s ELSE regime_tributario END
+                        regime_tributario = CASE WHEN %s <> '' THEN %s ELSE regime_tributario END,
+                        codigo = CASE WHEN %s <> '' THEN %s ELSE codigo END
                     WHERE id = %s
                     """,
                     (
-                        normalized_cnpj,
-                        normalized_cnpj,
-                        normalized_ie,
-                        normalized_ie,
-                        normalized_uf,
-                        normalized_uf,
-                        normalized_regime,
-                        normalized_regime,
+                        normalized_cnpj, normalized_cnpj,
+                        normalized_ie, normalized_ie,
+                        normalized_uf, normalized_uf,
+                        normalized_regime, normalized_regime,
+                        normalized_codigo, normalized_codigo,
                         supplier_id,
                     ),
                 )
@@ -1550,6 +1556,25 @@ class MysqlCadastroRepository:
             )
             connection.commit()
             return int(cursor.lastrowid)
+        finally:
+            connection.close()
+
+    def fetch_supplier_product_by_fornecedor_code(
+        self, supplier_id: int, codigo_fornecedor: str
+    ) -> dict | None:
+        connection = self.get_connection()
+        try:
+            cursor = connection.cursor(dictionary=True)
+            cursor.execute(
+                """
+                SELECT id, codigo_empresa
+                FROM cad_produtos_fornecedor
+                WHERE fornecedor_id = %s AND codigo_fornecedor = %s
+                LIMIT 1
+                """,
+                (supplier_id, str(codigo_fornecedor).strip()),
+            )
+            return cursor.fetchone()
         finally:
             connection.close()
 
@@ -2457,7 +2482,8 @@ class MysqlCadastroRepository:
                 SELECT
                     p.*,
                     f.nome AS fornecedor_nome,
-                    f.cnpj AS fornecedor_cnpj
+                    f.cnpj AS fornecedor_cnpj,
+                    f.uf AS fornecedor_uf
                 FROM cad_produtos_fornecedor p
                 JOIN cad_fornecedores f ON f.id = p.fornecedor_id
                 JOIN cad_empresas e ON e.id = f.empresa_id
@@ -2498,5 +2524,199 @@ class MysqlCadastroRepository:
                 if code and cfop and code not in result:
                     result[code] = cfop
             return result
+        finally:
+            connection.close()
+
+    @staticmethod
+    def hash_password(password: str, salt: str | None = None) -> tuple[str, str]:
+        normalized_password = str(password or "")
+        normalized_salt = salt or secrets.token_hex(16)
+        digest = hashlib.sha256(f"{normalized_salt}:{normalized_password}".encode("utf-8")).hexdigest()
+        return normalized_salt, digest
+
+    def list_system_users(self, environment: str) -> list[dict[str, object]]:
+        connection = self.get_connection()
+        try:
+            cursor = connection.cursor(dictionary=True)
+            cursor.execute(
+                """
+                SELECT
+                    u.id,
+                    u.nome,
+                    u.login,
+                    u.ativo,
+                    u.observacao,
+                    u.created_at,
+                    u.updated_at,
+                    GROUP_CONCAT(p.permissao ORDER BY p.permissao SEPARATOR ', ') AS permissoes
+                FROM sistema_usuarios u
+                LEFT JOIN sistema_usuario_permissoes p
+                    ON p.usuario_id = u.id
+                   AND p.permitido = 1
+                WHERE u.ambiente = %s
+                GROUP BY u.id, u.nome, u.login, u.ativo, u.observacao, u.created_at, u.updated_at
+                ORDER BY u.nome, u.login
+                """,
+                (environment,),
+            )
+            return [dict(row) for row in cursor.fetchall()]
+        finally:
+            connection.close()
+
+    def get_system_user_permissions(self, user_id: int) -> set[str]:
+        if not user_id:
+            return set()
+        connection = self.get_connection()
+        try:
+            cursor = connection.cursor()
+            cursor.execute(
+                """
+                SELECT permissao
+                FROM sistema_usuario_permissoes
+                WHERE usuario_id = %s
+                  AND permitido = 1
+                """,
+                (user_id,),
+            )
+            return {str(row[0]) for row in cursor.fetchall()}
+        finally:
+            connection.close()
+
+    def save_system_user(
+        self,
+        environment: str,
+        user_id: int | None,
+        data: dict[str, object],
+        permissions: set[str],
+    ) -> int:
+        name = str(data.get("nome") or "").strip()
+        login = str(data.get("login") or "").strip().lower()
+        password = str(data.get("senha") or "")
+        active = 1 if data.get("ativo", True) else 0
+        note = str(data.get("observacao") or "").strip()
+        if not name:
+            raise ValueError("Informe o nome do usuario.")
+        if not login:
+            raise ValueError("Informe o login do usuario.")
+        if not user_id and not password:
+            raise ValueError("Informe a senha inicial do usuario.")
+
+        connection = self.get_connection()
+        try:
+            cursor = connection.cursor()
+            if user_id:
+                if password:
+                    salt, password_hash = self.hash_password(password)
+                    cursor.execute(
+                        """
+                        UPDATE sistema_usuarios
+                           SET nome = %s,
+                               login = %s,
+                               senha_hash = %s,
+                               senha_salt = %s,
+                               ativo = %s,
+                               observacao = %s
+                         WHERE id = %s
+                           AND ambiente = %s
+                        """,
+                        (name, login, password_hash, salt, active, note, user_id, environment),
+                    )
+                else:
+                    cursor.execute(
+                        """
+                        UPDATE sistema_usuarios
+                           SET nome = %s,
+                               login = %s,
+                               ativo = %s,
+                               observacao = %s
+                         WHERE id = %s
+                           AND ambiente = %s
+                        """,
+                        (name, login, active, note, user_id, environment),
+                    )
+                saved_id = int(user_id)
+            else:
+                salt, password_hash = self.hash_password(password)
+                cursor.execute(
+                    """
+                    INSERT INTO sistema_usuarios (
+                        ambiente, nome, login, senha_hash, senha_salt, ativo, observacao
+                    ) VALUES (%s, %s, %s, %s, %s, %s, %s)
+                    """,
+                    (environment, name, login, password_hash, salt, active, note),
+                )
+                saved_id = int(cursor.lastrowid)
+
+            cursor.execute("DELETE FROM sistema_usuario_permissoes WHERE usuario_id = %s", (saved_id,))
+            permission_rows = [(saved_id, permission, 1) for permission in sorted(permissions)]
+            if permission_rows:
+                cursor.executemany(
+                    """
+                    INSERT INTO sistema_usuario_permissoes (usuario_id, permissao, permitido)
+                    VALUES (%s, %s, %s)
+                    """,
+                    permission_rows,
+                )
+            connection.commit()
+            return saved_id
+        except Exception:
+            connection.rollback()
+            raise
+        finally:
+            connection.close()
+
+    def delete_system_user(self, environment: str, user_id: int) -> None:
+        connection = self.get_connection()
+        try:
+            cursor = connection.cursor()
+            cursor.execute(
+                "DELETE FROM sistema_usuarios WHERE id = %s AND ambiente = %s",
+                (user_id, environment),
+            )
+            connection.commit()
+        except Exception:
+            connection.rollback()
+            raise
+        finally:
+            connection.close()
+
+    def authenticate_system_user(self, environment: str, login: str, password: str) -> dict[str, object] | None:
+        normalized_login = str(login or "").strip().lower()
+        if not normalized_login or not password:
+            return None
+        connection = self.get_connection()
+        try:
+            cursor = connection.cursor(dictionary=True)
+            cursor.execute(
+                """
+                SELECT id, nome, login, senha_hash, senha_salt, ativo
+                FROM sistema_usuarios
+                WHERE ambiente = %s
+                  AND login = %s
+                LIMIT 1
+                """,
+                (environment, normalized_login),
+            )
+            user = cursor.fetchone()
+            if not user or not int(user.get("ativo") or 0):
+                return None
+            salt = str(user.get("senha_salt") or "")
+            expected_hash = str(user.get("senha_hash") or "")
+            _salt, password_hash = self.hash_password(str(password), salt)
+            if not secrets.compare_digest(expected_hash, password_hash):
+                return None
+            cursor.execute(
+                """
+                SELECT permissao
+                FROM sistema_usuario_permissoes
+                WHERE usuario_id = %s
+                  AND permitido = 1
+                """,
+                (user["id"],),
+            )
+            user["permissoes"] = {str(row["permissao"]) for row in cursor.fetchall()}
+            user.pop("senha_hash", None)
+            user.pop("senha_salt", None)
+            return dict(user)
         finally:
             connection.close()

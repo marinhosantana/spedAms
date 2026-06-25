@@ -4,7 +4,7 @@ import faulthandler
 import sys
 from pathlib import Path
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QTimer
 from PySide6.QtWidgets import QApplication
 
 from app.ui_qt.app import QtSpedApp
@@ -21,6 +21,13 @@ def main() -> None:
     app.setHighDpiScaleFactorRoundingPolicy(Qt.HighDpiScaleFactorRoundingPolicy.PassThrough)
     window = QtSpedApp()
     window.showMaximized()
+
+    def authenticate() -> None:
+        if not window.authenticate_on_startup():
+            window.close()
+            app.quit()
+
+    QTimer.singleShot(0, authenticate)
     try:
         sys.exit(app.exec())
     finally:

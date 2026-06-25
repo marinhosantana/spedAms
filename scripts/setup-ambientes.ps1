@@ -20,6 +20,7 @@ if (-not (Test-Path ".\.venv-prod\Scripts\python.exe")) {
 & ".\.venv-dev\Scripts\python.exe" -m pip install --upgrade pip
 & ".\.venv-dev\Scripts\python.exe" -m pip install -r .\requirements\base.txt
 & ".\.venv-dev\Scripts\python.exe" -m pip install -r .\requirements\build.txt
+& ".\.venv-dev\Scripts\python.exe" -m pip install -r .\requirements\dev.txt
 
 & ".\.venv-prod\Scripts\python.exe" -m pip install --upgrade pip
 & ".\.venv-prod\Scripts\python.exe" -m pip install -r .\requirements\base.txt

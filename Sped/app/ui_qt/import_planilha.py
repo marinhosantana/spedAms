@@ -22,6 +22,7 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QHeaderView,
     QLabel,
+    QLineEdit,
     QProgressBar,
     QPushButton,
     QScrollArea,
@@ -207,6 +208,137 @@ class _NoScrollCombo(QComboBox):
     """QComboBox que ignora scroll do mouse para não trocar valor ao rolar a página."""
     def wheelEvent(self, event: Any) -> None:
         event.ignore()
+
+
+class _CampoPickerDialog(QDialog):
+    """Seletor provisorio em colunas para testar mapeamento assistido."""
+
+    def __init__(
+        self,
+        column_name: str,
+        sample_value: str,
+        current_key: str,
+        parent: QWidget | None = None,
+    ) -> None:
+        super().__init__(parent)
+        self.selected_key = current_key or IGNORAR
+        self._field_buttons: list[tuple[QPushButton, str, str]] = []
+        self.setWindowTitle("Escolher Campo Destino")
+        screen = self.screen() or (parent.screen() if parent is not None else None)
+        if screen is not None:
+            available = screen.availableGeometry()
+            width = min(1180, max(900, int(available.width() * 0.92)))
+            height = min(700, max(560, int(available.height() * 0.86)))
+            self.resize(width, height)
+        else:
+            self.resize(1180, 700)
+        self.setMinimumSize(900, 560)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(14, 14, 14, 14)
+        layout.setSpacing(10)
+
+        title = QLabel(f"Coluna Da Planilha: {column_name}")
+        title.setStyleSheet("font-weight: bold; color: #1d2730;")
+        title.setWordWrap(True)
+        layout.addWidget(title)
+
+        if sample_value:
+            sample = QLabel(f"Amostra: {sample_value}")
+            sample.setStyleSheet("color: #5d6b78;")
+            sample.setWordWrap(True)
+            layout.addWidget(sample)
+
+        search = QLineEdit()
+        search.setPlaceholderText("Buscar Campo...")
+        search.setStyleSheet(
+            "QLineEdit { background: #ffffff; color: #1d2730; border: 1px solid #d6e0e8; "
+            "border-radius: 4px; padding: 6px 8px; }"
+        )
+        layout.addWidget(search)
+
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.NoFrame)
+        content = QWidget()
+        grid = QGridLayout(content)
+        grid.setContentsMargins(4, 4, 4, 4)
+        grid.setHorizontalSpacing(10)
+        grid.setVerticalSpacing(10)
+
+        entries: list[tuple[str, str, str]] = [("field", IGNORAR, "Ignorar Coluna")]
+        for group_name, fields in CAMPOS_GRUPOS:
+            entries.append(("group", "", group_name))
+            for key, label in fields:
+                entries.append(("field", key, label))
+
+        max_fields_per_column = 14
+        col_index = 0
+        row_index = 0
+        fields_in_column = 0
+
+        for entry_type, key, label in entries:
+            if entry_type == "group":
+                if row_index and fields_in_column >= max_fields_per_column:
+                    col_index += 1
+                    row_index = 0
+                    fields_in_column = 0
+                group_label = QLabel(label)
+                group_label.setStyleSheet(
+                    "color: #5d6b78; font-weight: bold; padding: 4px 2px; background: transparent;"
+                )
+                grid.addWidget(group_label, row_index, col_index)
+                row_index += 1
+                continue
+
+            if fields_in_column >= max_fields_per_column:
+                col_index += 1
+                row_index = 0
+                fields_in_column = 0
+
+            btn = QPushButton(label)
+            btn.setMinimumWidth(190)
+            normal_style = (
+                "QPushButton { text-align: left; background: #ffffff; color: #1d2730; "
+                "border: 1px solid #d6e0e8; border-radius: 4px; padding: 6px 8px; }"
+                "QPushButton:hover { background: #eef6ff; border-color: #93c5fd; }"
+            )
+            selected_style = (
+                "QPushButton { text-align: left; background: #dbeafe; color: #1d2730; "
+                "border: 1px solid #60a5fa; border-radius: 4px; padding: 6px 8px; font-weight: bold; }"
+                "QPushButton:hover { background: #bfdbfe; }"
+            )
+            btn.setStyleSheet(selected_style if key == current_key else normal_style)
+            btn.clicked.connect(lambda _checked=False, field_key=key: self._choose(field_key))
+            grid.addWidget(btn, row_index, col_index)
+            self._field_buttons.append((btn, key, label))
+            row_index += 1
+            fields_in_column += 1
+
+        for c in range(col_index + 1):
+            grid.setColumnStretch(c, 1)
+
+        scroll.setWidget(content)
+        layout.addWidget(scroll, 1)
+
+        footer = QHBoxLayout()
+        footer.addStretch()
+        cancel = QPushButton("Cancelar")
+        cancel.clicked.connect(self.reject)
+        footer.addWidget(cancel)
+        layout.addLayout(footer)
+
+        search.textChanged.connect(self._filter_fields)
+
+    def _choose(self, key: str) -> None:
+        self.selected_key = key
+        self.accept()
+
+    def _filter_fields(self, text: str) -> None:
+        needle = _strip_accents(text.lower().strip())
+        for btn, key, label in self._field_buttons:
+            haystack = _strip_accents(f"{label} {key}".lower())
+            btn.setVisible(not needle or needle in haystack)
 
 
 class _ImportWorker(QObject):
@@ -440,14 +572,14 @@ def _execute_import(
                 empresa_id = default_company_id
             else:
                 stats["ignorados"] += 1
-                _skip(idx, "", "", "", get("descricao"), "Sem empresa (campo empresa_nome vazio e sem empresa padrão)")
+                _skip(idx, "", "", "", get("descricao"), "Sem Empresa (Campo Empresa_Nome Vazio E Sem Empresa Padrão)")
                 continue
 
             # ── Fornecedor ───────────────────────────────────────────────────
             forn_nome = get("fornecedor_nome")
             if not forn_nome:
                 stats["ignorados"] += 1
-                _skip(idx, "", "", "", get("descricao"), "Sem fornecedor (campo fornecedor_nome vazio)")
+                _skip(idx, "", "", "", get("descricao"), "Sem Fornecedor (Campo Fornecedor_Nome Vazio)")
                 continue
 
             forn_cnpj   = get("fornecedor_cnpj")
@@ -547,7 +679,7 @@ def _execute_import(
             # Se produto já existe e nenhum campo mudou → pula sem gravar
             if existing_prod and not _needs_update(existing_prod, data):
                 stats["sem_alteracao"] += 1
-                _skip(idx, forn_nome, codigo, ean, descricao, "Sem alteração — dados da planilha já iguais ao banco")
+                _skip(idx, forn_nome, codigo, ean, descricao, "Sem Alteração - Dados Da Planilha Já Iguais Ao Banco")
                 continue
 
             # Para produto existente: mescla apenas campos não-vazios da planilha,
@@ -616,7 +748,7 @@ class _FileLoaderWorker(QObject):
             header_row = self._header_row
 
             if self._read_sheets:
-                self.progress.emit("Lendo estrutura do arquivo...")
+                self.progress.emit("Lendo Estrutura Do Arquivo...")
                 if ext in {".xlsx", ".xls", ".ods"}:
                     xf = pd.ExcelFile(str(self._file_path))
                     sheet_names = list(xf.sheet_names)
@@ -628,7 +760,7 @@ class _FileLoaderWorker(QObject):
                 return
 
             if self._detect_header:
-                self.progress.emit("Detectando cabecalho...")
+                self.progress.emit("Detectando Cabeçalho...")
                 best_row = 0
                 best_score = -1
                 for row in range(5):
@@ -656,7 +788,7 @@ class _FileLoaderWorker(QObject):
             if self._cancelled:
                 return
 
-            self.progress.emit("Carregando preview...")
+            self.progress.emit("Carregando Prévia...")
             if ext == ".csv":
                 df_preview = pd.read_csv(
                     str(self._file_path), header=header_row, nrows=8, dtype=str, keep_default_na=False,
@@ -669,7 +801,7 @@ class _FileLoaderWorker(QObject):
             if self._cancelled:
                 return
 
-            self.progress.emit("Contando linhas...")
+            self.progress.emit("Contando Linhas...")
             if ext == ".csv":
                 df_full = pd.read_csv(str(self._file_path), header=header_row, dtype=str, keep_default_na=False)
             else:
@@ -717,7 +849,7 @@ class ImportPlanilhaDialog(QDialog):
         self._file_load_worker: _FileLoaderWorker | None = None
         self._profiles: dict[str, dict[str, str]] = _load_all_profiles()
 
-        self.setWindowTitle("Importar Planilha de Produtos")
+        self.setWindowTitle("Importar Planilha De Produtos")
         self.setMinimumSize(1000, 680)
         if parent:
             self.setStyleSheet(parent.styleSheet())
@@ -845,7 +977,7 @@ class ImportPlanilhaDialog(QDialog):
         file_layout.setSpacing(8)
 
         file_layout.addWidget(QLabel("Arquivo:"), 0, 0)
-        self._file_label = QLabel("Nenhum arquivo selecionado")
+        self._file_label = QLabel("Nenhum Arquivo Selecionado")
         self._file_label.setObjectName("muted")
         self._file_label.setWordWrap(True)
         file_layout.addWidget(self._file_label, 0, 1)
@@ -867,7 +999,7 @@ class ImportPlanilhaDialog(QDialog):
         header_row_layout.setContentsMargins(0, 0, 0, 0)
         header_row_layout.setSpacing(6)
 
-        self._header_check = QCheckBox("Tem cabeçalho — linha:")
+        self._header_check = QCheckBox("Tem Cabeçalho - Linha:")
         self._header_check.setChecked(True)
         self._header_check.stateChanged.connect(self._on_header_check_changed)
         header_row_layout.addWidget(self._header_check)
@@ -877,12 +1009,12 @@ class ImportPlanilhaDialog(QDialog):
         self._header_row_spin.setValue(0)
         self._header_row_spin.setFixedWidth(60)
         self._header_row_spin.setToolTip(
-            "0 = primeira linha do arquivo\n1 = segunda linha\netc."
+            "0 = Primeira Linha Do Arquivo\n1 = Segunda Linha\nEtc."
         )
         self._header_row_spin.valueChanged.connect(self._refresh_preview)
         header_row_layout.addWidget(self._header_row_spin)
 
-        lbl_hint = QLabel("(0 = primeira linha)")
+        lbl_hint = QLabel("(0 = Primeira Linha)")
         lbl_hint.setStyleSheet(f"color: {self.COLORS['muted']}; background: transparent; font-size: 11px;")
         header_row_layout.addWidget(lbl_hint)
         header_row_layout.addStretch()
@@ -893,7 +1025,7 @@ class ImportPlanilhaDialog(QDialog):
         layout.addWidget(file_group)
 
         # Empresa padrão (usada quando empresa_nome não for mapeado)
-        emp_group = QGroupBox("Empresa destino (quando não mapeada na planilha)")
+        emp_group = QGroupBox("Empresa Destino (Quando Não Mapeada Na Planilha)")
         emp_layout = QHBoxLayout(emp_group)
         emp_layout.setContentsMargins(12, 12, 12, 12)
         emp_layout.setSpacing(8)
@@ -905,7 +1037,7 @@ class ImportPlanilhaDialog(QDialog):
         layout.addWidget(emp_group)
 
         # Preview
-        preview_group = QGroupBox("Preview (primeiras linhas)")
+        preview_group = QGroupBox("Prévia (Primeiras Linhas)")
         preview_layout = QVBoxLayout(preview_group)
         preview_layout.setContentsMargins(8, 8, 8, 8)
         self._preview_table = QTableWidget()
@@ -944,7 +1076,7 @@ class ImportPlanilhaDialog(QDialog):
 
     def _load_company_combo(self) -> None:
         self._company_combo.clear()
-        self._company_combo.addItem("(nenhuma — usar coluna da planilha)", None)
+        self._company_combo.addItem("(Nenhuma - Usar Coluna Da Planilha)", None)
         try:
             companies = self.repository.list_companies(self.environment)
             for c in companies:
@@ -989,7 +1121,7 @@ class ImportPlanilhaDialog(QDialog):
                     self._sheet_combo.addItem(name)
                 self._sheet_combo.setEnabled(len(xf.sheet_names) > 1)
             except Exception as exc:
-                self._file_label.setText(f"Erro ao abrir: {exc}")
+                self._file_label.setText(f"Erro Ao Abrir: {exc}")
                 self._sheet_combo.blockSignals(False)
                 return
         else:
@@ -1079,7 +1211,7 @@ class ImportPlanilhaDialog(QDialog):
         self._all_columns = list(df_full.columns)
         df_preview.columns = self._all_columns[:len(df_preview.columns)]
 
-        self._file_info_label.setText(f"{total_rows} linhas · {len(self._all_columns)} colunas")
+        self._file_info_label.setText(f"{total_rows} Linhas · {len(self._all_columns)} Colunas")
         self._file_info_label.setStyleSheet(f"color: {self.COLORS['muted']};")
 
         preview_df = df_preview.head(self.PREVIEW_ROWS)
@@ -1176,8 +1308,8 @@ class ImportPlanilhaDialog(QDialog):
 
         # Instrução
         info = QLabel(
-            "Para cada coluna da planilha, selecione qual campo do cadastro corresponde. "
-            "Colunas marcadas como '-- Ignorar --' não serão importadas."
+            "Para Cada Coluna Da Planilha, Selecione Qual Campo Do Cadastro Corresponde. "
+            "Colunas Marcadas Como '-- Ignorar Coluna --' Não Serão Importadas."
         )
         info.setWordWrap(True)
         info.setObjectName("muted")
@@ -1214,7 +1346,7 @@ class ImportPlanilhaDialog(QDialog):
         btn_load_profile.clicked.connect(self._load_profile)
         actions_layout.addWidget(btn_load_profile)
 
-        btn_save_profile = QPushButton("Salvar perfil…")
+        btn_save_profile = QPushButton("Salvar Perfil...")
         btn_save_profile.clicked.connect(self._save_profile_dialog)
         actions_layout.addWidget(btn_save_profile)
 
@@ -1240,7 +1372,7 @@ class ImportPlanilhaDialog(QDialog):
         self._map_grid.setHorizontalSpacing(16)
         self._map_grid.setVerticalSpacing(6)
         # Cabeçalhos fixos
-        for col, text in enumerate(["Coluna da Planilha", "Amostra de Valor", "Campo Destino"]):
+        for col, text in enumerate(["Coluna Da Planilha", "Amostra De Valor", "Campo Destino", "Seletor"]):
             h = QLabel(text)
             h.setStyleSheet(f"color: {self.COLORS['muted']}; font-weight: bold; background: transparent;")
             self._map_grid.addWidget(h, 0, col)
@@ -1266,10 +1398,10 @@ class ImportPlanilhaDialog(QDialog):
             combo.lineEdit().setStyleSheet(
                 "background: #ffffff; color: #1d2730; border: none;"
             )
-            combo.lineEdit().setPlaceholderText("Pesquisar campo...")
+            combo.lineEdit().setPlaceholderText("Pesquisar Campo...")
 
-        combo.addItem("-- Ignorar --", IGNORAR)
-        field_labels: list[str] = ["-- Ignorar --"]
+        combo.addItem("-- Ignorar Coluna --", IGNORAR)
+        field_labels: list[str] = ["-- Ignorar Coluna --"]
 
         for grp_name, fields in CAMPOS_GRUPOS:
             combo.addItem(f"── {grp_name} ──", "__sep__")
@@ -1299,16 +1431,16 @@ class ImportPlanilhaDialog(QDialog):
 
     def _load_step_mapeamento(self) -> None:
         # Limpa grid (mantém cabeçalhos na linha 0)
-        while self._map_grid.count() > 3:
-            item = self._map_grid.takeAt(3)
+        while self._map_grid.count() > 4:
+            item = self._map_grid.takeAt(4)
             if item.widget():
                 item.widget().deleteLater()
         self._mapping_combos.clear()
 
         if not self._all_columns:
-            msg = QLabel("Nenhuma coluna encontrada. Verifique se a planilha foi carregada corretamente.")
+            msg = QLabel("Nenhuma Coluna Encontrada. Verifique Se A Planilha Foi Carregada Corretamente.")
             msg.setStyleSheet(f"color: {self.COLORS['bad']}; padding: 12px; background: transparent;")
-            self._map_grid.addWidget(msg, 1, 0, 1, 3)
+            self._map_grid.addWidget(msg, 1, 0, 1, 4)
             return
 
         # Pega amostras (primeira linha não-vazia de cada coluna)
@@ -1345,6 +1477,14 @@ class ImportPlanilhaDialog(QDialog):
             self._map_grid.addWidget(combo, row_i, 2)
             self._mapping_combos[col] = combo
 
+            btn_picker = QPushButton("Escolher...")
+            btn_picker.setToolTip("Abrir Seletor Provisório Em Colunas")
+            btn_picker.clicked.connect(
+                lambda _checked=False, column=col, sample=samples.get(col, ""), target_combo=combo:
+                    self._open_campo_picker(column, sample, target_combo)
+            )
+            self._map_grid.addWidget(btn_picker, row_i, 3)
+
         self._refresh_profile_combo()
 
         # Auto-aplica "Último utilizado" se coincidir com ≥50% das colunas
@@ -1356,6 +1496,15 @@ class ImportPlanilhaDialog(QDialog):
                 return  # pula sugestão automática — perfil já está aplicado
 
         self._apply_auto_mapping()
+
+    def _open_campo_picker(self, column_name: str, sample_value: str, combo: QComboBox) -> None:
+        current_key = str(combo.currentData() or IGNORAR)
+        dialog = _CampoPickerDialog(column_name, sample_value, current_key, self)
+        if dialog.exec() != QDialog.Accepted:
+            return
+        idx = combo.findData(dialog.selected_key)
+        if idx >= 0:
+            combo.setCurrentIndex(idx)
 
     def _apply_auto_mapping(self) -> None:
         used: set[str] = set()
@@ -1398,7 +1547,7 @@ class ImportPlanilhaDialog(QDialog):
             or (self._file_path.stem if self._file_path else "Perfil")
         )
         name, ok = QInputDialog.getText(
-            self, "Salvar Perfil de Mapeamento", "Nome do perfil:", text=default
+            self, "Salvar Perfil De Mapeamento", "Nome Do Perfil:", text=default
         )
         if ok and name.strip():
             self._persist_profile(name.strip())
@@ -1422,7 +1571,7 @@ class ImportPlanilhaDialog(QDialog):
             return
         from PySide6.QtWidgets import QMessageBox
         if (
-            QMessageBox.question(self, "Excluir perfil", f"Excluir o perfil '{name}'?")
+            QMessageBox.question(self, "Excluir Perfil", f"Excluir O Perfil '{name}'?")
             == QMessageBox.Yes
         ):
             del self._profiles[name]
@@ -1446,7 +1595,7 @@ class ImportPlanilhaDialog(QDialog):
         layout.setContentsMargins(24, 16, 24, 16)
         layout.setSpacing(10)
 
-        self._import_status_label = QLabel("Pronto para importar.")
+        self._import_status_label = QLabel("Pronto Para Importar.")
         self._import_status_label.setWordWrap(True)
         layout.addWidget(self._import_status_label)
 
@@ -1469,7 +1618,7 @@ class ImportPlanilhaDialog(QDialog):
         self._import_log = QTextEdit()
         self._import_log.setReadOnly(True)
         self._import_log.setStyleSheet("background: #ffffff; border: none;")
-        self._import_log.setPlaceholderText("Log da importação aparecerá aqui...")
+        self._import_log.setPlaceholderText("Log Da Importação Aparecerá Aqui...")
         self._import_tabs.addTab(self._import_log, "Log")
 
         # Aba de erros com tabela
@@ -1500,7 +1649,7 @@ class ImportPlanilhaDialog(QDialog):
         )
         err_layout.addWidget(self._error_table, 1)
 
-        self._btn_export_errors = QPushButton("Exportar erros (CSV)…")
+        self._btn_export_errors = QPushButton("Exportar Erros (CSV)...")
         self._btn_export_errors.setFixedWidth(190)
         self._btn_export_errors.clicked.connect(self._export_errors)
         self._btn_export_errors.hide()
@@ -1536,7 +1685,7 @@ class ImportPlanilhaDialog(QDialog):
         )
         skip_layout.addWidget(self._skip_table, 1)
 
-        self._btn_export_skipped = QPushButton("Exportar não atualizados (CSV)…")
+        self._btn_export_skipped = QPushButton("Exportar Não Atualizados (CSV)...")
         self._btn_export_skipped.setFixedWidth(230)
         self._btn_export_skipped.clicked.connect(self._export_skipped)
         self._btn_export_skipped.hide()
@@ -1557,23 +1706,23 @@ class ImportPlanilhaDialog(QDialog):
         total_rows = len(self._df) if self._df is not None else 0
 
         lines = [f"<b>Arquivo:</b> {self._file_path.name if self._file_path else '?'}"]
-        lines.append(f"<b>Linhas a processar:</b> {total_rows}")
-        lines.append(f"<b>Campos mapeados:</b> {mapped_count}")
+        lines.append(f"<b>Linhas A Processar:</b> {total_rows}")
+        lines.append(f"<b>Campos Mapeados:</b> {mapped_count}")
         lines.append("")
 
         if "fornecedor_nome" not in mapping:
             lines.append(
-                "<span style='color:#b42318'>⚠ Campo <b>Fornecedor - Nome</b> não mapeado. "
-                "Linhas sem fornecedor serão ignoradas.</span>"
+                "<span style='color:#b42318'>⚠ Campo <b>Fornecedor - Nome</b> Não Mapeado. "
+                "Linhas Sem Fornecedor Serão Ignoradas.</span>"
             )
         if "codigo_fornecedor" not in mapping and "ean" not in mapping:
             lines.append(
                 "<span style='color:#b56b12'>⚠ Nem <b>Cód. Fornecedor</b> nem <b>EAN</b> "
-                "foram mapeados. Produtos podem ser duplicados.</span>"
+                "Foram Mapeados. Produtos Podem Ser Duplicados.</span>"
             )
 
         lines.append("")
-        lines.append("Clique em <b>Importar</b> para iniciar.")
+        lines.append("Clique Em <b>Importar</b> Para Iniciar.")
         self._import_status_label.setText("<br>".join(lines))
         self._import_progress.setValue(0)
         self._import_log.clear()
@@ -1586,14 +1735,14 @@ class ImportPlanilhaDialog(QDialog):
         if step == 0:
             if self._df is None:
                 from PySide6.QtWidgets import QMessageBox
-                QMessageBox.warning(self, "Aguarde", "O arquivo ainda esta sendo carregado. Aguarde e tente novamente.")
+                QMessageBox.warning(self, "Aguarde", "O Arquivo Ainda Está Sendo Carregado. Aguarde E Tente Novamente.")
                 return
             self._stack.setCurrentIndex(1)
             try:
                 self._load_step_mapeamento()
             except Exception as exc:
                 from PySide6.QtWidgets import QMessageBox
-                QMessageBox.critical(self, "Erro ao carregar mapeamento", str(exc))
+                QMessageBox.critical(self, "Erro Ao Carregar Mapeamento", str(exc))
         elif step == 1:
             self._stack.setCurrentIndex(2)
             self._prepare_import_step()
@@ -1614,7 +1763,7 @@ class ImportPlanilhaDialog(QDialog):
                 self._import_tabs.setCurrentIndex(0)
                 self._btn_export_errors.hide()
                 self._btn_export_skipped.hide()
-                self._import_status_label.setText("Pronto para importar.")
+                self._import_status_label.setText("Pronto Para Importar.")
                 self._btn_fechar.hide()
                 self._btn_importar.show()
                 self._btn_importar.setEnabled(True)
@@ -1759,7 +1908,7 @@ class ImportPlanilhaDialog(QDialog):
 
     def _export_errors(self) -> None:
         path, _ = QFileDialog.getSaveFileName(
-            self, "Exportar erros", "erros_importacao.csv",
+            self, "Exportar Erros", "erros_importacao.csv",
             "CSV (*.csv);;Excel (*.xlsx)"
         )
         if not path:
@@ -1784,7 +1933,7 @@ class ImportPlanilhaDialog(QDialog):
             msg = QMessageBox(self)
             msg.setIcon(QMessageBox.Information)
             msg.setWindowTitle("Exportado")
-            msg.setText(f"Arquivo salvo em:\n{path}\n\nDeseja abrir o arquivo?")
+            msg.setText(f"Arquivo Salvo Em:\n{path}\n\nDeseja Abrir O Arquivo?")
             btn_sim = msg.addButton("Sim", QMessageBox.YesRole)
             msg.addButton("Nao", QMessageBox.NoRole)
             msg.exec()
@@ -1793,11 +1942,11 @@ class ImportPlanilhaDialog(QDialog):
                 os.startfile(path)
         except Exception as exc:
             from PySide6.QtWidgets import QMessageBox
-            QMessageBox.critical(self, "Erro ao exportar", str(exc))
+            QMessageBox.critical(self, "Erro Ao Exportar", str(exc))
 
     def _export_skipped(self) -> None:
         path, _ = QFileDialog.getSaveFileName(
-            self, "Exportar não atualizados", "nao_atualizados_importacao.csv",
+            self, "Exportar Não Atualizados", "nao_atualizados_importacao.csv",
             "CSV (*.csv);;Excel (*.xlsx)"
         )
         if not path:
@@ -1822,7 +1971,7 @@ class ImportPlanilhaDialog(QDialog):
             msg = QMessageBox(self)
             msg.setIcon(QMessageBox.Information)
             msg.setWindowTitle("Exportado")
-            msg.setText(f"Arquivo salvo em:\n{path}\n\nDeseja abrir o arquivo?")
+            msg.setText(f"Arquivo Salvo Em:\n{path}\n\nDeseja Abrir O Arquivo?")
             btn_sim = msg.addButton("Sim", QMessageBox.YesRole)
             msg.addButton("Nao", QMessageBox.NoRole)
             msg.exec()
@@ -1831,13 +1980,678 @@ class ImportPlanilhaDialog(QDialog):
                 os.startfile(path)
         except Exception as exc:
             from PySide6.QtWidgets import QMessageBox
-            QMessageBox.critical(self, "Erro ao exportar", str(exc))
+            QMessageBox.critical(self, "Erro Ao Exportar", str(exc))
 
     def _on_import_failed(self, msg: str) -> None:
         self._import_progress.setValue(0)
         self._import_status_label.setText(
             f"<b style='color:{self.COLORS['bad']}'>Falha na importação:</b> {msg}"
         )
+        self._import_log.append(f"ERRO FATAL: {msg}")
+        self._btn_importar.setEnabled(True)
+        self._btn_anterior.setEnabled(True)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Importação de Fornecedores por Planilha
+# ══════════════════════════════════════════════════════════════════════════════
+
+_CAMPOS_FORN_GRUPOS: list[tuple[str, list[tuple[str, str]]]] = [
+    ("Empresa", [
+        ("empresa_nome", "Empresa - Nome"),
+        ("empresa_cnpj", "Empresa - CNPJ"),
+    ]),
+    ("Fornecedor", [
+        ("fornecedor_nome", "Fornecedor - Nome"),
+        ("fornecedor_cnpj", "Fornecedor - CNPJ"),
+        ("fornecedor_uf", "Fornecedor - UF"),
+        ("fornecedor_ie", "Fornecedor - Insc. Estadual"),
+        ("fornecedor_regime", "Fornecedor - Regime Tributário"),
+        ("fornecedor_codigo", "Fornecedor - Código"),
+    ]),
+]
+
+_ALL_CAMPOS_FORN: dict[str, str] = {k: v for _, fields in _CAMPOS_FORN_GRUPOS for k, v in fields}
+
+_SINONIMOS_FORN: dict[str, list[str]] = {
+    "empresa_nome":      ["empresa", "razao social empresa", "nome empresa", "company"],
+    "empresa_cnpj":      ["cnpj empresa", "cnpj_empresa"],
+    "fornecedor_nome":   ["fornecedor", "nome fornecedor", "razao social", "nome", "supplier", "razao"],
+    "fornecedor_cnpj":   ["cnpj forn", "cnpj fornecedor", "insc federal", "cpf cnpj", "cnpj"],
+    "fornecedor_uf":     ["uf", "uf fornecedor", "estado forn", "estado"],
+    "fornecedor_ie":     ["ie", "insc estadual", "ie forn", "inscricao estadual"],
+    "fornecedor_regime": ["regime", "regime tributario", "regime icms", "tributacao"],
+    "fornecedor_codigo": ["codigo fornecedor", "codigo forn", "cod forn", "codigo"],
+}
+
+
+def _auto_map_forn(col_name: str) -> str:
+    clean = _strip_accents(col_name.lower().strip()).replace("_", " ")
+    normalized = re.sub(r"[^a-z0-9 ]", " ", clean)
+    normalized = re.sub(r"\s+", " ", normalized).strip()
+    for campo, sinonimos in _SINONIMOS_FORN.items():
+        for sin in sinonimos:
+            if normalized == sin.replace("_", " "):
+                return campo
+    for campo, sinonimos in _SINONIMOS_FORN.items():
+        for sin in sinonimos:
+            sin_norm = sin.replace("_", " ")
+            if len(sin_norm) >= 4 and re.search(r"\b" + re.escape(sin_norm) + r"\b", normalized):
+                return campo
+    return IGNORAR
+
+
+def _execute_supplier_import(
+    repo: MysqlCadastroRepository,
+    environment: str,
+    default_company_id: int | None,
+    col_mapping: dict[str, str],
+    df: Any,
+    progress_cb: Any,
+) -> dict:
+    stats: dict = {
+        "linhas": len(df),
+        "novos": 0,
+        "atualizados": 0,
+        "sem_alteracao": 0,
+        "ignorados": 0,
+        "empresas_criadas": 0,
+        "erros": [],
+    }
+    total = len(df)
+    seen_empresas: dict[tuple, int] = {}
+
+    def get(row: Any, campo: str) -> str:
+        col = col_mapping.get(campo)
+        if not col:
+            return ""
+        v = row.get(col, "")
+        sv = str(v or "").strip()
+        return "" if sv.lower() in {"nan", "none", ""} else sv
+
+    for idx, row in enumerate(df.to_dict(orient="records")):
+        if idx % 50 == 0:
+            progress_cb(idx, total, f"Processando linha {idx + 1}/{total}...")
+        try:
+            forn_nome = get(row, "fornecedor_nome")
+            if not forn_nome:
+                stats["ignorados"] += 1
+                continue
+
+            emp_nome = get(row, "empresa_nome")
+            emp_cnpj = get(row, "empresa_cnpj")
+
+            if emp_nome:
+                emp_key = (emp_nome.lower(), emp_cnpj)
+                if emp_key not in seen_empresas:
+                    if repo.find_company_id(environment, emp_nome, emp_cnpj) is None:
+                        stats["empresas_criadas"] += 1
+                    seen_empresas[emp_key] = repo.ensure_company(environment, emp_nome, emp_cnpj)
+                empresa_id = seen_empresas[emp_key]
+            elif default_company_id is not None:
+                empresa_id = default_company_id
+            else:
+                stats["ignorados"] += 1
+                continue
+
+            forn_cnpj   = get(row, "fornecedor_cnpj")
+            forn_uf     = get(row, "fornecedor_uf")
+            forn_ie     = get(row, "fornecedor_ie")
+            forn_regime = get(row, "fornecedor_regime") or "LUCRO_REAL_PRESUMIDO"
+            forn_codigo = get(row, "fornecedor_codigo")
+
+            existing_id = repo.find_supplier_id(empresa_id, forn_nome, forn_cnpj)
+            supplier_id = repo.ensure_supplier(
+                empresa_id, forn_nome, forn_cnpj, forn_ie, forn_uf, forn_regime, forn_codigo,
+            )
+            if existing_id is None:
+                stats["novos"] += 1
+            else:
+                stats["atualizados"] += 1
+        except Exception as exc:
+            stats["erros"].append({"linha": idx + 2, "fornecedor": locals().get("forn_nome", ""), "erro": str(exc)})
+
+    progress_cb(total, total, "Finalizando...")
+    return stats
+
+
+class _SupplierImportWorker(QObject):
+    progress = Signal(int, int, str)
+    finished = Signal(dict)
+    failed = Signal(str)
+
+    def __init__(
+        self,
+        repository: MysqlCadastroRepository,
+        environment: str,
+        default_company_id: int | None,
+        col_mapping: dict[str, str],
+        df: Any,
+    ) -> None:
+        super().__init__()
+        self.repository = repository
+        self.environment = environment
+        self.default_company_id = default_company_id
+        self.col_mapping = col_mapping
+        self.df = df
+
+    def run(self) -> None:
+        try:
+            result = _execute_supplier_import(
+                self.repository, self.environment, self.default_company_id,
+                self.col_mapping, self.df, self.progress.emit,
+            )
+            self.finished.emit(result)
+        except Exception as exc:
+            self.failed.emit(str(exc))
+
+
+_PROFILES_FILE_FORN = Path.home() / ".spedams" / "import_profiles_fornecedor.json"
+
+
+def _load_forn_profiles() -> dict[str, dict[str, str]]:
+    if _PROFILES_FILE_FORN.exists():
+        try:
+            return json.loads(_PROFILES_FILE_FORN.read_text(encoding="utf-8"))
+        except Exception:
+            pass
+    return {}
+
+
+def _save_forn_profiles(profiles: dict[str, dict[str, str]]) -> None:
+    _PROFILES_FILE_FORN.parent.mkdir(parents=True, exist_ok=True)
+    _PROFILES_FILE_FORN.write_text(json.dumps(profiles, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+class ImportFornecedorDialog(QDialog):
+    PREVIEW_ROWS = 6
+    COLORS = ImportPlanilhaDialog.COLORS
+
+    def __init__(self, repository: MysqlCadastroRepository, environment: str, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.repository = repository
+        self.environment = environment
+        self._df: Any = None
+        self._all_columns: list[str] = []
+        self._file_path: Path | None = None
+        self._mapping_combos: dict[str, QComboBox] = {}
+        self._thread: QThread | None = None
+        self._worker: _SupplierImportWorker | None = None
+        self._file_load_thread: QThread | None = None
+        self._file_load_worker: _FileLoaderWorker | None = None
+        self._profiles: dict[str, dict[str, str]] = _load_forn_profiles()
+
+        self.setWindowTitle("Importar Planilha De Fornecedores")
+        self.setMinimumSize(900, 600)
+        if parent:
+            self.setStyleSheet(parent.styleSheet())
+        self.resize(1000, 680)
+
+        root = QVBoxLayout(self)
+        root.setContentsMargins(0, 0, 0, 0)
+        root.setSpacing(0)
+
+        self._step_header = self._build_step_header()
+        root.addWidget(self._step_header)
+
+        self._stack = QStackedWidget()
+        root.addWidget(self._stack, 1)
+        self._stack.addWidget(self._build_step_arquivo())
+        self._stack.addWidget(self._build_step_mapeamento())
+        self._stack.addWidget(self._build_step_importar())
+
+        nav = self._build_nav_bar()
+        root.addWidget(nav)
+        self._update_nav()
+
+    def _build_step_header(self) -> QWidget:
+        bar = QFrame()
+        bar.setObjectName("panel")
+        bar.setFixedHeight(52)
+        layout = QHBoxLayout(bar)
+        layout.setContentsMargins(20, 8, 20, 8)
+        layout.setSpacing(0)
+        self._step_labels: list[QLabel] = []
+        for i, text in enumerate(["1. Selecionar Arquivo", "2. Correlacionar Campos", "3. Importar"]):
+            lbl = QLabel(text)
+            lbl.setAlignment(Qt.AlignCenter)
+            lbl.setFixedHeight(36)
+            self._step_labels.append(lbl)
+            layout.addWidget(lbl, 1)
+            if i < 2:
+                sep = QLabel("›")
+                sep.setAlignment(Qt.AlignCenter)
+                sep.setFixedWidth(24)
+                sep.setStyleSheet(f"color: {self.COLORS['muted']}; font-size: 18px;")
+                layout.addWidget(sep)
+        self._highlight_step(0)
+        return bar
+
+    def _highlight_step(self, active: int) -> None:
+        for i, lbl in enumerate(self._step_labels):
+            if i == active:
+                lbl.setStyleSheet(f"color: {self.COLORS['accent']}; font-weight: bold; background: #dbeafe; border-radius: 6px; padding: 4px 12px;")
+            elif i < active:
+                lbl.setStyleSheet(f"color: {self.COLORS['ok']}; padding: 4px 12px;")
+            else:
+                lbl.setStyleSheet(f"color: {self.COLORS['muted']}; padding: 4px 12px;")
+
+    def _build_nav_bar(self) -> QWidget:
+        bar = QFrame()
+        bar.setObjectName("panel")
+        bar.setFixedHeight(52)
+        layout = QHBoxLayout(bar)
+        layout.setContentsMargins(20, 8, 20, 8)
+        layout.setSpacing(8)
+        self._btn_anterior = QPushButton("< Anterior")
+        self._btn_anterior.clicked.connect(self._go_back)
+        self._btn_proximo = QPushButton("Próximo >")
+        self._btn_proximo.setObjectName("primaryButton")
+        self._btn_proximo.clicked.connect(self._go_next)
+        self._btn_importar = QPushButton("Importar")
+        self._btn_importar.setObjectName("primaryButton")
+        self._btn_importar.clicked.connect(self._start_import)
+        self._btn_fechar = QPushButton("Fechar")
+        self._btn_fechar.clicked.connect(self.accept)
+        self._btn_fechar.hide()
+        layout.addStretch()
+        layout.addWidget(self._btn_anterior)
+        layout.addWidget(self._btn_proximo)
+        layout.addWidget(self._btn_importar)
+        layout.addWidget(self._btn_fechar)
+        return bar
+
+    def _update_nav(self) -> None:
+        step = self._stack.currentIndex()
+        self._btn_anterior.setVisible(step > 0)
+        self._btn_proximo.setVisible(step < 2)
+        self._btn_importar.setVisible(step == 2)
+        self._highlight_step(step)
+        if step == 0:
+            self._btn_proximo.setEnabled(self._df is not None)
+
+    def _go_back(self) -> None:
+        idx = self._stack.currentIndex()
+        if idx > 0:
+            self._stack.setCurrentIndex(idx - 1)
+            self._update_nav()
+
+    def _go_next(self) -> None:
+        idx = self._stack.currentIndex()
+        if idx == 0 and self._df is None:
+            return
+        if idx == 1:
+            self._refresh_mapping_rows()
+        self._stack.setCurrentIndex(idx + 1)
+        self._update_nav()
+
+    # ── Passo 1: Arquivo ─────────────────────────────────────────────────────
+
+    def _build_step_arquivo(self) -> QWidget:
+        page = QWidget()
+        page.setStyleSheet(f"background: {self.COLORS['bg']};")
+        layout = QVBoxLayout(page)
+        layout.setContentsMargins(24, 20, 24, 20)
+        layout.setSpacing(16)
+
+        file_group = QGroupBox("Planilha")
+        fg = QGridLayout(file_group)
+        fg.setContentsMargins(12, 12, 12, 12)
+        fg.setSpacing(8)
+        fg.addWidget(QLabel("Arquivo:"), 0, 0)
+        self._file_label = QLabel("Nenhum arquivo selecionado")
+        self._file_label.setObjectName("muted")
+        self._file_label.setWordWrap(True)
+        fg.addWidget(self._file_label, 0, 1)
+        btn_sel = QPushButton("Selecionar...")
+        btn_sel.setFixedWidth(110)
+        btn_sel.clicked.connect(self._select_file)
+        fg.addWidget(btn_sel, 0, 2)
+        fg.addWidget(QLabel("Aba:"), 1, 0)
+        self._sheet_combo = QComboBox()
+        self._sheet_combo.setEnabled(False)
+        self._sheet_combo.currentTextChanged.connect(self._on_sheet_changed)
+        fg.addWidget(self._sheet_combo, 1, 1, 1, 2)
+        hr_widget = QWidget()
+        hr_widget.setStyleSheet("background: transparent;")
+        hr_layout = QHBoxLayout(hr_widget)
+        hr_layout.setContentsMargins(0, 0, 0, 0)
+        self._header_check = QCheckBox("Tem Cabeçalho - Linha:")
+        self._header_check.setChecked(True)
+        self._header_check.stateChanged.connect(self._on_header_check_changed)
+        hr_layout.addWidget(self._header_check)
+        self._header_row_spin = QSpinBox()
+        self._header_row_spin.setRange(0, 20)
+        self._header_row_spin.setValue(0)
+        self._header_row_spin.setFixedWidth(60)
+        self._header_row_spin.valueChanged.connect(self._reload_file)
+        hr_layout.addWidget(self._header_row_spin)
+        hr_layout.addWidget(QLabel("(0 = Primeira Linha)"))
+        hr_layout.addStretch()
+        fg.addWidget(hr_widget, 2, 0, 1, 3)
+        fg.setColumnStretch(1, 1)
+        layout.addWidget(file_group)
+
+        emp_group = QGroupBox("Empresa Destino (Quando Não Mapeada Na Planilha)")
+        eg = QHBoxLayout(emp_group)
+        eg.setContentsMargins(12, 12, 12, 12)
+        eg.addWidget(QLabel("Empresa:"))
+        self._company_combo = QComboBox()
+        self._company_combo.setMinimumWidth(320)
+        self._load_company_combo()
+        eg.addWidget(self._company_combo, 1)
+        layout.addWidget(emp_group)
+
+        preview_group = QGroupBox("Prévia (Primeiras Linhas)")
+        pg = QVBoxLayout(preview_group)
+        pg.setContentsMargins(8, 8, 8, 8)
+        self._preview_table = QTableWidget()
+        self._preview_table.setAlternatingRowColors(True)
+        self._preview_table.setSelectionMode(QAbstractItemView.NoSelection)
+        self._preview_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self._preview_table.verticalHeader().setVisible(False)
+        self._preview_table.setFixedHeight(180)
+        self._preview_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeToContents)
+        pg.addWidget(self._preview_table)
+        layout.addWidget(preview_group, 1)
+
+        self._file_info_label = QLabel("")
+        self._file_info_label.setObjectName("muted")
+        layout.addWidget(self._file_info_label)
+        return page
+
+    def _load_company_combo(self) -> None:
+        self._company_combo.clear()
+        self._company_combo.addItem("(Selecionar por coluna da planilha)", None)
+        try:
+            companies = self.repository.list_companies(self.environment)
+            for c in companies:
+                label = str(c.get("nome") or c.get("cnpj") or "")
+                self._company_combo.addItem(label, int(c["id"]))
+        except Exception:
+            pass
+
+    def _select_file(self) -> None:
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Selecionar Planilha", "",
+            "Planilhas (*.xlsx *.xls *.csv *.ods);;Todos (*)",
+        )
+        if not path:
+            return
+        self._file_path = Path(path)
+        self._file_label.setText(str(self._file_path.name))
+        self._file_label.setStyleSheet(f"color: {self.COLORS['text']};")
+        self._df = None
+        self._all_columns = []
+        self._sheet_combo.blockSignals(True)
+        self._sheet_combo.clear()
+        self._sheet_combo.setEnabled(False)
+        self._sheet_combo.blockSignals(False)
+        self._preview_table.setRowCount(0)
+        self._preview_table.setColumnCount(0)
+        self._update_nav()
+        self._reload_file()
+
+    def _on_sheet_changed(self, _: str) -> None:
+        self._reload_file()
+
+    def _on_header_check_changed(self) -> None:
+        self._header_row_spin.setEnabled(self._header_check.isChecked())
+        if self._file_path:
+            self._reload_file()
+
+    def _reload_file(self) -> None:
+        if not self._file_path:
+            return
+        if self._file_load_thread and self._file_load_thread.isRunning():
+            if self._file_load_worker:
+                self._file_load_worker.cancel()
+            self._file_load_thread.quit()
+            self._file_load_thread.wait(300)
+
+        ext = self._file_path.suffix.lower()
+        sheet: Any = self._sheet_combo.currentText() if self._sheet_combo.isEnabled() else 0
+        if sheet in {"(csv)", ""}:
+            sheet = 0
+        has_header = self._header_check.isChecked()
+        header_row = self._header_row_spin.value() if has_header else None
+        if header_row is None:
+            header_row = 0
+
+        self._file_load_thread = QThread(self)
+        self._file_load_worker = _FileLoaderWorker(
+            self._file_path, sheet, header_row, True, True,
+        )
+        self._file_load_worker.moveToThread(self._file_load_thread)
+        self._file_load_thread.started.connect(self._file_load_worker.run)
+        self._file_load_worker.finished.connect(self._on_file_loaded)
+        self._file_load_worker.failed.connect(lambda e: self._file_info_label.setText(f"Erro: {e}"))
+        self._file_load_thread.start()
+
+    def _on_file_loaded(self, sheet_names: list, header_row: int, df_preview: Any, total_rows: int, df_full: Any) -> None:
+        if self._file_load_thread:
+            self._file_load_thread.quit()
+
+        if sheet_names and not self._sheet_combo.isEnabled():
+            self._sheet_combo.blockSignals(True)
+            self._sheet_combo.clear()
+            for s in sheet_names:
+                self._sheet_combo.addItem(str(s))
+            self._sheet_combo.setEnabled(len(sheet_names) > 1)
+            self._sheet_combo.blockSignals(False)
+
+        self._df = df_full
+        self._all_columns = list(df_full.columns)
+        self._file_info_label.setText(f"{total_rows} linhas • {len(self._all_columns)} colunas")
+
+        self._preview_table.setRowCount(0)
+        self._preview_table.setColumnCount(len(df_preview.columns))
+        self._preview_table.setHorizontalHeaderLabels([str(c) for c in df_preview.columns])
+        for r, row in enumerate(df_preview.to_dict(orient="records")):
+            self._preview_table.insertRow(r)
+            for c, col in enumerate(df_preview.columns):
+                self._preview_table.setItem(r, c, QTableWidgetItem(str(row.get(col, "") or "")))
+
+        self._auto_map_columns()
+        self._update_nav()
+
+    def _auto_map_columns(self) -> None:
+        self._mapping_combos = {}
+        for col in self._all_columns:
+            self._mapping_combos[col] = _auto_map_forn(col)
+
+    # ── Passo 2: Mapeamento ───────────────────────────────────────────────────
+
+    def _build_step_mapeamento(self) -> QWidget:
+        page = QWidget()
+        page.setStyleSheet(f"background: {self.COLORS['bg']};")
+        layout = QVBoxLayout(page)
+        layout.setContentsMargins(16, 12, 16, 12)
+        layout.setSpacing(8)
+
+        # Barra de perfis
+        prof_row = QHBoxLayout()
+        prof_row.addWidget(QLabel("Perfil:"))
+        self._profile_combo = QComboBox()
+        self._profile_combo.setMinimumWidth(200)
+        self._refresh_profile_combo()
+        prof_row.addWidget(self._profile_combo)
+        btn_load_prof = QPushButton("Carregar")
+        btn_load_prof.clicked.connect(self._load_profile)
+        prof_row.addWidget(btn_load_prof)
+        btn_save_prof = QPushButton("Salvar Perfil")
+        btn_save_prof.clicked.connect(self._save_profile)
+        prof_row.addWidget(btn_save_prof)
+        btn_auto = QPushButton("Sugerir Automaticamente")
+        btn_auto.clicked.connect(self._auto_suggest)
+        prof_row.addWidget(btn_auto)
+        prof_row.addStretch()
+        layout.addLayout(prof_row)
+
+        # Tabela de mapeamento
+        self._map_table = QTableWidget()
+        self._map_table.setColumnCount(3)
+        self._map_table.setHorizontalHeaderLabels(["Coluna Da Planilha", "Campo Destino", "Amostra"])
+        self._map_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeToContents)
+        self._map_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.Stretch)
+        self._map_table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeToContents)
+        self._map_table.setAlternatingRowColors(True)
+        self._map_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self._map_table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self._map_table.verticalHeader().setVisible(False)
+        layout.addWidget(self._map_table, 1)
+        return page
+
+    def _refresh_mapping_rows(self) -> None:
+        self._map_table.setRowCount(0)
+        cols = self._all_columns
+        if not cols or self._df is None:
+            return
+        sample_row = self._df.iloc[0].to_dict() if len(self._df) > 0 else {}
+        campo_options = [("Ignorar Coluna", IGNORAR)] + [(v, k) for k, v in _ALL_CAMPOS_FORN.items()]
+        for row_idx, col in enumerate(cols):
+            self._map_table.insertRow(row_idx)
+            self._map_table.setItem(row_idx, 0, QTableWidgetItem(str(col)))
+            combo = _NoScrollCombo()
+            combo.setEditable(True)
+            combo.setInsertPolicy(QComboBox.NoInsert)
+            combo.addItem("Ignorar Coluna", IGNORAR)
+            for label, key in campo_options[1:]:
+                combo.addItem(label, key)
+            mapped = self._mapping_combos.get(col, IGNORAR)
+            for i in range(combo.count()):
+                if combo.itemData(i) == mapped:
+                    combo.setCurrentIndex(i)
+                    break
+            self._map_table.setCellWidget(row_idx, 1, combo)
+            sample = str(sample_row.get(col, "") or "")[:60]
+            self._map_table.setItem(row_idx, 2, QTableWidgetItem(sample))
+
+    def _collect_mapping(self) -> dict[str, str]:
+        mapping: dict[str, str] = {}
+        for r in range(self._map_table.rowCount()):
+            col = self._map_table.item(r, 0).text()
+            combo = self._map_table.cellWidget(r, 1)
+            if combo:
+                key = combo.currentData() or IGNORAR
+                if key != IGNORAR:
+                    mapping[key] = col
+        return mapping
+
+    def _refresh_profile_combo(self) -> None:
+        self._profile_combo.clear()
+        for name in self._profiles:
+            self._profile_combo.addItem(name)
+
+    def _load_profile(self) -> None:
+        name = self._profile_combo.currentText()
+        if name not in self._profiles:
+            return
+        saved = self._profiles[name]
+        self._mapping_combos = {col: saved.get(col, IGNORAR) for col in self._all_columns}
+        self._refresh_mapping_rows()
+
+    def _save_profile(self) -> None:
+        from PySide6.QtWidgets import QInputDialog
+        name, ok = QInputDialog.getText(self, "Salvar Perfil", "Nome do perfil:")
+        if not ok or not name.strip():
+            return
+        mapping = self._collect_mapping()
+        col_to_campo = {col: IGNORAR for col in self._all_columns}
+        for campo, col in mapping.items():
+            col_to_campo[col] = campo
+        self._profiles[name.strip()] = col_to_campo
+        _save_forn_profiles(self._profiles)
+        self._refresh_profile_combo()
+
+    def _auto_suggest(self) -> None:
+        for col in self._all_columns:
+            self._mapping_combos[col] = _auto_map_forn(col)
+        self._refresh_mapping_rows()
+
+    # ── Passo 3: Importar ─────────────────────────────────────────────────────
+
+    def _build_step_importar(self) -> QWidget:
+        page = QWidget()
+        page.setStyleSheet(f"background: {self.COLORS['bg']};")
+        layout = QVBoxLayout(page)
+        layout.setContentsMargins(24, 20, 24, 20)
+        layout.setSpacing(12)
+
+        self._import_progress = QProgressBar()
+        self._import_progress.setRange(0, 100)
+        self._import_progress.setValue(0)
+        layout.addWidget(self._import_progress)
+
+        self._import_status_label = QLabel("Pronto para importar.")
+        self._import_status_label.setWordWrap(True)
+        layout.addWidget(self._import_status_label)
+
+        self._import_log = QTextEdit()
+        self._import_log.setReadOnly(True)
+        self._import_log.setFont(__import__("PySide6.QtGui", fromlist=["QFont"]).QFont("Courier New", 9))
+        layout.addWidget(self._import_log, 1)
+        return page
+
+    def _start_import(self) -> None:
+        if self._df is None:
+            return
+        col_mapping = self._collect_mapping()
+        default_company_id: int | None = self._company_combo.currentData()
+
+        self._btn_importar.setEnabled(False)
+        self._btn_anterior.setEnabled(False)
+        self._import_log.clear()
+        self._import_progress.setValue(0)
+        self._import_status_label.setText("Importando...")
+
+        self._thread = QThread(self)
+        self._worker = _SupplierImportWorker(
+            self.repository, self.environment, default_company_id, col_mapping, self._df,
+        )
+        self._worker.moveToThread(self._thread)
+        self._thread.started.connect(self._worker.run)
+        self._worker.progress.connect(self._on_progress)
+        self._worker.finished.connect(self._on_finished)
+        self._worker.failed.connect(self._on_failed)
+        self._thread.start()
+
+    def _on_progress(self, current: int, total: int, msg: str) -> None:
+        if total > 0:
+            self._import_progress.setValue(int(current / total * 100))
+        self._import_status_label.setText(msg)
+
+    def _on_finished(self, stats: dict) -> None:
+        if self._thread:
+            self._thread.quit()
+        self._import_progress.setValue(100)
+        lines = [
+            f"Linhas na planilha: {stats['linhas']}",
+            f"Fornecedores novos: {stats['novos']}",
+            f"Atualizados: {stats['atualizados']}",
+            f"Ignorados (sem nome): {stats['ignorados']}",
+            f"Empresas criadas: {stats['empresas_criadas']}",
+            f"Erros: {len(stats['erros'])}",
+        ]
+        if stats["erros"]:
+            lines.append("")
+            lines.append("=== ERROS ===")
+            for e in stats["erros"][:30]:
+                lines.append(f"  Linha {e['linha']} [{e['fornecedor']}]: {e['erro']}")
+        self._import_log.setText("\n".join(lines))
+        self._import_status_label.setText(
+            f"<b style='color:{self.COLORS['ok']}'>Concluído.</b> "
+            f"{stats['novos']} novos • {stats['atualizados']} atualizados • {len(stats['erros'])} erros"
+        )
+        self._btn_importar.setEnabled(True)
+        self._btn_anterior.setEnabled(True)
+        self._btn_fechar.show()
+
+    def _on_failed(self, msg: str) -> None:
+        if self._thread:
+            self._thread.quit()
+        self._import_progress.setValue(0)
+        self._import_status_label.setText(f"<b style='color:{self.COLORS['bad']}'>Falha:</b> {msg}")
         self._import_log.append(f"ERRO FATAL: {msg}")
         self._btn_importar.setEnabled(True)
         self._btn_anterior.setEnabled(True)

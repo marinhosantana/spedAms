@@ -46,6 +46,26 @@ def read_sped_file(
     current_participant_code = ""
     current_participant_name = ""
     current_participant_tax_id = ""
+    # C500 — NF de Energia Elétrica (modelo 06/66)
+    cur_c500_op = ""
+    cur_c500_doc = ""
+    cur_c500_key = ""
+    cur_c500_date = ""
+    cur_c500_series = ""
+    cur_c500_model = ""
+    cur_c500_part_code = ""
+    cur_c500_part_name = ""
+    cur_c500_part_tax_id = ""
+    # D700 — CT-e / Conhecimento de Transporte (modelo 62)
+    cur_d700_op = ""
+    cur_d700_doc = ""
+    cur_d700_key = ""
+    cur_d700_date = ""
+    cur_d700_series = ""
+    cur_d700_model = ""
+    cur_d700_part_code = ""
+    cur_d700_part_name = ""
+    cur_d700_part_tax_id = ""
 
     with file_path.open("r", encoding="latin-1") as sped_file:
         for raw_line in sped_file:
@@ -93,6 +113,152 @@ def read_sped_file(
                 participant_data = participants.get(current_participant_code, {})
                 current_participant_name = participant_data.get("name", "")
                 current_participant_tax_id = participant_data.get("tax_id", "")
+                continue
+
+            if register == "C500":
+                ind_oper = get_field(fields, 2)
+                cur_c500_op = "Entrada" if ind_oper == "0" else "Saida" if ind_oper == "1" else ""
+                cur_c500_part_code = get_field(fields, 4)
+                cur_c500_model = get_field(fields, 5)
+                cur_c500_series = get_field(fields, 7)
+                cur_c500_doc = get_field(fields, 10)
+                cur_c500_date = get_field(fields, 12)
+                raw_key = get_field(fields, 27) if len(fields) > 27 else ""
+                cur_c500_key = normalize_document_key(raw_key) if raw_key else ""
+                _c500_part = participants.get(cur_c500_part_code, {})
+                cur_c500_part_name = _c500_part.get("name", "")
+                cur_c500_part_tax_id = _c500_part.get("tax_id", "")
+                continue
+
+            if register == "C590":
+                _cst = get_field(fields, 2)
+                _cfop = get_field(fields, 3)
+                _aliq = parse_rate(get_field(fields, 4)) or Decimal("0")
+                _vl_opr = parse_decimal(get_field(fields, 5))
+                _bc = parse_decimal(get_field(fields, 6))
+                _vl_icms = parse_decimal(get_field(fields, 7))
+                _bc_st = parse_decimal(get_field(fields, 8))
+                _vl_st = parse_decimal(get_field(fields, 9))
+                _vl_red = parse_decimal(get_field(fields, 10))
+                c190_rows.append({
+                    "operation_type": cur_c500_op,
+                    "document_number": cur_c500_doc,
+                    "document_key": cur_c500_key,
+                    "document_date": cur_c500_date,
+                    "cst_icms": _cst,
+                    "cfop": _cfop,
+                    "icms_rate": _aliq,
+                    "total_operation_value": _vl_opr,
+                    "base_icms": _bc,
+                    "icms_value": _vl_icms,
+                    "base_icms_st": _bc_st,
+                    "icms_st_value": _vl_st,
+                    "reduction_value": _vl_red,
+                    "ipi_value": Decimal("0"),
+                })
+                detailed_sales.append({
+                    "operation_type": cur_c500_op,
+                    "document_number": cur_c500_doc,
+                    "document_key": cur_c500_key,
+                    "document_date": cur_c500_date,
+                    "document_series": cur_c500_series,
+                    "document_model": cur_c500_model,
+                    "document_tax_id": extract_tax_id_from_document_key(cur_c500_key) or cur_c500_part_tax_id,
+                    "participant_code": cur_c500_part_code,
+                    "participant_name": cur_c500_part_name,
+                    "participant_tax_id": cur_c500_part_tax_id,
+                    "item_number": "",
+                    "code": "_NF_ENERGIA",
+                    "description": "ENERGIA ELETRICA - NF-e mod.66",
+                    "ncm": "",
+                    "cest": "",
+                    "cst_icms": _cst,
+                    "cfop": _cfop,
+                    "quantity": Decimal("0"),
+                    "icms_rate": _aliq,
+                    "sale_value": _vl_opr,
+                    "discount_value": Decimal("0"),
+                    "base_icms": _bc,
+                    "icms_value": _vl_icms,
+                    "base_icms_st": _bc_st,
+                    "icms_st_rate": Decimal("0"),
+                    "icms_st_value": _vl_st,
+                    "base_ipi": Decimal("0"),
+                    "ipi_rate": Decimal("0"),
+                    "ipi_value": Decimal("0"),
+                })
+                continue
+
+            if register == "D700":
+                ind_oper = get_field(fields, 2)
+                cur_d700_op = "Entrada" if ind_oper == "0" else "Saida" if ind_oper == "1" else ""
+                cur_d700_part_code = get_field(fields, 4)
+                cur_d700_model = get_field(fields, 5)
+                cur_d700_series = get_field(fields, 7)
+                cur_d700_doc = get_field(fields, 8)
+                cur_d700_date = get_field(fields, 10)
+                raw_d7_key = get_field(fields, 22) if len(fields) > 22 else ""
+                cur_d700_key = normalize_document_key(raw_d7_key) if raw_d7_key else ""
+                _d700_part = participants.get(cur_d700_part_code, {})
+                cur_d700_part_name = _d700_part.get("name", "")
+                cur_d700_part_tax_id = _d700_part.get("tax_id", "")
+                continue
+
+            if register == "D730":
+                _cst = get_field(fields, 2)
+                _cfop = get_field(fields, 3)
+                _aliq = parse_rate(get_field(fields, 4)) or Decimal("0")
+                _vl_opr = parse_decimal(get_field(fields, 5))
+                _bc = parse_decimal(get_field(fields, 6))
+                _vl_icms = parse_decimal(get_field(fields, 7))
+                _vl_red = parse_decimal(get_field(fields, 8))
+                c190_rows.append({
+                    "operation_type": cur_d700_op,
+                    "document_number": cur_d700_doc,
+                    "document_key": cur_d700_key,
+                    "document_date": cur_d700_date,
+                    "cst_icms": _cst,
+                    "cfop": _cfop,
+                    "icms_rate": _aliq,
+                    "total_operation_value": _vl_opr,
+                    "base_icms": _bc,
+                    "icms_value": _vl_icms,
+                    "base_icms_st": Decimal("0"),
+                    "icms_st_value": Decimal("0"),
+                    "reduction_value": _vl_red,
+                    "ipi_value": Decimal("0"),
+                })
+                detailed_sales.append({
+                    "operation_type": cur_d700_op,
+                    "document_number": cur_d700_doc,
+                    "document_key": cur_d700_key,
+                    "document_date": cur_d700_date,
+                    "document_series": cur_d700_series,
+                    "document_model": cur_d700_model,
+                    "document_tax_id": extract_tax_id_from_document_key(cur_d700_key) or cur_d700_part_tax_id,
+                    "participant_code": cur_d700_part_code,
+                    "participant_name": cur_d700_part_name,
+                    "participant_tax_id": cur_d700_part_tax_id,
+                    "item_number": "",
+                    "code": "_CT_E_TRANSPORTE",
+                    "description": "SERVICO TRANSPORTE - CT-e mod.62",
+                    "ncm": "",
+                    "cest": "",
+                    "cst_icms": _cst,
+                    "cfop": _cfop,
+                    "quantity": Decimal("0"),
+                    "icms_rate": _aliq,
+                    "sale_value": _vl_opr,
+                    "discount_value": Decimal("0"),
+                    "base_icms": _bc,
+                    "icms_value": _vl_icms,
+                    "base_icms_st": Decimal("0"),
+                    "icms_st_rate": Decimal("0"),
+                    "icms_st_value": Decimal("0"),
+                    "base_ipi": Decimal("0"),
+                    "ipi_rate": Decimal("0"),
+                    "ipi_value": Decimal("0"),
+                })
                 continue
 
             if register == "C190":
@@ -333,17 +499,18 @@ def read_sped_file(
 
 def read_sped_0200_products(
     file_path: Path,
-) -> tuple[str, str, str, str, list[dict], dict[str, list[dict]]]:
+) -> tuple[str, str, str, str, list[dict], dict[str, list[dict]], set[str]]:
     """
     Le um arquivo SPED EFD fiscal em uma unica passagem e extrai:
     - CNPJ e nome da empresa (registro 0000)
     - Periodo inicio e fim (registro 0000)
     - Lista de produtos do registro 0200
     - Mapa produto->fornecedores de entrada (via 0150/C100/C170)
+    - Conjunto de codigos de produto que aparecem em C170 (entradas ou saidas)
 
-    Retorna: (cnpj, nome, periodo_inicio, periodo_fim, produtos, entry_suppliers_by_product)
+    Retorna: (cnpj, nome, periodo_inicio, periodo_fim, produtos, entry_suppliers_by_product, c170_codes)
       entry_suppliers_by_product: {cod_produto: [{"nome": ..., "cnpj": ...}, ...]}
-      Cada lista contem os fornecedores distintos que deram entrada nesse produto.
+      c170_codes: codigos que tiveram lancamentos C170 no periodo
     """
     company_cnpj = ""
     company_name = ""
@@ -353,6 +520,7 @@ def read_sped_0200_products(
     participants: dict[str, dict] = {}
     entry_suppliers_by_product: dict[str, list[dict]] = {}
     seen_supplier_per_product: dict[str, set[str]] = {}
+    c170_codes: set[str] = set()
 
     current_is_entry = False
     current_participant_code = ""
@@ -397,18 +565,20 @@ def read_sped_0200_products(
                 current_participant_code = get_field(fields, 4)
                 continue
 
-            if register == "C170" and current_is_entry:
+            if register == "C170":
                 prod_code = get_field(fields, 3)
                 if not prod_code:
                     continue
-                participant = participants.get(current_participant_code, {})
-                sup_cnpj = participant.get("cnpj", "")
-                sup_nome = participant.get("nome", current_participant_code)
-                seen_key = f"{sup_cnpj}|{sup_nome}"
-                if seen_key not in seen_supplier_per_product.setdefault(prod_code, set()):
-                    seen_supplier_per_product[prod_code].add(seen_key)
-                    entry_suppliers_by_product.setdefault(prod_code, []).append(
-                        {"nome": sup_nome, "cnpj": sup_cnpj}
-                    )
+                c170_codes.add(prod_code)
+                if current_is_entry:
+                    participant = participants.get(current_participant_code, {})
+                    sup_cnpj = participant.get("cnpj", "")
+                    sup_nome = participant.get("nome", current_participant_code)
+                    seen_key = f"{sup_cnpj}|{sup_nome}"
+                    if seen_key not in seen_supplier_per_product.setdefault(prod_code, set()):
+                        seen_supplier_per_product[prod_code].add(seen_key)
+                        entry_suppliers_by_product.setdefault(prod_code, []).append(
+                            {"nome": sup_nome, "cnpj": sup_cnpj}
+                        )
 
-    return company_cnpj, company_name, periodo_inicio, periodo_fim, products, entry_suppliers_by_product
+    return company_cnpj, company_name, periodo_inicio, periodo_fim, products, entry_suppliers_by_product, c170_codes

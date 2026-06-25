@@ -7,6 +7,27 @@ Este projeto agora suporta dois ambientes:
 
 O ambiente e escolhido pela variavel `SPED_ENV`.
 
+## Regra pratica de uso
+
+Use `dev` quando estiver testando qualquer mudanca nova, ajuste de tela,
+importacao experimental, validacao com arquivo piloto ou conferencia que ainda
+nao foi aprovada. O `dev` deve apontar para o banco `sped_icms_dev`, separado do
+banco real.
+
+Use `prod` quando for trabalhar com dados reais e rotina ja validada. O `prod`
+deve apontar para o banco `sped_icms`, que e o ambiente estavel de uso.
+
+Em caso de duvida, abra primeiro o `dev`. So use `prod` depois que o teste no
+`dev` estiver conferido.
+
+Resumo simples:
+
+- Testar, mexer, validar ou quebrar sem medo: `dev`.
+- Usar de verdade com dados oficiais/rotina aprovada: `prod`.
+- Se a janela mostrar `[DEV]`, voce esta no ambiente de teste.
+- Se nao mostrar `[DEV]`, confirme na tela de configuracao antes de tratar como
+  producao.
+
 ## Organizacao dos arquivos de ambiente
 
 Os arquivos de apoio ficam separados para nao misturar com o codigo principal:

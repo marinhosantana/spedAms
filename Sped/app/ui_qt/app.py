@@ -107,6 +107,104 @@ COLORS = {
 
 CATALOG_IMPORT_POPUP_ROW_LIMIT = 2000
 
+USER_PERMISSION_GROUPS: tuple[tuple[str, tuple[tuple[str, str], ...]], ...] = (
+    (
+        "Consultas",
+        (
+            ("dashboard", "Dashboard"),
+            ("icms_ipi_entradas", "Icms/Ipi Entradas"),
+            ("icms_ipi_saidas", "Icms/Ipi Saidas"),
+            ("pis_cofins_entradas", "Pis/Cofins Entradas"),
+            ("pis_cofins_saidas", "Pis/Cofins Saidas"),
+            ("xml", "Xml"),
+            ("sped_xml", "Sped X Xml"),
+            ("analise_entrada_saida", "Analise Entrada E Saida"),
+        ),
+    ),
+    (
+        "Cadastros",
+        (
+            ("empresas", "Empresas"),
+            ("fornecedores", "Fornecedores"),
+            ("classificacao_produto", "Classificacao Do Produto"),
+            ("produtos", "Produtos"),
+            ("ncm", "Ncm"),
+            ("limpeza_duplicados", "Limpeza Duplicados"),
+        ),
+    ),
+    (
+        "Sistema",
+        (
+            ("regras_dinamicas", "Regras Dinamicas"),
+            ("speds_arquivados", "Speds Arquivados"),
+            ("importacao_xml_cadastros", "Importacao Xml Cadastros"),
+            ("usuarios_permissoes", "Usuarios E Permissoes"),
+            ("configuracoes", "Configuracoes"),
+            ("extrair_chave_nfe", "Extrair Chave Nfe"),
+        ),
+    ),
+)
+
+
+class LoginDialog(QDialog):
+    def __init__(self, app_title: str, environment: str, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Acesso Ao Sistema")
+        self.setModal(True)
+        self.resize(420, 240)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(18, 18, 18, 18)
+        layout.setSpacing(10)
+
+        title = QLabel(app_title)
+        title.setObjectName("sectionTitle")
+        layout.addWidget(title)
+
+        env_label = QLabel(f"Ambiente: {environment}")
+        env_label.setObjectName("muted")
+        layout.addWidget(env_label)
+
+        self.login_input = QLineEdit()
+        self.login_input.setPlaceholderText("Login")
+        self.password_input = QLineEdit()
+        self.password_input.setPlaceholderText("Senha")
+        self.password_input.setEchoMode(QLineEdit.Password)
+        self.message_label = QLabel("")
+        self.message_label.setObjectName("muted")
+
+        form = QGridLayout()
+        form.setHorizontalSpacing(8)
+        form.setVerticalSpacing(8)
+        form.addWidget(QLabel("Usuario"), 0, 0)
+        form.addWidget(self.login_input, 0, 1)
+        form.addWidget(QLabel("Senha"), 1, 0)
+        form.addWidget(self.password_input, 1, 1)
+        layout.addLayout(form)
+        layout.addWidget(self.message_label)
+
+        actions = QHBoxLayout()
+        actions.addStretch()
+        cancel_button = QPushButton("Cancelar")
+        cancel_button.setAutoDefault(False)
+        cancel_button.setDefault(False)
+        cancel_button.clicked.connect(self.reject)
+        enter_button = QPushButton("Entrar")
+        enter_button.setObjectName("primaryButton")
+        enter_button.setAutoDefault(True)
+        enter_button.setDefault(True)
+        enter_button.clicked.connect(self.accept)
+        actions.addWidget(cancel_button)
+        actions.addWidget(enter_button)
+        layout.addLayout(actions)
+
+        self.login_input.setText("admin")
+        self.password_input.setFocus()
+        self.password_input.returnPressed.connect(self.accept)
+
+    def credentials(self) -> tuple[str, str]:
+        return self.login_input.text().strip(), self.password_input.text()
+
 
 class CompareWorker(QObject):
     finished = Signal(list, list, list, dict, str, str, str)
@@ -542,13 +640,31 @@ class QtSpedApp(QMainWindow):
         self.resize(*self.initial_window_size(1360, 820))
         self.apply_styles()
         self.build_shell()
+        self.current_user: dict[str, object] | None = None
+        self.login_cancelled = False
+        self.ensure_default_admin_user()
         self.show_page(0, "Dashboard")
+
+    def authenticate_on_startup(self) -> bool:
+        if self.show_login_dialog():
+            self.show_page(0, "Dashboard")
+            self.showMaximized()
+            self.raise_()
+            self.activateWindow()
+            return True
+        self.login_cancelled = True
+        return False
 
     def get_app_default_config(self) -> dict[str, str]:
         return dict(APP_DEFAULT_CONFIG)
 
     def get_mysql_default_config(self) -> dict[str, str]:
-        return dict(MYSQL_DEFAULT_CONFIG)
+        config = dict(MYSQL_DEFAULT_CONFIG)
+        if self.environment == "dev":
+            config["database"] = "sped_icms_dev"
+        elif self.environment == "prod":
+            config["database"] = "sped_icms"
+        return config
 
     def _compute_scale(self) -> float:
         screen = QApplication.primaryScreen()
@@ -622,6 +738,13 @@ class QtSpedApp(QMainWindow):
                 background: #203041;
                 color: #ffffff;
             }}
+            QScrollArea#navScroll {{
+                background: transparent;
+                border: 0;
+            }}
+            QScrollArea#navScroll QWidget {{
+                background: transparent;
+            }}
             QPushButton#sidebarToggle {{
                 background: #203041;
                 color: #ffffff;
@@ -638,6 +761,20 @@ class QtSpedApp(QMainWindow):
                 color: {COLORS["text"]};
                 font-size: {s(24)}px;
                 font-weight: 750;
+            }}
+            QLabel#envBadgeDev {{
+                background: #274766;
+                color: #ffffff;
+                border-radius: {s(6)}px;
+                padding: {s(7)}px {s(8)}px;
+                font-weight: 800;
+            }}
+            QLabel#envBadgeProd {{
+                background: #8f1d2c;
+                color: #ffffff;
+                border-radius: {s(6)}px;
+                padding: {s(7)}px {s(8)}px;
+                font-weight: 900;
             }}
             QLabel#muted {{
                 color: {COLORS["muted"]};
@@ -898,8 +1035,9 @@ class QtSpedApp(QMainWindow):
         sidebar.setObjectName("sidebar")
         sidebar.setFixedWidth(self._s(230))
         self.sidebar = sidebar
-        self.sidebar_expanded_width = self._s(230)
-        self.sidebar_collapsed_width = self._s(48)
+        self.sidebar_expanded_width = self._s(260)
+        self.sidebar_collapsed_width = self._s(76)
+        self.sidebar_collapsed = False
         nav_layout = QVBoxLayout(sidebar)
         nav_layout.setContentsMargins(self._s(6), self._s(10), self._s(6), self._s(10))
         nav_layout.setSpacing(self._s(4))
@@ -915,16 +1053,26 @@ class QtSpedApp(QMainWindow):
         sidebar_content_layout.setSpacing(self._s(4))
         brand = QLabel(self.app_home_title)
         brand.setObjectName("brand")
+        brand.setWordWrap(True)
+        self.sidebar_brand_label = brand
         sidebar_content_layout.addWidget(brand)
-        sidebar_content_layout.addSpacing(self._s(12))
+        env_badge = QLabel()
+        env_badge.setAlignment(Qt.AlignCenter)
+        env_badge.setObjectName("envBadgeDev" if self.environment == "dev" else "envBadgeProd")
+        env_badge.setToolTip(f"Ambiente atual: {self.environment}")
+        self.sidebar_env_label = env_badge
+        sidebar_content_layout.addWidget(env_badge)
+        sidebar_content_layout.addSpacing(self._s(10))
 
         self.nav_buttons: list[QPushButton] = []
         self.nav_page_indices: list[int] = []
+        self.nav_button_entries: list[tuple[QPushButton, str, int, str]] = []
         self.nav_group_buttons: dict[str, QPushButton] = {}
         self.nav_group_containers: dict[str, QWidget] = {}
+        self.nav_page_groups: dict[int, str] = {}
         nav_groups = (
             (
-                "Consultas",
+                "Operacao Fiscal",
                 (
                     ("Dashboard", 0),
                     ("ICMS/IPI Entradas", 1),
@@ -934,27 +1082,28 @@ class QtSpedApp(QMainWindow):
                     ("XML", 5),
                     ("SPED x XML", 6),
                     ("Analise Entrada e Saida", 17),
+                    ("Extrair chave NF-e", 16),
                 ),
             ),
             (
-                "Cadastros",
+                "Cadastros e Regras",
                 (
                     ("Empresas", 9),
                     ("Fornecedores", 10),
                     ("Classificacao do Produto", 11),
                     ("Produtos", 12),
                     ("NCM", 18),
+                    ("Importacao XML Cadastros", 13),
                     ("Limpeza Duplicados", 15),
+                    ("Regras Dinamicas", 7),
                 ),
             ),
             (
-                "Sistema",
+                "Arquivo e Administracao",
                 (
-                    ("Regras Dinamicas", 7),
                     ("SPEDs Arquivados", 8),
-                    ("Importacao XML Cadastros", 13),
+                    ("Usuarios E Permissoes", 19),
                     ("Configuracoes", 14),
-                    ("Extrair chave NFe", 16),
                 ),
             ),
         )
@@ -962,13 +1111,14 @@ class QtSpedApp(QMainWindow):
             group_button = QPushButton(f"> {group_title}")
             group_button.setObjectName("navGroup")
             group_button.setCheckable(True)
-            group_button.setChecked(group_title == "Consultas")
+            group_button.setToolTip(group_title)
+            group_button.setChecked(group_title == "Operacao Fiscal")
             group_button.clicked.connect(lambda checked=False, current=group_title: self.toggle_nav_group(current))
             sidebar_content_layout.addWidget(group_button)
             self.nav_group_buttons[group_title] = group_button
 
             group_container = QWidget()
-            group_container.setVisible(group_title == "Consultas")
+            group_container.setVisible(group_title == "Operacao Fiscal")
             group_layout = QVBoxLayout(group_container)
             group_layout.setContentsMargins(self._s(8), 0, 0, 0)
             group_layout.setSpacing(self._s(4))
@@ -976,17 +1126,29 @@ class QtSpedApp(QMainWindow):
                 button = QPushButton(title)
                 button.setObjectName("navButton")
                 button.setCheckable(True)
+                button.setToolTip(title)
                 button.clicked.connect(lambda _checked=False, current=index, label=title: self.show_page(current, label))
                 group_layout.addWidget(button)
                 self.nav_buttons.append(button)
                 self.nav_page_indices.append(index)
+                self.nav_button_entries.append((button, title, index, group_title))
+                self.nav_page_groups[index] = group_title
             sidebar_content_layout.addWidget(group_container)
             self.nav_group_containers[group_title] = group_container
         sidebar_content_layout.addStretch()
-        nav_layout.addWidget(self.sidebar_content, 1)
+        sidebar_scroll = QScrollArea()
+        sidebar_scroll.setObjectName("navScroll")
+        sidebar_scroll.setWidgetResizable(True)
+        sidebar_scroll.setFrameShape(QFrame.NoFrame)
+        sidebar_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        sidebar_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        sidebar_scroll.setWidget(self.sidebar_content)
+        nav_layout.addWidget(sidebar_scroll, 1)
+        self.sidebar_scroll = sidebar_scroll
         shell.addWidget(sidebar)
         for group_title, container in self.nav_group_containers.items():
             self.set_nav_group_visible(group_title, container.isVisible())
+        self.update_sidebar_mode_labels()
 
         content = QWidget()
         content_layout = QVBoxLayout(content)
@@ -1021,6 +1183,7 @@ class QtSpedApp(QMainWindow):
             self.build_nfe_key_extract_page(),
             self.build_entry_exit_page(),
             self.build_catalog_ncm_page(),
+            self.build_user_permissions_page(),
         )
         for page in pages:
             self.stack.addWidget(self.make_scrollable_page(page))
@@ -1040,7 +1203,9 @@ class QtSpedApp(QMainWindow):
             self.page_title.setText(title)
             for button_index, button in enumerate(self.nav_buttons):
                 button.setChecked(self.nav_page_indices[button_index] == index)
-            self.set_sidebar_collapsed(True)
+            active_group = self.nav_page_groups.get(index)
+            if active_group:
+                self.set_nav_group_visible(active_group, True)
             if title == "SPEDs Arquivados":
                 self.refresh_archives()
             if title in {"Empresas", "Fornecedores", "Classificacao do Produto"}:
@@ -1049,7 +1214,7 @@ class QtSpedApp(QMainWindow):
                 QTimer.singleShot(100, self.start_refresh_product_page_fast)
             if title == "Limpeza Duplicados":
                 self.refresh_duplicates_cleanup_page()
-            if title == "Consulta Saidas":
+            if title == "ICMS/IPI Saidas":
                 self.sync_sale_page_with_entry_cache()
             if title != "Produtos":
                 self.statusBar().showMessage(f"{title} carregada.")
@@ -1072,12 +1237,14 @@ class QtSpedApp(QMainWindow):
             self.refresh_sale_table()
 
     def toggle_sidebar(self) -> None:
-        self.set_sidebar_collapsed(self.sidebar_content.isVisible())
+        self.set_sidebar_collapsed(not self.sidebar_collapsed)
 
     def set_sidebar_collapsed(self, collapsed: bool) -> None:
-        self.sidebar_content.setVisible(not collapsed)
+        self.sidebar_collapsed = collapsed
         self.sidebar.setFixedWidth(self.sidebar_collapsed_width if collapsed else self.sidebar_expanded_width)
         self.sidebar_toggle_button.setText(">" if collapsed else "<")
+        self.sidebar_toggle_button.setToolTip("Expandir menu" if collapsed else "Recolher menu")
+        self.update_sidebar_mode_labels()
 
     def toggle_nav_group(self, group_title: str) -> None:
         container = self.nav_group_containers.get(group_title)
@@ -1092,7 +1259,29 @@ class QtSpedApp(QMainWindow):
             return
         container.setVisible(visible)
         button.setChecked(visible)
-        button.setText(f"v {group_title}" if visible else f"> {group_title}")
+        prefix = "v" if visible else ">"
+        label = self.compact_nav_label(group_title) if getattr(self, "sidebar_collapsed", False) else group_title
+        button.setText(f"{prefix} {label}")
+
+    def compact_nav_label(self, title: str) -> str:
+        words = [word for word in title.replace("/", " ").replace("-", " ").split() if word.lower() not in {"e", "de", "do", "da"}]
+        if not words:
+            return title[:3].upper()
+        if len(words) == 1:
+            return words[0][:3].upper()
+        return "".join(word[0].upper() for word in words)[:4]
+
+    def update_sidebar_mode_labels(self) -> None:
+        collapsed = getattr(self, "sidebar_collapsed", False)
+        if hasattr(self, "sidebar_brand_label"):
+            self.sidebar_brand_label.setVisible(not collapsed)
+        if hasattr(self, "sidebar_env_label"):
+            self.sidebar_env_label.setText(self.environment.upper() if collapsed else f"AMBIENTE {self.environment.upper()}")
+        for group_title, container in getattr(self, "nav_group_containers", {}).items():
+            self.set_nav_group_visible(group_title, container.isVisible())
+        for button, title, _index, _group_title in getattr(self, "nav_button_entries", []):
+            button.setText(self.compact_nav_label(title) if collapsed else title)
+            button.setToolTip(title)
 
     def build_dashboard_page(self) -> QWidget:
         page = QWidget()
@@ -1332,8 +1521,20 @@ class QtSpedApp(QMainWindow):
         self.company_page_table.itemSelectionChanged.connect(self.handle_company_page_select)
         return page
 
+    def open_supplier_import_dialog(self) -> None:
+        from app.ui_qt.import_planilha import ImportFornecedorDialog
+        dlg = ImportFornecedorDialog(self.mysql_repo, self.environment, self)
+        dlg.exec()
+        self.refresh_current_catalog_page()
+
     def build_catalog_supplier_page(self) -> QWidget:
         page = self.create_single_catalog_page("Fornecedores")
+        header_panel = page.layout().itemAt(0).widget()
+        if header_panel is not None and header_panel.layout() is not None:
+            header_panel.layout().insertWidget(
+                header_panel.layout().count() - 1,
+                self.create_button("Importar Planilha", self.open_supplier_import_dialog),
+            )
         self.supplier_page_fields = self.create_line_fields(("id", "nome", "cnpj", "inscricao_estadual", "uf", "codigo", "regime_tributario", "observacao"))
         self.supplier_page_company_combo = QComboBox()
         self.supplier_page_regime_combo = QComboBox()
@@ -1708,13 +1909,13 @@ class QtSpedApp(QMainWindow):
         form_layout.addLayout(form)
         form_layout.addStretch()
         self.product_page_tabs.addTab(form_tab, "Cadastro / Edicao")
-        self.product_page_tabs.addTab(self._build_sped_catalog_check_tab(), "Conferencia SPED x Cadastro")
+        self.product_page_tabs.addTab(self._build_sped_catalog_check_tab(), "Conferência SPED x Cadastro")
         page.layout().addWidget(self.product_page_tabs, 1)
         self.product_page_table.selectionModel().selectionChanged.connect(lambda _selected, _deselected: self.handle_product_page_select())
         return page
 
     # ------------------------------------------------------------------
-    # Conferencia SPED x Cadastro
+    # Conferência SPED x Cadastro
     # ------------------------------------------------------------------
     def _build_sped_catalog_check_tab(self) -> QWidget:
         tab = QWidget()
@@ -1722,7 +1923,7 @@ class QtSpedApp(QMainWindow):
         layout.setContentsMargins(10, 10, 10, 10)
         layout.setSpacing(8)
 
-        title = QLabel("Conferencia: Produtos do SPED 0200 x Cadastro de Produtos")
+        title = QLabel("Conferência: Produtos C170 do SPED x Cadastro de Produtos")
         title.setObjectName("sectionTitle")
         layout.addWidget(title)
 
@@ -1735,6 +1936,7 @@ class QtSpedApp(QMainWindow):
         file_row.addWidget(self.create_button("Selecionar", self._select_sped_check_file))
         file_row.addWidget(self.create_button("Gerar Relatorio", self.run_sped_catalog_check, primary=True))
         file_row.addWidget(self.create_button("Exportar Excel", self.export_sped_catalog_check))
+        file_row.addWidget(self.create_button("Exportar Modelo Produto", self.export_sped_check_modelo_produto))
         layout.addLayout(file_row)
 
         self.sped_check_info_label = QLabel("")
@@ -1744,7 +1946,7 @@ class QtSpedApp(QMainWindow):
         metrics_row = QHBoxLayout()
         self.sped_check_metric_labels: dict[str, QLabel] = {}
         for key, label in (
-            ("total", "Total 0200"),
+            ("total", "Produtos C170"),
             ("found", "Cadastrados"),
             ("missing", "Nao Cadastrados"),
             ("via_xml", "Via XML"),
@@ -1799,23 +2001,23 @@ class QtSpedApp(QMainWindow):
 
         file_path_str = self.sped_check_file_input.text().strip()
         if not file_path_str:
-            QMessageBox.warning(self, "Conferencia SPED x Cadastro", "Selecione um arquivo SPED antes de gerar o relatorio.")
+            QMessageBox.warning(self, "Conferência SPED x Cadastro", "Selecione um arquivo SPED antes de gerar o relatório.")
             return
         sped_path = Path(file_path_str)
         if not sped_path.exists():
-            QMessageBox.warning(self, "Conferencia SPED x Cadastro", "Arquivo SPED nao encontrado no caminho informado.")
+            QMessageBox.warning(self, "Conferência SPED x Cadastro", "Arquivo SPED não encontrado no caminho informado.")
             return
         try:
             QApplication.setOverrideCursor(Qt.WaitCursor)
-            company_cnpj, company_name, periodo_ini, periodo_fim, sped_products, entry_suppliers = read_sped_0200_products(sped_path)
+            company_cnpj, company_name, periodo_ini, periodo_fim, sped_products, entry_suppliers, c170_codes = read_sped_0200_products(sped_path)
             if not company_cnpj:
                 QApplication.restoreOverrideCursor()
-                QMessageBox.warning(self, "Conferencia SPED x Cadastro", "Nao foi possivel identificar o CNPJ da empresa no arquivo SPED (registro 0000 nao encontrado).")
+                QMessageBox.warning(self, "Conferência SPED x Cadastro", "Não foi possível identificar o CNPJ da empresa no arquivo SPED (registro 0000 não encontrado).")
                 return
             catalog_rows = self.mysql_repo.get_catalog_products_by_company_cnpj(self.environment, company_cnpj)
         except Exception as exc:
             QApplication.restoreOverrideCursor()
-            QMessageBox.critical(self, "Conferencia SPED x Cadastro", f"Erro ao processar:\n{exc}")
+            QMessageBox.critical(self, "Conferência SPED x Cadastro", f"Erro ao processar:\n{exc}")
             return
         finally:
             QApplication.restoreOverrideCursor()
@@ -1832,6 +2034,8 @@ class QtSpedApp(QMainWindow):
         for sped_prod in sped_products:
             sped_code = str(sped_prod.get("codigo") or "").strip()
             if sped_code in seen_sped_codes:
+                continue
+            if c170_codes and sped_code not in c170_codes:
                 continue
             seen_sped_codes.add(sped_code)
             matches = catalog_by_code.get(sped_code, [])
@@ -1878,6 +2082,18 @@ class QtSpedApp(QMainWindow):
                 ])
 
         self.sped_check_rows = table_rows
+        self.sped_check_catalog_by_code: dict[str, dict] = {}
+        self.sped_check_catalog_by_ean: dict[str, dict] = {}
+        for _prod in catalog_rows:
+            _key = str(_prod.get("codigo_empresa") or _prod.get("codigo_fornecedor") or "").strip()
+            if _key and _key not in self.sped_check_catalog_by_code:
+                self.sped_check_catalog_by_code[_key] = _prod
+            _ean = "".join(c for c in str(_prod.get("ean") or "") if c.isdigit())
+            if _ean and _ean not in self.sped_check_catalog_by_ean:
+                self.sped_check_catalog_by_ean[_ean] = _prod
+        self.sped_check_sped_products = {str(p.get("codigo") or "").strip(): p for p in sped_products}
+        self.sped_check_company_name = company_name
+        self.sped_check_entry_suppliers = entry_suppliers
         self.set_table_rows(self.sped_check_table, table_rows)
 
         total = len(seen_sped_codes)
@@ -1893,12 +2109,12 @@ class QtSpedApp(QMainWindow):
         if periodo_ini and periodo_fim:
             try:
                 def fmt(d: str) -> str:
-                    return f"{d[4:6]}/{d[2:4]}/{d[:2]}" if len(d) == 8 else d
+                    return f"{d[:2]}/{d[2:4]}/{d[4:]}" if len(d) == 8 else d
                 periodo = f"{fmt(periodo_ini)} a {fmt(periodo_fim)}"
             except Exception:
                 periodo = f"{periodo_ini} - {periodo_fim}"
         self.sped_check_info_label.setText(
-            f"Empresa: {company_name}  |  CNPJ: {company_cnpj}  |  Periodo: {periodo}  |  {total} produtos no 0200"
+            f"Empresa: {company_name}  |  CNPJ: {company_cnpj}  |  Periodo: {periodo}  |  {total} produtos com C170"
         )
 
     def export_sped_catalog_check(self) -> None:
@@ -1923,9 +2139,157 @@ class QtSpedApp(QMainWindow):
                 if output_path.suffix.lower() != ".xlsx":
                     output_path = output_path.with_suffix(".xlsx")
                 write_simple_excel_workbook(output_path, [("Conferencia", headers, rows, {"include_total": False})])
-            self.handle_export_success("Conferencia SPED x Cadastro", output_path, "Relatorio exportado")
+            self.handle_export_success("Conferência SPED x Cadastro", output_path, "Relatório exportado")
         except Exception as exc:
-            self.handle_export_failure("Conferencia SPED x Cadastro", "conferencia", exc)
+            self.handle_export_failure("Conferência SPED x Cadastro", "conferencia", exc)
+
+    def export_sped_check_modelo_produto(self) -> None:
+        catalog_by_code = getattr(self, "sped_check_catalog_by_code", {})
+        catalog_by_ean  = getattr(self, "sped_check_catalog_by_ean", {})
+        sped_products   = getattr(self, "sped_check_sped_products", {})
+        company_name    = getattr(self, "sped_check_company_name", "")
+        entry_suppliers = getattr(self, "sped_check_entry_suppliers", {})
+        if not sped_products:
+            QMessageBox.warning(self, "Exportar Modelo Produto", "Gere o relatorio antes de exportar.")
+            return
+        output, _ = QFileDialog.getSaveFileName(
+            self, "Salvar Modelo Produto", "conferencia_modelo_produto.xlsx",
+            "Arquivo Excel (*.xlsx)",
+        )
+        if not output:
+            return
+        output_path = Path(output)
+        if output_path.suffix.lower() != ".xlsx":
+            output_path = output_path.with_suffix(".xlsx")
+
+        HEADERS = [
+            "Status",
+            "ID",
+            "Empresa",
+            "Fornecedor",
+            "UF",
+            "Classificação",
+            "Cod. Forn.",
+            "Cod. Empresa",
+            "Descrição",
+            "EAN",
+            "NCM",
+            "CEST",
+            "Origem (entrada)",
+            "CST ICMS (entrada)",
+            "% Red BC ICMS",
+            "CFOP saída fornecedor",
+            "% ICMS (entrada)",
+            "CFOP entrada empresa",
+            "CST IPI",
+            "% IPI",
+            "CST PIS (entrada)",
+            "CST PIS_COFINS (ENTRADA EMPRESA)",
+            "% PIS",
+            "CST COFINS (entrada)",
+            "% COFINS",
+            "Natureza da receita",
+            "MVA",
+            "Valor ICMS-ST",
+            "cClassTrib",
+            "cBenef",
+            "Origem (saída)",
+            "CST ICMS (saída)",
+            "CFOP saída empresa",
+            "% ICMS (saída)",
+            "CST PIS (saída)",
+            "CST COFINS (saída)",
+            "Natureza da receita",
+            "Chave NFe origem",
+        ]
+
+        def _pct(v: object) -> str:
+            s = str(v or "").strip()
+            if not s:
+                return ""
+            try:
+                result = round(float(s.replace(",", ".")) * 100, 2)
+                return f"{result:.2f}".replace(".", ",")
+            except (ValueError, TypeError):
+                return s
+
+        rows: list[list[object]] = []
+        for sped_code, sped_prod in sped_products.items():
+            cat = catalog_by_code.get(sped_code)
+            if cat is None:
+                digits = "".join(c for c in sped_code if c.isdigit())
+                cat = catalog_by_ean.get(digits) if digits else None
+
+            status = "Cadastrado" if cat else "Nao Cadastrado"
+            suppliers = entry_suppliers.get(sped_code, [])
+            sup_name = suppliers[0].get("nome", "") if suppliers else ""
+
+            if cat:
+                row: list[object] = [
+                    status,
+                    str(cat.get("id") or ""),
+                    company_name,
+                    str(cat.get("fornecedor_nome") or ""),
+                    str(cat.get("fornecedor_uf") or ""),
+                    str(cat.get("tipo_produto") or ""),
+                    str(cat.get("codigo_fornecedor") or "") or sped_code,
+                    str(cat.get("codigo_empresa") or ""),
+                    str(cat.get("descricao") or ""),
+                    str(cat.get("ean") or ""),
+                    str(cat.get("ncm") or ""),
+                    str(cat.get("cest") or ""),
+                    str(cat.get("origem_entrada") or ""),
+                    str(cat.get("cst_icms") or ""),
+                    _pct(cat.get("reducao_bc_icms")),
+                    str(cat.get("cfop_saida_fornecedor") or ""),
+                    _pct(cat.get("aliquota_icms")),
+                    str(cat.get("cfop_entrada") or ""),
+                    str(cat.get("cst_ipi") or ""),
+                    _pct(cat.get("aliquota_ipi")),
+                    str(cat.get("cst_pis") or ""),
+                    str(cat.get("cst_pis_cofins") or ""),
+                    _pct(cat.get("aliquota_pis")),
+                    str(cat.get("cst_cofins") or ""),
+                    _pct(cat.get("aliquota_cofins")),
+                    str(cat.get("natureza_receita_entrada") or ""),
+                    _pct(cat.get("mva")),
+                    str(cat.get("valor_icms_st") or ""),
+                    str(cat.get("c_classtrib") or ""),
+                    str(cat.get("c_benef") or ""),
+                    str(cat.get("origem_saida") or ""),
+                    str(cat.get("cst_icms_saida") or ""),
+                    str(cat.get("cfop_saida_empresa") or ""),
+                    _pct(cat.get("aliquota_icms_saida")),
+                    str(cat.get("cst_pis_saida") or ""),
+                    str(cat.get("cst_cofins_saida") or ""),
+                    str(cat.get("natureza_receita_saida") or ""),
+                    str(cat.get("chave_nfe_origem") or ""),
+                ]
+            else:
+                row = [
+                    status,
+                    "", company_name, sup_name, "", "",
+                    sped_code, "",
+                    str(sped_prod.get("descricao") or ""),
+                    "",
+                    str(sped_prod.get("ncm") or ""),
+                    str(sped_prod.get("cest") or ""),
+                    "",
+                    str(sped_prod.get("cst_icms") or ""),
+                    "",
+                    "",
+                    str(sped_prod.get("aliquota_icms") or ""),
+                    "",
+                    "", "", "", "", "", "", "", "", "", "", "", "",
+                    "", "", "", "", "", "", "", "",
+                ]
+            rows.append(row)
+
+        try:
+            write_simple_excel_workbook(output_path, [("BASE_COMPLETA", HEADERS, rows, {"include_total": False})])
+            self.handle_export_success("Exportar Modelo Produto", output_path, "Exportacao concluida")
+        except Exception as exc:
+            self.handle_export_failure("Exportar Modelo Produto", "modelo_produto", exc)
 
     def create_single_catalog_page(self, title: str) -> QWidget:
         page = QWidget()
@@ -2073,6 +2437,240 @@ class QtSpedApp(QMainWindow):
         layout.addLayout(form)
         grid.addWidget(panel, row, column)
         return table
+
+    def build_user_permissions_page(self) -> QWidget:
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(12)
+
+        list_panel = self.create_panel()
+        list_layout = QVBoxLayout(list_panel)
+        list_layout.setContentsMargins(16, 16, 16, 16)
+        list_layout.setSpacing(8)
+        title = QLabel("Usuarios E Permissoes")
+        title.setObjectName("sectionTitle")
+        list_layout.addWidget(title)
+
+        toolbar = QHBoxLayout()
+        toolbar.addWidget(self.create_button("Atualizar", self.refresh_system_users, primary=True))
+        toolbar.addWidget(self.create_button("Novo Usuario", self.clear_system_user_form))
+        toolbar.addStretch()
+        list_layout.addLayout(toolbar)
+
+        self.system_user_table = self.create_data_table(["ID", "Nome", "Login", "Ativo", "Permissoes", "Observacao"])
+        self.system_user_table.selectionModel().selectionChanged.connect(lambda _selected, _deselected: self.handle_system_user_select())
+        list_layout.addWidget(self.system_user_table, 1)
+        layout.addWidget(list_panel, 1)
+
+        form_panel = self.create_panel()
+        form_layout = QVBoxLayout(form_panel)
+        form_layout.setContentsMargins(16, 16, 16, 16)
+        form_layout.setSpacing(10)
+        form_title = QLabel("Cadastro Do Usuario")
+        form_title.setObjectName("sectionTitle")
+        form_layout.addWidget(form_title)
+
+        self.system_user_id = 0
+        self.system_user_name_input = QLineEdit()
+        self.system_user_login_input = QLineEdit()
+        self.system_user_password_input = QLineEdit()
+        self.system_user_password_input.setEchoMode(QLineEdit.Password)
+        self.system_user_password_input.setPlaceholderText("Preencha para criar ou alterar a senha")
+        self.system_user_active_check = QCheckBox("Usuario Ativo")
+        self.system_user_active_check.setChecked(True)
+        self.system_user_note_input = QTextEdit()
+        self.system_user_note_input.setFixedHeight(70)
+
+        form = QGridLayout()
+        form.setHorizontalSpacing(10)
+        form.setVerticalSpacing(8)
+        form.addWidget(QLabel("Nome"), 0, 0)
+        form.addWidget(self.system_user_name_input, 0, 1)
+        form.addWidget(QLabel("Login"), 0, 2)
+        form.addWidget(self.system_user_login_input, 0, 3)
+        form.addWidget(QLabel("Senha"), 1, 0)
+        form.addWidget(self.system_user_password_input, 1, 1, 1, 3)
+        form.addWidget(QLabel("Situacao"), 2, 0)
+        form.addWidget(self.system_user_active_check, 2, 1)
+        form.addWidget(QLabel("Observacao"), 3, 0)
+        form.addWidget(self.system_user_note_input, 3, 1, 1, 3)
+        form.setColumnStretch(1, 1)
+        form.setColumnStretch(3, 1)
+        form_layout.addLayout(form)
+
+        permissions_layout = QGridLayout()
+        permissions_layout.setHorizontalSpacing(10)
+        permissions_layout.setVerticalSpacing(10)
+        self.system_user_permission_checks: dict[str, QCheckBox] = {}
+        for group_index, (group_name, permissions) in enumerate(USER_PERMISSION_GROUPS):
+            group_box = QGroupBox(group_name)
+            group_inner = QVBoxLayout(group_box)
+            group_inner.setContentsMargins(10, 10, 10, 10)
+            group_inner.setSpacing(5)
+            for permission_key, permission_label in permissions:
+                check = QCheckBox(permission_label)
+                self.system_user_permission_checks[permission_key] = check
+                group_inner.addWidget(check)
+            group_inner.addStretch()
+            permissions_layout.addWidget(group_box, group_index // 3, group_index % 3)
+        form_layout.addLayout(permissions_layout)
+
+        actions = QHBoxLayout()
+        actions.addStretch()
+        actions.addWidget(self.create_button("Salvar Usuario", self.save_system_user, primary=True))
+        actions.addWidget(self.create_button("Novo", self.clear_system_user_form))
+        actions.addWidget(self.create_button("Excluir", self.delete_system_user))
+        form_layout.addLayout(actions)
+        layout.addWidget(form_panel)
+
+        QTimer.singleShot(0, self.refresh_system_users)
+        return page
+
+    def refresh_system_users(self) -> None:
+        try:
+            self.mysql_repo.ensure_schema()
+            rows = self.mysql_repo.list_system_users(self.environment)
+            table_rows = []
+            for row in rows:
+                table_rows.append([
+                    row.get("id", ""),
+                    row.get("nome", ""),
+                    row.get("login", ""),
+                    "Sim" if int(row.get("ativo") or 0) else "Nao",
+                    row.get("permissoes", "") or "",
+                    row.get("observacao", "") or "",
+                ])
+            self.set_table_rows(self.system_user_table, table_rows)
+            self.statusBar().showMessage(f"{len(table_rows)} usuario(s) carregado(s).")
+        except Exception as exc:
+            QMessageBox.critical(self, "Usuarios E Permissoes", str(exc))
+
+    def ensure_default_admin_user(self) -> None:
+        try:
+            self.mysql_repo.ensure_schema()
+            users = self.mysql_repo.list_system_users(self.environment)
+            for user in users:
+                if str(user.get("login") or "").strip().lower() == "admin":
+                    return
+            permissions = {
+                permission_key
+                for _group_name, group_permissions in USER_PERMISSION_GROUPS
+                for permission_key, _permission_label in group_permissions
+            }
+            self.mysql_repo.save_system_user(
+                self.environment,
+                None,
+                {
+                    "nome": "Administrador Padrao",
+                    "login": "admin",
+                    "senha": "admin",
+                    "ativo": True,
+                    "observacao": "Usuario administrador criado automaticamente para primeiro acesso.",
+                },
+                permissions,
+            )
+            if hasattr(self, "system_user_table"):
+                self.refresh_system_users()
+            self.statusBar().showMessage("Usuario admin criado para primeiro acesso.")
+        except Exception as exc:
+            self.statusBar().showMessage(f"Nao foi possivel criar usuario admin: {exc}")
+
+    def show_login_dialog(self) -> bool:
+        while True:
+            dialog = LoginDialog(self.app_home_title, self.environment, self)
+            dialog.setStyleSheet(self.styleSheet())
+            if dialog.exec() != QDialog.Accepted:
+                return False
+            login, password = dialog.credentials()
+            try:
+                user = self.mysql_repo.authenticate_system_user(self.environment, login, password)
+            except Exception as exc:
+                QMessageBox.critical(self, "Acesso Ao Sistema", str(exc))
+                continue
+            if user is None:
+                QMessageBox.warning(self, "Acesso Ao Sistema", "Usuario ou senha invalidos.")
+                continue
+            self.current_user = user
+            user_name = str(user.get("nome") or user.get("login") or "").strip()
+            self.statusBar().showMessage(f"Usuario autenticado: {user_name}.")
+            return True
+
+    def selected_system_user_id(self) -> int:
+        selected = self.system_user_table.selectionModel().selectedRows()
+        if not selected:
+            return 0
+        item = self.system_user_table.item(selected[0].row(), 0)
+        return int(item.text()) if item and item.text().isdigit() else 0
+
+    def handle_system_user_select(self) -> None:
+        selected = self.system_user_table.selectionModel().selectedRows()
+        if not selected:
+            return
+        row_index = selected[0].row()
+        self.system_user_id = self.selected_system_user_id()
+        self.system_user_name_input.setText(self.system_user_table.item(row_index, 1).text() if self.system_user_table.item(row_index, 1) else "")
+        self.system_user_login_input.setText(self.system_user_table.item(row_index, 2).text() if self.system_user_table.item(row_index, 2) else "")
+        active_text = self.system_user_table.item(row_index, 3).text() if self.system_user_table.item(row_index, 3) else ""
+        self.system_user_active_check.setChecked(active_text.lower() == "sim")
+        self.system_user_password_input.clear()
+        self.system_user_note_input.setPlainText(self.system_user_table.item(row_index, 5).text() if self.system_user_table.item(row_index, 5) else "")
+        permissions = self.mysql_repo.get_system_user_permissions(self.system_user_id)
+        for permission_key, check in self.system_user_permission_checks.items():
+            check.setChecked(permission_key in permissions)
+
+    def clear_system_user_form(self) -> None:
+        self.system_user_id = 0
+        self.system_user_name_input.clear()
+        self.system_user_login_input.clear()
+        self.system_user_password_input.clear()
+        self.system_user_active_check.setChecked(True)
+        self.system_user_note_input.clear()
+        for check in self.system_user_permission_checks.values():
+            check.setChecked(False)
+        self.system_user_table.clearSelection()
+
+    def save_system_user(self) -> None:
+        permissions = {
+            permission_key
+            for permission_key, check in self.system_user_permission_checks.items()
+            if check.isChecked()
+        }
+        data = {
+            "nome": self.system_user_name_input.text(),
+            "login": self.system_user_login_input.text(),
+            "senha": self.system_user_password_input.text(),
+            "ativo": self.system_user_active_check.isChecked(),
+            "observacao": self.system_user_note_input.toPlainText(),
+        }
+        try:
+            self.mysql_repo.ensure_schema()
+            self.system_user_id = self.mysql_repo.save_system_user(
+                self.environment,
+                self.system_user_id or None,
+                data,
+                permissions,
+            )
+            self.system_user_password_input.clear()
+            self.refresh_system_users()
+            QMessageBox.information(self, "Usuarios E Permissoes", "Usuario salvo com sucesso.")
+        except Exception as exc:
+            QMessageBox.critical(self, "Usuarios E Permissoes", str(exc))
+
+    def delete_system_user(self) -> None:
+        user_id = self.selected_system_user_id() or self.system_user_id
+        if not user_id:
+            QMessageBox.information(self, "Usuarios E Permissoes", "Selecione um usuario para excluir.")
+            return
+        if QMessageBox.question(self, "Usuarios E Permissoes", "Excluir este usuario?") != QMessageBox.Yes:
+            return
+        try:
+            self.mysql_repo.delete_system_user(self.environment, user_id)
+            self.clear_system_user_form()
+            self.refresh_system_users()
+            QMessageBox.information(self, "Usuarios E Permissoes", "Usuario excluido com sucesso.")
+        except Exception as exc:
+            QMessageBox.critical(self, "Usuarios E Permissoes", str(exc))
 
     def build_settings_page(self) -> QWidget:
         page = QWidget()
@@ -7702,7 +8300,18 @@ class QtSpedApp(QMainWindow):
         )
 
     def open_entry_operation_summary_popup(self) -> None:
-        self.open_operation_summary_for_rows(self.filtered_entry_rows, "Entrada", "Resumo Entradas")
+        c190_total: Decimal = Decimal("0")
+        sped_widget = getattr(self, "sped_input", None)
+        if sped_widget is not None:
+            try:
+                for path in parse_selected_paths(sped_widget.text()):
+                    _, _, _, c190_rows_file, _ = read_sped_file(path)
+                    for r in c190_rows_file:
+                        if str(r.get("operation_type", "")).strip() == "Entrada":
+                            c190_total += r.get("total_operation_value") or Decimal("0")
+            except Exception:
+                c190_total = Decimal("0")
+        self.open_operation_summary_for_rows(self.filtered_entry_rows, "Entrada", "Resumo Entradas", c190_total=c190_total)
 
     def open_entry_abc_popup(self) -> None:
         _periods, headers, _display_rows, export_rows = build_product_monthly_linear_dataset(self.filtered_entry_rows, "Entrada")
@@ -8655,7 +9264,7 @@ class QtSpedApp(QMainWindow):
             720,
         )
 
-    def open_operation_summary_for_rows(self, source_rows: list[dict[str, object]], operation_type: str, title: str) -> None:
+    def open_operation_summary_for_rows(self, source_rows: list[dict[str, object]], operation_type: str, title: str, *, c190_total: Decimal | None = None) -> None:
         grouped: dict[tuple[str, str, Decimal], dict[str, object]] = {}
         for row in source_rows:
             details = row.get("launch_details")
@@ -8700,7 +9309,7 @@ class QtSpedApp(QMainWindow):
             total_base += base_icms
             total_icms += icms_value
         headers = ["CST", "CFOP", "Aliq ICMS", "Aliq Efetiva", "Valor IPI", "Valor ICMS", "Base ICMS ST", "Valor ICMS ST", "Total Operacao", "Base ICMS", "Dif. Oper/Base", "Reducao BC", "Docs", "Lanc."]
-        self.open_operation_summary_popup_with_cards(title, headers, rows, total_sale, total_base, total_icms, detail_rows_by_index, operation_type)
+        self.open_operation_summary_popup_with_cards(title, headers, rows, total_sale, total_base, total_icms, detail_rows_by_index, operation_type, c190_total=c190_total)
 
     def open_operation_summary_popup_with_cards(
         self,
@@ -8712,6 +9321,8 @@ class QtSpedApp(QMainWindow):
         total_icms: Decimal,
         detail_rows_by_index: dict[int, list[dict[str, object]]] | None = None,
         operation_type: str = "",
+        *,
+        c190_total: Decimal | None = None,
     ) -> None:
         if not rows:
             QMessageBox.warning(self, title, "Nao ha dados para os filtros atuais.")
@@ -8816,6 +9427,23 @@ class QtSpedApp(QMainWindow):
             card_labels[value] = value_label
             cards_grid.addWidget(card, 0, index)
         layout.addLayout(cards_grid)
+
+        if c190_total is not None:
+            gap = (c190_total - total_sale).quantize(Decimal("0.01"))
+            if abs(gap) >= Decimal("0.01"):
+                _desp_label = QLabel(
+                    f"Desp. Acessorias (C190 − C170):  "
+                    f"C190 = {self.format_number(c190_total)}  |  "
+                    f"C170 (itens) = {self.format_number(total_sale)}  |  "
+                    f"Diferenca = {self.format_number(gap)}  "
+                    f"(frete, seguro e outras despesas do cabecalho das NFs — sem impacto no ICMS)"
+                )
+                _desp_label.setStyleSheet(
+                    "background: #fef9c3; color: #713f12; border: 1px solid #fcd34d; "
+                    "border-radius: 4px; padding: 5px 10px; font-size: 11px;"
+                )
+                _desp_label.setWordWrap(True)
+                layout.addWidget(_desp_label)
 
         filtered_rows_state: dict[str, list[list[object]]] = {"rows": list(export_rows)}
 
