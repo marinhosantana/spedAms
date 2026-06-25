@@ -1990,3 +1990,668 @@ class ImportPlanilhaDialog(QDialog):
         self._import_log.append(f"ERRO FATAL: {msg}")
         self._btn_importar.setEnabled(True)
         self._btn_anterior.setEnabled(True)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Importação de Fornecedores por Planilha
+# ══════════════════════════════════════════════════════════════════════════════
+
+_CAMPOS_FORN_GRUPOS: list[tuple[str, list[tuple[str, str]]]] = [
+    ("Empresa", [
+        ("empresa_nome", "Empresa - Nome"),
+        ("empresa_cnpj", "Empresa - CNPJ"),
+    ]),
+    ("Fornecedor", [
+        ("fornecedor_nome", "Fornecedor - Nome"),
+        ("fornecedor_cnpj", "Fornecedor - CNPJ"),
+        ("fornecedor_uf", "Fornecedor - UF"),
+        ("fornecedor_ie", "Fornecedor - Insc. Estadual"),
+        ("fornecedor_regime", "Fornecedor - Regime Tributário"),
+        ("fornecedor_codigo", "Fornecedor - Código"),
+    ]),
+]
+
+_ALL_CAMPOS_FORN: dict[str, str] = {k: v for _, fields in _CAMPOS_FORN_GRUPOS for k, v in fields}
+
+_SINONIMOS_FORN: dict[str, list[str]] = {
+    "empresa_nome":      ["empresa", "razao social empresa", "nome empresa", "company"],
+    "empresa_cnpj":      ["cnpj empresa", "cnpj_empresa"],
+    "fornecedor_nome":   ["fornecedor", "nome fornecedor", "razao social", "nome", "supplier", "razao"],
+    "fornecedor_cnpj":   ["cnpj forn", "cnpj fornecedor", "insc federal", "cpf cnpj", "cnpj"],
+    "fornecedor_uf":     ["uf", "uf fornecedor", "estado forn", "estado"],
+    "fornecedor_ie":     ["ie", "insc estadual", "ie forn", "inscricao estadual"],
+    "fornecedor_regime": ["regime", "regime tributario", "regime icms", "tributacao"],
+    "fornecedor_codigo": ["codigo fornecedor", "codigo forn", "cod forn", "codigo"],
+}
+
+
+def _auto_map_forn(col_name: str) -> str:
+    clean = _strip_accents(col_name.lower().strip()).replace("_", " ")
+    normalized = re.sub(r"[^a-z0-9 ]", " ", clean)
+    normalized = re.sub(r"\s+", " ", normalized).strip()
+    for campo, sinonimos in _SINONIMOS_FORN.items():
+        for sin in sinonimos:
+            if normalized == sin.replace("_", " "):
+                return campo
+    for campo, sinonimos in _SINONIMOS_FORN.items():
+        for sin in sinonimos:
+            sin_norm = sin.replace("_", " ")
+            if len(sin_norm) >= 4 and re.search(r"\b" + re.escape(sin_norm) + r"\b", normalized):
+                return campo
+    return IGNORAR
+
+
+def _execute_supplier_import(
+    repo: MysqlCadastroRepository,
+    environment: str,
+    default_company_id: int | None,
+    col_mapping: dict[str, str],
+    df: Any,
+    progress_cb: Any,
+) -> dict:
+    stats: dict = {
+        "linhas": len(df),
+        "novos": 0,
+        "atualizados": 0,
+        "sem_alteracao": 0,
+        "ignorados": 0,
+        "empresas_criadas": 0,
+        "erros": [],
+    }
+    total = len(df)
+    seen_empresas: dict[tuple, int] = {}
+
+    def get(row: Any, campo: str) -> str:
+        col = col_mapping.get(campo)
+        if not col:
+            return ""
+        v = row.get(col, "")
+        sv = str(v or "").strip()
+        return "" if sv.lower() in {"nan", "none", ""} else sv
+
+    for idx, row in enumerate(df.to_dict(orient="records")):
+        if idx % 50 == 0:
+            progress_cb(idx, total, f"Processando linha {idx + 1}/{total}...")
+        try:
+            forn_nome = get(row, "fornecedor_nome")
+            if not forn_nome:
+                stats["ignorados"] += 1
+                continue
+
+            emp_nome = get(row, "empresa_nome")
+            emp_cnpj = get(row, "empresa_cnpj")
+
+            if emp_nome:
+                emp_key = (emp_nome.lower(), emp_cnpj)
+                if emp_key not in seen_empresas:
+                    if repo.find_company_id(environment, emp_nome, emp_cnpj) is None:
+                        stats["empresas_criadas"] += 1
+                    seen_empresas[emp_key] = repo.ensure_company(environment, emp_nome, emp_cnpj)
+                empresa_id = seen_empresas[emp_key]
+            elif default_company_id is not None:
+                empresa_id = default_company_id
+            else:
+                stats["ignorados"] += 1
+                continue
+
+            forn_cnpj   = get(row, "fornecedor_cnpj")
+            forn_uf     = get(row, "fornecedor_uf")
+            forn_ie     = get(row, "fornecedor_ie")
+            forn_regime = get(row, "fornecedor_regime") or "LUCRO_REAL_PRESUMIDO"
+            forn_codigo = get(row, "fornecedor_codigo")
+
+            existing_id = repo.find_supplier_id(empresa_id, forn_nome, forn_cnpj)
+            supplier_id = repo.ensure_supplier(
+                empresa_id, forn_nome, forn_cnpj, forn_ie, forn_uf, forn_regime, forn_codigo,
+            )
+            if existing_id is None:
+                stats["novos"] += 1
+            else:
+                stats["atualizados"] += 1
+        except Exception as exc:
+            stats["erros"].append({"linha": idx + 2, "fornecedor": locals().get("forn_nome", ""), "erro": str(exc)})
+
+    progress_cb(total, total, "Finalizando...")
+    return stats
+
+
+class _SupplierImportWorker(QObject):
+    progress = Signal(int, int, str)
+    finished = Signal(dict)
+    failed = Signal(str)
+
+    def __init__(
+        self,
+        repository: MysqlCadastroRepository,
+        environment: str,
+        default_company_id: int | None,
+        col_mapping: dict[str, str],
+        df: Any,
+    ) -> None:
+        super().__init__()
+        self.repository = repository
+        self.environment = environment
+        self.default_company_id = default_company_id
+        self.col_mapping = col_mapping
+        self.df = df
+
+    def run(self) -> None:
+        try:
+            result = _execute_supplier_import(
+                self.repository, self.environment, self.default_company_id,
+                self.col_mapping, self.df, self.progress.emit,
+            )
+            self.finished.emit(result)
+        except Exception as exc:
+            self.failed.emit(str(exc))
+
+
+_PROFILES_FILE_FORN = Path.home() / ".spedams" / "import_profiles_fornecedor.json"
+
+
+def _load_forn_profiles() -> dict[str, dict[str, str]]:
+    if _PROFILES_FILE_FORN.exists():
+        try:
+            return json.loads(_PROFILES_FILE_FORN.read_text(encoding="utf-8"))
+        except Exception:
+            pass
+    return {}
+
+
+def _save_forn_profiles(profiles: dict[str, dict[str, str]]) -> None:
+    _PROFILES_FILE_FORN.parent.mkdir(parents=True, exist_ok=True)
+    _PROFILES_FILE_FORN.write_text(json.dumps(profiles, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+class ImportFornecedorDialog(QDialog):
+    PREVIEW_ROWS = 6
+    COLORS = ImportPlanilhaDialog.COLORS
+
+    def __init__(self, repository: MysqlCadastroRepository, environment: str, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.repository = repository
+        self.environment = environment
+        self._df: Any = None
+        self._all_columns: list[str] = []
+        self._file_path: Path | None = None
+        self._mapping_combos: dict[str, QComboBox] = {}
+        self._thread: QThread | None = None
+        self._worker: _SupplierImportWorker | None = None
+        self._file_load_thread: QThread | None = None
+        self._file_load_worker: _FileLoaderWorker | None = None
+        self._profiles: dict[str, dict[str, str]] = _load_forn_profiles()
+
+        self.setWindowTitle("Importar Planilha De Fornecedores")
+        self.setMinimumSize(900, 600)
+        if parent:
+            self.setStyleSheet(parent.styleSheet())
+        self.resize(1000, 680)
+
+        root = QVBoxLayout(self)
+        root.setContentsMargins(0, 0, 0, 0)
+        root.setSpacing(0)
+
+        self._step_header = self._build_step_header()
+        root.addWidget(self._step_header)
+
+        self._stack = QStackedWidget()
+        root.addWidget(self._stack, 1)
+        self._stack.addWidget(self._build_step_arquivo())
+        self._stack.addWidget(self._build_step_mapeamento())
+        self._stack.addWidget(self._build_step_importar())
+
+        nav = self._build_nav_bar()
+        root.addWidget(nav)
+        self._update_nav()
+
+    def _build_step_header(self) -> QWidget:
+        bar = QFrame()
+        bar.setObjectName("panel")
+        bar.setFixedHeight(52)
+        layout = QHBoxLayout(bar)
+        layout.setContentsMargins(20, 8, 20, 8)
+        layout.setSpacing(0)
+        self._step_labels: list[QLabel] = []
+        for i, text in enumerate(["1. Selecionar Arquivo", "2. Correlacionar Campos", "3. Importar"]):
+            lbl = QLabel(text)
+            lbl.setAlignment(Qt.AlignCenter)
+            lbl.setFixedHeight(36)
+            self._step_labels.append(lbl)
+            layout.addWidget(lbl, 1)
+            if i < 2:
+                sep = QLabel("›")
+                sep.setAlignment(Qt.AlignCenter)
+                sep.setFixedWidth(24)
+                sep.setStyleSheet(f"color: {self.COLORS['muted']}; font-size: 18px;")
+                layout.addWidget(sep)
+        self._highlight_step(0)
+        return bar
+
+    def _highlight_step(self, active: int) -> None:
+        for i, lbl in enumerate(self._step_labels):
+            if i == active:
+                lbl.setStyleSheet(f"color: {self.COLORS['accent']}; font-weight: bold; background: #dbeafe; border-radius: 6px; padding: 4px 12px;")
+            elif i < active:
+                lbl.setStyleSheet(f"color: {self.COLORS['ok']}; padding: 4px 12px;")
+            else:
+                lbl.setStyleSheet(f"color: {self.COLORS['muted']}; padding: 4px 12px;")
+
+    def _build_nav_bar(self) -> QWidget:
+        bar = QFrame()
+        bar.setObjectName("panel")
+        bar.setFixedHeight(52)
+        layout = QHBoxLayout(bar)
+        layout.setContentsMargins(20, 8, 20, 8)
+        layout.setSpacing(8)
+        self._btn_anterior = QPushButton("< Anterior")
+        self._btn_anterior.clicked.connect(self._go_back)
+        self._btn_proximo = QPushButton("Próximo >")
+        self._btn_proximo.setObjectName("primaryButton")
+        self._btn_proximo.clicked.connect(self._go_next)
+        self._btn_importar = QPushButton("Importar")
+        self._btn_importar.setObjectName("primaryButton")
+        self._btn_importar.clicked.connect(self._start_import)
+        self._btn_fechar = QPushButton("Fechar")
+        self._btn_fechar.clicked.connect(self.accept)
+        self._btn_fechar.hide()
+        layout.addStretch()
+        layout.addWidget(self._btn_anterior)
+        layout.addWidget(self._btn_proximo)
+        layout.addWidget(self._btn_importar)
+        layout.addWidget(self._btn_fechar)
+        return bar
+
+    def _update_nav(self) -> None:
+        step = self._stack.currentIndex()
+        self._btn_anterior.setVisible(step > 0)
+        self._btn_proximo.setVisible(step < 2)
+        self._btn_importar.setVisible(step == 2)
+        self._highlight_step(step)
+        if step == 0:
+            self._btn_proximo.setEnabled(self._df is not None)
+
+    def _go_back(self) -> None:
+        idx = self._stack.currentIndex()
+        if idx > 0:
+            self._stack.setCurrentIndex(idx - 1)
+            self._update_nav()
+
+    def _go_next(self) -> None:
+        idx = self._stack.currentIndex()
+        if idx == 0 and self._df is None:
+            return
+        if idx == 1:
+            self._refresh_mapping_rows()
+        self._stack.setCurrentIndex(idx + 1)
+        self._update_nav()
+
+    # ── Passo 1: Arquivo ─────────────────────────────────────────────────────
+
+    def _build_step_arquivo(self) -> QWidget:
+        page = QWidget()
+        page.setStyleSheet(f"background: {self.COLORS['bg']};")
+        layout = QVBoxLayout(page)
+        layout.setContentsMargins(24, 20, 24, 20)
+        layout.setSpacing(16)
+
+        file_group = QGroupBox("Planilha")
+        fg = QGridLayout(file_group)
+        fg.setContentsMargins(12, 12, 12, 12)
+        fg.setSpacing(8)
+        fg.addWidget(QLabel("Arquivo:"), 0, 0)
+        self._file_label = QLabel("Nenhum arquivo selecionado")
+        self._file_label.setObjectName("muted")
+        self._file_label.setWordWrap(True)
+        fg.addWidget(self._file_label, 0, 1)
+        btn_sel = QPushButton("Selecionar...")
+        btn_sel.setFixedWidth(110)
+        btn_sel.clicked.connect(self._select_file)
+        fg.addWidget(btn_sel, 0, 2)
+        fg.addWidget(QLabel("Aba:"), 1, 0)
+        self._sheet_combo = QComboBox()
+        self._sheet_combo.setEnabled(False)
+        self._sheet_combo.currentTextChanged.connect(self._on_sheet_changed)
+        fg.addWidget(self._sheet_combo, 1, 1, 1, 2)
+        hr_widget = QWidget()
+        hr_widget.setStyleSheet("background: transparent;")
+        hr_layout = QHBoxLayout(hr_widget)
+        hr_layout.setContentsMargins(0, 0, 0, 0)
+        self._header_check = QCheckBox("Tem Cabeçalho - Linha:")
+        self._header_check.setChecked(True)
+        self._header_check.stateChanged.connect(self._on_header_check_changed)
+        hr_layout.addWidget(self._header_check)
+        self._header_row_spin = QSpinBox()
+        self._header_row_spin.setRange(0, 20)
+        self._header_row_spin.setValue(0)
+        self._header_row_spin.setFixedWidth(60)
+        self._header_row_spin.valueChanged.connect(self._reload_file)
+        hr_layout.addWidget(self._header_row_spin)
+        hr_layout.addWidget(QLabel("(0 = Primeira Linha)"))
+        hr_layout.addStretch()
+        fg.addWidget(hr_widget, 2, 0, 1, 3)
+        fg.setColumnStretch(1, 1)
+        layout.addWidget(file_group)
+
+        emp_group = QGroupBox("Empresa Destino (Quando Não Mapeada Na Planilha)")
+        eg = QHBoxLayout(emp_group)
+        eg.setContentsMargins(12, 12, 12, 12)
+        eg.addWidget(QLabel("Empresa:"))
+        self._company_combo = QComboBox()
+        self._company_combo.setMinimumWidth(320)
+        self._load_company_combo()
+        eg.addWidget(self._company_combo, 1)
+        layout.addWidget(emp_group)
+
+        preview_group = QGroupBox("Prévia (Primeiras Linhas)")
+        pg = QVBoxLayout(preview_group)
+        pg.setContentsMargins(8, 8, 8, 8)
+        self._preview_table = QTableWidget()
+        self._preview_table.setAlternatingRowColors(True)
+        self._preview_table.setSelectionMode(QAbstractItemView.NoSelection)
+        self._preview_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self._preview_table.verticalHeader().setVisible(False)
+        self._preview_table.setFixedHeight(180)
+        self._preview_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeToContents)
+        pg.addWidget(self._preview_table)
+        layout.addWidget(preview_group, 1)
+
+        self._file_info_label = QLabel("")
+        self._file_info_label.setObjectName("muted")
+        layout.addWidget(self._file_info_label)
+        return page
+
+    def _load_company_combo(self) -> None:
+        self._company_combo.clear()
+        self._company_combo.addItem("(Selecionar por coluna da planilha)", None)
+        try:
+            companies = self.repository.list_companies(self.environment)
+            for c in companies:
+                label = str(c.get("nome") or c.get("cnpj") or "")
+                self._company_combo.addItem(label, int(c["id"]))
+        except Exception:
+            pass
+
+    def _select_file(self) -> None:
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Selecionar Planilha", "",
+            "Planilhas (*.xlsx *.xls *.csv *.ods);;Todos (*)",
+        )
+        if not path:
+            return
+        self._file_path = Path(path)
+        self._file_label.setText(str(self._file_path.name))
+        self._file_label.setStyleSheet(f"color: {self.COLORS['text']};")
+        self._df = None
+        self._all_columns = []
+        self._sheet_combo.blockSignals(True)
+        self._sheet_combo.clear()
+        self._sheet_combo.setEnabled(False)
+        self._sheet_combo.blockSignals(False)
+        self._preview_table.setRowCount(0)
+        self._preview_table.setColumnCount(0)
+        self._update_nav()
+        self._reload_file()
+
+    def _on_sheet_changed(self, _: str) -> None:
+        self._reload_file()
+
+    def _on_header_check_changed(self) -> None:
+        self._header_row_spin.setEnabled(self._header_check.isChecked())
+        if self._file_path:
+            self._reload_file()
+
+    def _reload_file(self) -> None:
+        if not self._file_path:
+            return
+        if self._file_load_thread and self._file_load_thread.isRunning():
+            if self._file_load_worker:
+                self._file_load_worker.cancel()
+            self._file_load_thread.quit()
+            self._file_load_thread.wait(300)
+
+        ext = self._file_path.suffix.lower()
+        sheet: Any = self._sheet_combo.currentText() if self._sheet_combo.isEnabled() else 0
+        if sheet in {"(csv)", ""}:
+            sheet = 0
+        has_header = self._header_check.isChecked()
+        header_row = self._header_row_spin.value() if has_header else None
+        if header_row is None:
+            header_row = 0
+
+        self._file_load_thread = QThread(self)
+        self._file_load_worker = _FileLoaderWorker(
+            self._file_path, sheet, header_row, True, True,
+        )
+        self._file_load_worker.moveToThread(self._file_load_thread)
+        self._file_load_thread.started.connect(self._file_load_worker.run)
+        self._file_load_worker.finished.connect(self._on_file_loaded)
+        self._file_load_worker.failed.connect(lambda e: self._file_info_label.setText(f"Erro: {e}"))
+        self._file_load_thread.start()
+
+    def _on_file_loaded(self, sheet_names: list, header_row: int, df_preview: Any, total_rows: int, df_full: Any) -> None:
+        if self._file_load_thread:
+            self._file_load_thread.quit()
+
+        if sheet_names and not self._sheet_combo.isEnabled():
+            self._sheet_combo.blockSignals(True)
+            self._sheet_combo.clear()
+            for s in sheet_names:
+                self._sheet_combo.addItem(str(s))
+            self._sheet_combo.setEnabled(len(sheet_names) > 1)
+            self._sheet_combo.blockSignals(False)
+
+        self._df = df_full
+        self._all_columns = list(df_full.columns)
+        self._file_info_label.setText(f"{total_rows} linhas • {len(self._all_columns)} colunas")
+
+        self._preview_table.setRowCount(0)
+        self._preview_table.setColumnCount(len(df_preview.columns))
+        self._preview_table.setHorizontalHeaderLabels([str(c) for c in df_preview.columns])
+        for r, row in enumerate(df_preview.to_dict(orient="records")):
+            self._preview_table.insertRow(r)
+            for c, col in enumerate(df_preview.columns):
+                self._preview_table.setItem(r, c, QTableWidgetItem(str(row.get(col, "") or "")))
+
+        self._auto_map_columns()
+        self._update_nav()
+
+    def _auto_map_columns(self) -> None:
+        self._mapping_combos = {}
+        for col in self._all_columns:
+            self._mapping_combos[col] = _auto_map_forn(col)
+
+    # ── Passo 2: Mapeamento ───────────────────────────────────────────────────
+
+    def _build_step_mapeamento(self) -> QWidget:
+        page = QWidget()
+        page.setStyleSheet(f"background: {self.COLORS['bg']};")
+        layout = QVBoxLayout(page)
+        layout.setContentsMargins(16, 12, 16, 12)
+        layout.setSpacing(8)
+
+        # Barra de perfis
+        prof_row = QHBoxLayout()
+        prof_row.addWidget(QLabel("Perfil:"))
+        self._profile_combo = QComboBox()
+        self._profile_combo.setMinimumWidth(200)
+        self._refresh_profile_combo()
+        prof_row.addWidget(self._profile_combo)
+        btn_load_prof = QPushButton("Carregar")
+        btn_load_prof.clicked.connect(self._load_profile)
+        prof_row.addWidget(btn_load_prof)
+        btn_save_prof = QPushButton("Salvar Perfil")
+        btn_save_prof.clicked.connect(self._save_profile)
+        prof_row.addWidget(btn_save_prof)
+        btn_auto = QPushButton("Sugerir Automaticamente")
+        btn_auto.clicked.connect(self._auto_suggest)
+        prof_row.addWidget(btn_auto)
+        prof_row.addStretch()
+        layout.addLayout(prof_row)
+
+        # Tabela de mapeamento
+        self._map_table = QTableWidget()
+        self._map_table.setColumnCount(3)
+        self._map_table.setHorizontalHeaderLabels(["Coluna Da Planilha", "Campo Destino", "Amostra"])
+        self._map_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeToContents)
+        self._map_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.Stretch)
+        self._map_table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeToContents)
+        self._map_table.setAlternatingRowColors(True)
+        self._map_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self._map_table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self._map_table.verticalHeader().setVisible(False)
+        layout.addWidget(self._map_table, 1)
+        return page
+
+    def _refresh_mapping_rows(self) -> None:
+        self._map_table.setRowCount(0)
+        cols = self._all_columns
+        if not cols or self._df is None:
+            return
+        sample_row = self._df.iloc[0].to_dict() if len(self._df) > 0 else {}
+        campo_options = [("Ignorar Coluna", IGNORAR)] + [(v, k) for k, v in _ALL_CAMPOS_FORN.items()]
+        for row_idx, col in enumerate(cols):
+            self._map_table.insertRow(row_idx)
+            self._map_table.setItem(row_idx, 0, QTableWidgetItem(str(col)))
+            combo = _NoScrollCombo()
+            combo.setEditable(True)
+            combo.setInsertPolicy(QComboBox.NoInsert)
+            combo.addItem("Ignorar Coluna", IGNORAR)
+            for label, key in campo_options[1:]:
+                combo.addItem(label, key)
+            mapped = self._mapping_combos.get(col, IGNORAR)
+            for i in range(combo.count()):
+                if combo.itemData(i) == mapped:
+                    combo.setCurrentIndex(i)
+                    break
+            self._map_table.setCellWidget(row_idx, 1, combo)
+            sample = str(sample_row.get(col, "") or "")[:60]
+            self._map_table.setItem(row_idx, 2, QTableWidgetItem(sample))
+
+    def _collect_mapping(self) -> dict[str, str]:
+        mapping: dict[str, str] = {}
+        for r in range(self._map_table.rowCount()):
+            col = self._map_table.item(r, 0).text()
+            combo = self._map_table.cellWidget(r, 1)
+            if combo:
+                key = combo.currentData() or IGNORAR
+                if key != IGNORAR:
+                    mapping[key] = col
+        return mapping
+
+    def _refresh_profile_combo(self) -> None:
+        self._profile_combo.clear()
+        for name in self._profiles:
+            self._profile_combo.addItem(name)
+
+    def _load_profile(self) -> None:
+        name = self._profile_combo.currentText()
+        if name not in self._profiles:
+            return
+        saved = self._profiles[name]
+        self._mapping_combos = {col: saved.get(col, IGNORAR) for col in self._all_columns}
+        self._refresh_mapping_rows()
+
+    def _save_profile(self) -> None:
+        from PySide6.QtWidgets import QInputDialog
+        name, ok = QInputDialog.getText(self, "Salvar Perfil", "Nome do perfil:")
+        if not ok or not name.strip():
+            return
+        mapping = self._collect_mapping()
+        col_to_campo = {col: IGNORAR for col in self._all_columns}
+        for campo, col in mapping.items():
+            col_to_campo[col] = campo
+        self._profiles[name.strip()] = col_to_campo
+        _save_forn_profiles(self._profiles)
+        self._refresh_profile_combo()
+
+    def _auto_suggest(self) -> None:
+        for col in self._all_columns:
+            self._mapping_combos[col] = _auto_map_forn(col)
+        self._refresh_mapping_rows()
+
+    # ── Passo 3: Importar ─────────────────────────────────────────────────────
+
+    def _build_step_importar(self) -> QWidget:
+        page = QWidget()
+        page.setStyleSheet(f"background: {self.COLORS['bg']};")
+        layout = QVBoxLayout(page)
+        layout.setContentsMargins(24, 20, 24, 20)
+        layout.setSpacing(12)
+
+        self._import_progress = QProgressBar()
+        self._import_progress.setRange(0, 100)
+        self._import_progress.setValue(0)
+        layout.addWidget(self._import_progress)
+
+        self._import_status_label = QLabel("Pronto para importar.")
+        self._import_status_label.setWordWrap(True)
+        layout.addWidget(self._import_status_label)
+
+        self._import_log = QTextEdit()
+        self._import_log.setReadOnly(True)
+        self._import_log.setFont(__import__("PySide6.QtGui", fromlist=["QFont"]).QFont("Courier New", 9))
+        layout.addWidget(self._import_log, 1)
+        return page
+
+    def _start_import(self) -> None:
+        if self._df is None:
+            return
+        col_mapping = self._collect_mapping()
+        default_company_id: int | None = self._company_combo.currentData()
+
+        self._btn_importar.setEnabled(False)
+        self._btn_anterior.setEnabled(False)
+        self._import_log.clear()
+        self._import_progress.setValue(0)
+        self._import_status_label.setText("Importando...")
+
+        self._thread = QThread(self)
+        self._worker = _SupplierImportWorker(
+            self.repository, self.environment, default_company_id, col_mapping, self._df,
+        )
+        self._worker.moveToThread(self._thread)
+        self._thread.started.connect(self._worker.run)
+        self._worker.progress.connect(self._on_progress)
+        self._worker.finished.connect(self._on_finished)
+        self._worker.failed.connect(self._on_failed)
+        self._thread.start()
+
+    def _on_progress(self, current: int, total: int, msg: str) -> None:
+        if total > 0:
+            self._import_progress.setValue(int(current / total * 100))
+        self._import_status_label.setText(msg)
+
+    def _on_finished(self, stats: dict) -> None:
+        if self._thread:
+            self._thread.quit()
+        self._import_progress.setValue(100)
+        lines = [
+            f"Linhas na planilha: {stats['linhas']}",
+            f"Fornecedores novos: {stats['novos']}",
+            f"Atualizados: {stats['atualizados']}",
+            f"Ignorados (sem nome): {stats['ignorados']}",
+            f"Empresas criadas: {stats['empresas_criadas']}",
+            f"Erros: {len(stats['erros'])}",
+        ]
+        if stats["erros"]:
+            lines.append("")
+            lines.append("=== ERROS ===")
+            for e in stats["erros"][:30]:
+                lines.append(f"  Linha {e['linha']} [{e['fornecedor']}]: {e['erro']}")
+        self._import_log.setText("\n".join(lines))
+        self._import_status_label.setText(
+            f"<b style='color:{self.COLORS['ok']}'>Concluído.</b> "
+            f"{stats['novos']} novos • {stats['atualizados']} atualizados • {len(stats['erros'])} erros"
+        )
+        self._btn_importar.setEnabled(True)
+        self._btn_anterior.setEnabled(True)
+        self._btn_fechar.show()
+
+    def _on_failed(self, msg: str) -> None:
+        if self._thread:
+            self._thread.quit()
+        self._import_progress.setValue(0)
+        self._import_status_label.setText(f"<b style='color:{self.COLORS['bad']}'>Falha:</b> {msg}")
+        self._import_log.append(f"ERRO FATAL: {msg}")
+        self._btn_importar.setEnabled(True)
+        self._btn_anterior.setEnabled(True)

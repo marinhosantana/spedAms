@@ -1521,8 +1521,20 @@ class QtSpedApp(QMainWindow):
         self.company_page_table.itemSelectionChanged.connect(self.handle_company_page_select)
         return page
 
+    def open_supplier_import_dialog(self) -> None:
+        from app.ui_qt.import_planilha import ImportFornecedorDialog
+        dlg = ImportFornecedorDialog(self.mysql_repo, self.environment, self)
+        dlg.exec()
+        self.refresh_current_catalog_page()
+
     def build_catalog_supplier_page(self) -> QWidget:
         page = self.create_single_catalog_page("Fornecedores")
+        header_panel = page.layout().itemAt(0).widget()
+        if header_panel is not None and header_panel.layout() is not None:
+            header_panel.layout().insertWidget(
+                header_panel.layout().count() - 1,
+                self.create_button("Importar Planilha", self.open_supplier_import_dialog),
+            )
         self.supplier_page_fields = self.create_line_fields(("id", "nome", "cnpj", "inscricao_estadual", "uf", "codigo", "regime_tributario", "observacao"))
         self.supplier_page_company_combo = QComboBox()
         self.supplier_page_regime_combo = QComboBox()
@@ -1924,6 +1936,7 @@ class QtSpedApp(QMainWindow):
         file_row.addWidget(self.create_button("Selecionar", self._select_sped_check_file))
         file_row.addWidget(self.create_button("Gerar Relatorio", self.run_sped_catalog_check, primary=True))
         file_row.addWidget(self.create_button("Exportar Excel", self.export_sped_catalog_check))
+        file_row.addWidget(self.create_button("Exportar Modelo Produto", self.export_sped_check_modelo_produto))
         layout.addLayout(file_row)
 
         self.sped_check_info_label = QLabel("")
@@ -2069,6 +2082,18 @@ class QtSpedApp(QMainWindow):
                 ])
 
         self.sped_check_rows = table_rows
+        self.sped_check_catalog_by_code: dict[str, dict] = {}
+        self.sped_check_catalog_by_ean: dict[str, dict] = {}
+        for _prod in catalog_rows:
+            _key = str(_prod.get("codigo_empresa") or _prod.get("codigo_fornecedor") or "").strip()
+            if _key and _key not in self.sped_check_catalog_by_code:
+                self.sped_check_catalog_by_code[_key] = _prod
+            _ean = "".join(c for c in str(_prod.get("ean") or "") if c.isdigit())
+            if _ean and _ean not in self.sped_check_catalog_by_ean:
+                self.sped_check_catalog_by_ean[_ean] = _prod
+        self.sped_check_sped_products = {str(p.get("codigo") or "").strip(): p for p in sped_products}
+        self.sped_check_company_name = company_name
+        self.sped_check_entry_suppliers = entry_suppliers
         self.set_table_rows(self.sped_check_table, table_rows)
 
         total = len(seen_sped_codes)
@@ -2117,6 +2142,154 @@ class QtSpedApp(QMainWindow):
             self.handle_export_success("Conferência SPED x Cadastro", output_path, "Relatório exportado")
         except Exception as exc:
             self.handle_export_failure("Conferência SPED x Cadastro", "conferencia", exc)
+
+    def export_sped_check_modelo_produto(self) -> None:
+        catalog_by_code = getattr(self, "sped_check_catalog_by_code", {})
+        catalog_by_ean  = getattr(self, "sped_check_catalog_by_ean", {})
+        sped_products   = getattr(self, "sped_check_sped_products", {})
+        company_name    = getattr(self, "sped_check_company_name", "")
+        entry_suppliers = getattr(self, "sped_check_entry_suppliers", {})
+        if not sped_products:
+            QMessageBox.warning(self, "Exportar Modelo Produto", "Gere o relatorio antes de exportar.")
+            return
+        output, _ = QFileDialog.getSaveFileName(
+            self, "Salvar Modelo Produto", "conferencia_modelo_produto.xlsx",
+            "Arquivo Excel (*.xlsx)",
+        )
+        if not output:
+            return
+        output_path = Path(output)
+        if output_path.suffix.lower() != ".xlsx":
+            output_path = output_path.with_suffix(".xlsx")
+
+        HEADERS = [
+            "Status",
+            "ID",
+            "Empresa",
+            "Fornecedor",
+            "UF",
+            "Classificação",
+            "Cod. Forn.",
+            "Cod. Empresa",
+            "Descrição",
+            "EAN",
+            "NCM",
+            "CEST",
+            "Origem (entrada)",
+            "CST ICMS (entrada)",
+            "% Red BC ICMS",
+            "CFOP saída fornecedor",
+            "% ICMS (entrada)",
+            "CFOP entrada empresa",
+            "CST IPI",
+            "% IPI",
+            "CST PIS (entrada)",
+            "CST PIS_COFINS (ENTRADA EMPRESA)",
+            "% PIS",
+            "CST COFINS (entrada)",
+            "% COFINS",
+            "Natureza da receita",
+            "MVA",
+            "Valor ICMS-ST",
+            "cClassTrib",
+            "cBenef",
+            "Origem (saída)",
+            "CST ICMS (saída)",
+            "CFOP saída empresa",
+            "% ICMS (saída)",
+            "CST PIS (saída)",
+            "CST COFINS (saída)",
+            "Natureza da receita",
+            "Chave NFe origem",
+        ]
+
+        def _pct(v: object) -> str:
+            s = str(v or "").strip()
+            if not s:
+                return ""
+            try:
+                result = round(float(s.replace(",", ".")) * 100, 2)
+                return f"{result:.2f}".replace(".", ",")
+            except (ValueError, TypeError):
+                return s
+
+        rows: list[list[object]] = []
+        for sped_code, sped_prod in sped_products.items():
+            cat = catalog_by_code.get(sped_code)
+            if cat is None:
+                digits = "".join(c for c in sped_code if c.isdigit())
+                cat = catalog_by_ean.get(digits) if digits else None
+
+            status = "Cadastrado" if cat else "Nao Cadastrado"
+            suppliers = entry_suppliers.get(sped_code, [])
+            sup_name = suppliers[0].get("nome", "") if suppliers else ""
+
+            if cat:
+                row: list[object] = [
+                    status,
+                    str(cat.get("id") or ""),
+                    company_name,
+                    str(cat.get("fornecedor_nome") or ""),
+                    str(cat.get("fornecedor_uf") or ""),
+                    str(cat.get("tipo_produto") or ""),
+                    str(cat.get("codigo_fornecedor") or "") or sped_code,
+                    str(cat.get("codigo_empresa") or ""),
+                    str(cat.get("descricao") or ""),
+                    str(cat.get("ean") or ""),
+                    str(cat.get("ncm") or ""),
+                    str(cat.get("cest") or ""),
+                    str(cat.get("origem_entrada") or ""),
+                    str(cat.get("cst_icms") or ""),
+                    _pct(cat.get("reducao_bc_icms")),
+                    str(cat.get("cfop_saida_fornecedor") or ""),
+                    _pct(cat.get("aliquota_icms")),
+                    str(cat.get("cfop_entrada") or ""),
+                    str(cat.get("cst_ipi") or ""),
+                    _pct(cat.get("aliquota_ipi")),
+                    str(cat.get("cst_pis") or ""),
+                    str(cat.get("cst_pis_cofins") or ""),
+                    _pct(cat.get("aliquota_pis")),
+                    str(cat.get("cst_cofins") or ""),
+                    _pct(cat.get("aliquota_cofins")),
+                    str(cat.get("natureza_receita_entrada") or ""),
+                    _pct(cat.get("mva")),
+                    str(cat.get("valor_icms_st") or ""),
+                    str(cat.get("c_classtrib") or ""),
+                    str(cat.get("c_benef") or ""),
+                    str(cat.get("origem_saida") or ""),
+                    str(cat.get("cst_icms_saida") or ""),
+                    str(cat.get("cfop_saida_empresa") or ""),
+                    _pct(cat.get("aliquota_icms_saida")),
+                    str(cat.get("cst_pis_saida") or ""),
+                    str(cat.get("cst_cofins_saida") or ""),
+                    str(cat.get("natureza_receita_saida") or ""),
+                    str(cat.get("chave_nfe_origem") or ""),
+                ]
+            else:
+                row = [
+                    status,
+                    "", company_name, sup_name, "", "",
+                    sped_code, "",
+                    str(sped_prod.get("descricao") or ""),
+                    "",
+                    str(sped_prod.get("ncm") or ""),
+                    str(sped_prod.get("cest") or ""),
+                    "",
+                    str(sped_prod.get("cst_icms") or ""),
+                    "",
+                    "",
+                    str(sped_prod.get("aliquota_icms") or ""),
+                    "",
+                    "", "", "", "", "", "", "", "", "", "", "", "",
+                    "", "", "", "", "", "", "", "",
+                ]
+            rows.append(row)
+
+        try:
+            write_simple_excel_workbook(output_path, [("BASE_COMPLETA", HEADERS, rows, {"include_total": False})])
+            self.handle_export_success("Exportar Modelo Produto", output_path, "Exportacao concluida")
+        except Exception as exc:
+            self.handle_export_failure("Exportar Modelo Produto", "modelo_produto", exc)
 
     def create_single_catalog_page(self, title: str) -> QWidget:
         page = QWidget()
@@ -8127,7 +8300,18 @@ class QtSpedApp(QMainWindow):
         )
 
     def open_entry_operation_summary_popup(self) -> None:
-        self.open_operation_summary_for_rows(self.filtered_entry_rows, "Entrada", "Resumo Entradas")
+        c190_total: Decimal = Decimal("0")
+        sped_widget = getattr(self, "sped_input", None)
+        if sped_widget is not None:
+            try:
+                for path in parse_selected_paths(sped_widget.text()):
+                    _, _, _, c190_rows_file, _ = read_sped_file(path)
+                    for r in c190_rows_file:
+                        if str(r.get("operation_type", "")).strip() == "Entrada":
+                            c190_total += r.get("total_operation_value") or Decimal("0")
+            except Exception:
+                c190_total = Decimal("0")
+        self.open_operation_summary_for_rows(self.filtered_entry_rows, "Entrada", "Resumo Entradas", c190_total=c190_total)
 
     def open_entry_abc_popup(self) -> None:
         _periods, headers, _display_rows, export_rows = build_product_monthly_linear_dataset(self.filtered_entry_rows, "Entrada")
@@ -9080,7 +9264,7 @@ class QtSpedApp(QMainWindow):
             720,
         )
 
-    def open_operation_summary_for_rows(self, source_rows: list[dict[str, object]], operation_type: str, title: str) -> None:
+    def open_operation_summary_for_rows(self, source_rows: list[dict[str, object]], operation_type: str, title: str, *, c190_total: Decimal | None = None) -> None:
         grouped: dict[tuple[str, str, Decimal], dict[str, object]] = {}
         for row in source_rows:
             details = row.get("launch_details")
@@ -9125,7 +9309,7 @@ class QtSpedApp(QMainWindow):
             total_base += base_icms
             total_icms += icms_value
         headers = ["CST", "CFOP", "Aliq ICMS", "Aliq Efetiva", "Valor IPI", "Valor ICMS", "Base ICMS ST", "Valor ICMS ST", "Total Operacao", "Base ICMS", "Dif. Oper/Base", "Reducao BC", "Docs", "Lanc."]
-        self.open_operation_summary_popup_with_cards(title, headers, rows, total_sale, total_base, total_icms, detail_rows_by_index, operation_type)
+        self.open_operation_summary_popup_with_cards(title, headers, rows, total_sale, total_base, total_icms, detail_rows_by_index, operation_type, c190_total=c190_total)
 
     def open_operation_summary_popup_with_cards(
         self,
@@ -9137,6 +9321,8 @@ class QtSpedApp(QMainWindow):
         total_icms: Decimal,
         detail_rows_by_index: dict[int, list[dict[str, object]]] | None = None,
         operation_type: str = "",
+        *,
+        c190_total: Decimal | None = None,
     ) -> None:
         if not rows:
             QMessageBox.warning(self, title, "Nao ha dados para os filtros atuais.")
@@ -9241,6 +9427,23 @@ class QtSpedApp(QMainWindow):
             card_labels[value] = value_label
             cards_grid.addWidget(card, 0, index)
         layout.addLayout(cards_grid)
+
+        if c190_total is not None:
+            gap = (c190_total - total_sale).quantize(Decimal("0.01"))
+            if abs(gap) >= Decimal("0.01"):
+                _desp_label = QLabel(
+                    f"Desp. Acessorias (C190 − C170):  "
+                    f"C190 = {self.format_number(c190_total)}  |  "
+                    f"C170 (itens) = {self.format_number(total_sale)}  |  "
+                    f"Diferenca = {self.format_number(gap)}  "
+                    f"(frete, seguro e outras despesas do cabecalho das NFs — sem impacto no ICMS)"
+                )
+                _desp_label.setStyleSheet(
+                    "background: #fef9c3; color: #713f12; border: 1px solid #fcd34d; "
+                    "border-radius: 4px; padding: 5px 10px; font-size: 11px;"
+                )
+                _desp_label.setWordWrap(True)
+                layout.addWidget(_desp_label)
 
         filtered_rows_state: dict[str, list[list[object]]] = {"rows": list(export_rows)}
 

@@ -1217,8 +1217,10 @@ class MysqlCadastroRepository:
         inscricao_estadual: str = "",
         uf: str = "",
         regime_tributario: str = "LUCRO_REAL_PRESUMIDO",
+        codigo: str = "",
     ) -> int:
         normalized_name = str(name or "").strip()
+        normalized_codigo = str(codigo or "").strip()
         normalized_cnpj = self._only_digits(cnpj)
         normalized_ie = str(inscricao_estadual or "").strip()
         normalized_uf = self._trim_text(uf, 2).upper()
@@ -1257,7 +1259,8 @@ class MysqlCadastroRepository:
                             SET cnpj = CASE WHEN %s <> '' THEN %s ELSE cnpj END,
                                 inscricao_estadual = CASE WHEN %s <> '' THEN %s ELSE inscricao_estadual END,
                                 uf = CASE WHEN %s <> '' THEN %s ELSE uf END,
-                                regime_tributario = CASE WHEN %s <> '' THEN %s ELSE regime_tributario END
+                                regime_tributario = CASE WHEN %s <> '' THEN %s ELSE regime_tributario END,
+                                codigo = CASE WHEN %s <> '' THEN %s ELSE codigo END
                             WHERE id = %s
                             """,
                             (
@@ -1265,6 +1268,7 @@ class MysqlCadastroRepository:
                                 normalized_ie, normalized_ie,
                                 normalized_uf, normalized_uf,
                                 normalized_regime, normalized_regime,
+                                normalized_codigo, normalized_codigo,
                                 supplier_id,
                             ),
                         )
@@ -1276,7 +1280,8 @@ class MysqlCadastroRepository:
                                 cnpj = CASE WHEN %s <> '' THEN %s ELSE cnpj END,
                                 inscricao_estadual = CASE WHEN %s <> '' THEN %s ELSE inscricao_estadual END,
                                 uf = CASE WHEN %s <> '' THEN %s ELSE uf END,
-                                regime_tributario = CASE WHEN %s <> '' THEN %s ELSE regime_tributario END
+                                regime_tributario = CASE WHEN %s <> '' THEN %s ELSE regime_tributario END,
+                                codigo = CASE WHEN %s <> '' THEN %s ELSE codigo END
                             WHERE id = %s
                             """,
                             (
@@ -1285,6 +1290,7 @@ class MysqlCadastroRepository:
                                 normalized_ie, normalized_ie,
                                 normalized_uf, normalized_uf,
                                 normalized_regime, normalized_regime,
+                                normalized_codigo, normalized_codigo,
                                 supplier_id,
                             ),
                         )
@@ -1309,18 +1315,16 @@ class MysqlCadastroRepository:
                     SET cnpj = CASE WHEN %s <> '' THEN %s ELSE cnpj END,
                         inscricao_estadual = CASE WHEN %s <> '' THEN %s ELSE inscricao_estadual END,
                         uf = CASE WHEN %s <> '' THEN %s ELSE uf END,
-                        regime_tributario = CASE WHEN %s <> '' THEN %s ELSE regime_tributario END
+                        regime_tributario = CASE WHEN %s <> '' THEN %s ELSE regime_tributario END,
+                        codigo = CASE WHEN %s <> '' THEN %s ELSE codigo END
                     WHERE id = %s
                     """,
                     (
-                        normalized_cnpj,
-                        normalized_cnpj,
-                        normalized_ie,
-                        normalized_ie,
-                        normalized_uf,
-                        normalized_uf,
-                        normalized_regime,
-                        normalized_regime,
+                        normalized_cnpj, normalized_cnpj,
+                        normalized_ie, normalized_ie,
+                        normalized_uf, normalized_uf,
+                        normalized_regime, normalized_regime,
+                        normalized_codigo, normalized_codigo,
                         supplier_id,
                     ),
                 )
@@ -1552,6 +1556,25 @@ class MysqlCadastroRepository:
             )
             connection.commit()
             return int(cursor.lastrowid)
+        finally:
+            connection.close()
+
+    def fetch_supplier_product_by_fornecedor_code(
+        self, supplier_id: int, codigo_fornecedor: str
+    ) -> dict | None:
+        connection = self.get_connection()
+        try:
+            cursor = connection.cursor(dictionary=True)
+            cursor.execute(
+                """
+                SELECT id, codigo_empresa
+                FROM cad_produtos_fornecedor
+                WHERE fornecedor_id = %s AND codigo_fornecedor = %s
+                LIMIT 1
+                """,
+                (supplier_id, str(codigo_fornecedor).strip()),
+            )
+            return cursor.fetchone()
         finally:
             connection.close()
 
@@ -2459,7 +2482,8 @@ class MysqlCadastroRepository:
                 SELECT
                     p.*,
                     f.nome AS fornecedor_nome,
-                    f.cnpj AS fornecedor_cnpj
+                    f.cnpj AS fornecedor_cnpj,
+                    f.uf AS fornecedor_uf
                 FROM cad_produtos_fornecedor p
                 JOIN cad_fornecedores f ON f.id = p.fornecedor_id
                 JOIN cad_empresas e ON e.id = f.empresa_id

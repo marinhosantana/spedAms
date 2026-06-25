@@ -14,6 +14,18 @@ def _norm_cfop(v: object) -> str:
     return "".join(c for c in str(v or "") if c.isdigit())
 
 
+def _db_aliq_to_pct(v: object) -> str:
+    """Converte alíquota armazenada como fração (0.18) para percentual (18,00)."""
+    s = str(v or "").strip()
+    if not s:
+        return ""
+    try:
+        result = round(Decimal(s.replace(",", ".")) * 100, 2)
+        return f"{result:.2f}".replace(".", ",")
+    except InvalidOperation:
+        return s
+
+
 def _norm_aliq(v: object) -> Decimal | None:
     s = str(v or "").strip().replace(",", ".")
     if not s:
@@ -36,17 +48,17 @@ def _cst_diverges(sped_val: str, cat_val: str) -> bool:
 
 
 def _cfop_diverges(sped_val: str, cat_val: str) -> bool:
-    """Ambos têm CFOP mas os valores diferem."""
+    """SPED tem CFOP e nenhum CFOP do catálogo bate com ele."""
     s = _norm_cfop(sped_val)
-    c = _norm_cfop(cat_val)
-    return bool(s) and bool(c) and s != c
+    cat_parts = {_norm_cfop(p) for p in cat_val.split("|")} - {""}
+    return bool(s) and bool(cat_parts) and s not in cat_parts
 
 
 def _cfop_zerado(sped_val: str, cat_val: str) -> bool:
-    """SPED tem CFOP mas o cadastro está vazio/zerado."""
+    """SPED tem CFOP mas o catálogo está vazio/zerado."""
     s = _norm_cfop(sped_val)
-    c = _norm_cfop(cat_val)
-    return bool(s) and not bool(c)
+    cat_parts = {_norm_cfop(p) for p in cat_val.split("|")} - {""}
+    return bool(s) and not bool(cat_parts)
 
 
 def _aliq_diverges(sped_aliq: str, cat_aliq: str) -> bool:
@@ -121,6 +133,8 @@ def build_confronto_data(
     # Indexa catálogo por codigo_empresa e por ean (ambos com merge de campos).
     # O código do SPED pode ser o codigo_empresa (código interno) ou o EAN
     # do produto — a busca tenta codigo_empresa primeiro, depois EAN.
+    _CFOP_FIELDS = {"cfop_entrada", "cfop_saida_empresa", "cfop_saida_fornecedor"}
+
     def _merge_into(index: dict[str, dict], key: str, prod: dict) -> None:
         if not key:
             return
@@ -129,13 +143,23 @@ def build_confronto_data(
         else:
             existing = index[key]
             for k, v in prod.items():
-                if not str(existing.get(k) or "").strip() and str(v or "").strip():
+                existing_val = str(existing.get(k) or "").strip()
+                new_val = str(v or "").strip()
+                if not existing_val and new_val:
                     existing[k] = v
+                elif existing_val and new_val and k in _CFOP_FIELDS:
+                    # Acumula CFOPs de múltiplos fornecedores para o mesmo código
+                    parts = {p.strip() for p in existing_val.split("|")}
+                    if new_val not in parts:
+                        existing[k] = existing_val + " | " + new_val
 
-    by_code: dict[str, dict] = {}   # codigo_empresa → produto mesclado
+    by_code: dict[str, dict] = {}   # codigo_empresa e codigo_fornecedor → produto mesclado
     by_ean:  dict[str, dict] = {}   # ean (só dígitos) → produto mesclado
     for prod in catalog_products:
         _merge_into(by_code, str(prod.get("codigo_empresa") or "").strip(), prod)
+        # Indexa também por codigo_fornecedor para que o SPED code ache o produto
+        # mesmo quando codigo_empresa é um código interno diferente do código do SPED
+        _merge_into(by_code, str(prod.get("codigo_fornecedor") or "").strip(), prod)
         ean_digits = "".join(c for c in str(prod.get("ean") or "") if c.isdigit())
         _merge_into(by_ean, ean_digits, prod)
 
@@ -155,12 +179,12 @@ def build_confronto_data(
             code_digits = "".join(c for c in code if c.isdigit())
             if code_digits:
                 cat = by_ean.get(code_digits)
-        cat_cst   = str(cat.get(cst_f) or "")  if cat else ""
-        cat_cfop  = str(cat.get(cfop_f) or "") if cat else ""
-        cat_aliq  = str(cat.get(aliq_f) or "") if cat else ""
-        cat_pis   = str(cat.get(pis_f) or "")  if cat else ""
-        cat_cof   = str(cat.get(cof_f) or "")  if cat else ""
-        cat_ncm   = str(cat.get("ncm") or "")  if cat else ""
+        cat_cst   = str(cat.get(cst_f) or "")              if cat else ""
+        cat_cfop  = str(cat.get(cfop_f) or "")             if cat else ""
+        cat_aliq  = _db_aliq_to_pct(cat.get(aliq_f))      if cat else ""
+        cat_pis   = str(cat.get(pis_f) or "")              if cat else ""
+        cat_cof   = str(cat.get(cof_f) or "")              if cat else ""
+        cat_ncm   = str(cat.get("ncm") or "")              if cat else ""
 
         if cat:
             issues: list[str] = []
@@ -222,7 +246,7 @@ def build_confronto_data(
             if d_cat:
                 dc_cst  = str(d_cat.get(cst_f) or "")
                 dc_cfop = str(d_cat.get(cfop_f) or "")
-                dc_aliq = str(d_cat.get(aliq_f) or "")
+                dc_aliq = _db_aliq_to_pct(d_cat.get(aliq_f))
                 dc_pis  = str(d_cat.get(pis_f) or "")
                 dc_cof  = str(d_cat.get(cof_f) or "")
                 dc_ncm  = str(d_cat.get("ncm") or "")
