@@ -556,11 +556,15 @@ def _execute_import(
                 return _get_val(_row, col_mapping, campo)
 
             # ── Empresa ──────────────────────────────────────────────────────
+            # A empresa selecionada na UI tem prioridade. O campo "empresa_nome"
+            # da planilha só é usado quando não há empresa selecionada na UI.
             emp_nome = get("empresa_nome")
             emp_cnpj = get("empresa_cnpj")
             emp_ie   = get("empresa_ie")
 
-            if emp_nome:
+            if default_company_id is not None:
+                empresa_id = default_company_id
+            elif emp_nome:
                 emp_key = (emp_nome.lower(), emp_cnpj)
                 if emp_key not in seen_empresas:
                     if repo.find_company_id(environment, emp_nome, emp_cnpj) is None:
@@ -569,8 +573,6 @@ def _execute_import(
                         environment, emp_nome, emp_cnpj, emp_ie
                     )
                 empresa_id = seen_empresas[emp_key]
-            elif default_company_id is not None:
-                empresa_id = default_company_id
             else:
                 stats["ignorados"] += 1
                 _skip(idx, "", "", "", get("descricao"), "Sem Empresa (Campo Empresa_Nome Vazio E Sem Empresa Padrão)")
