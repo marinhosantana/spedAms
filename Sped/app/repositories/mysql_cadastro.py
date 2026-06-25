@@ -316,6 +316,19 @@ class MysqlCadastroRepository:
     def _only_digits(self, value: object) -> str:
         return "".join(char for char in str(value or "") if char.isdigit())
 
+    def _cfop_digits(self, value: object, max_length: int = 10) -> str:
+        """Extrai dígitos de um CFOP, convertendo representação float ("1102.0" → "1102")."""
+        text = str(value or "").strip()
+        if not text:
+            return ""
+        try:
+            fv = float(text)
+            if fv == int(fv):
+                text = str(int(fv))
+        except (ValueError, TypeError, OverflowError):
+            pass
+        return "".join(c for c in text if c.isdigit())[:max_length]
+
     def _decimal_text(self, value: object) -> str:
         text = str(value or "").strip()
         if "," in text:
@@ -1463,15 +1476,15 @@ class MysqlCadastroRepository:
             self._only_digits(data.get("ncm", ""))[:20],
             self._only_digits(data.get("cest", ""))[:20],
             self._trim_text(data.get("origem_entrada", ""), 4),
-            self._only_digits(data.get("cfop_saida_fornecedor", ""))[:10],
-            self._only_digits(data.get("cfop_entrada", ""))[:10],
-            self._only_digits(data.get("cfop_saida", ""))[:10],
+            self._cfop_digits(data.get("cfop_saida_fornecedor", "")),
+            self._cfop_digits(data.get("cfop_entrada", "")),
+            self._cfop_digits(data.get("cfop_saida", "")),
             self._trim_text(data.get("natureza_receita_entrada", ""), 40),
             self._trim_text(data.get("c_classtrib", ""), 20),
             self._trim_text(data.get("c_benef", ""), 20),
             self._trim_text(data.get("origem_saida", ""), 4),
             self._trim_text(data.get("cst_icms_saida", ""), 4),
-            self._only_digits(data.get("cfop_saida_empresa", ""))[:10],
+            self._cfop_digits(data.get("cfop_saida_empresa", "")),
             self._decimal_text(data.get("aliquota_icms_saida", "")),
             self._trim_text(data.get("cst_icms", ""), 4),
             self._decimal_text(data.get("reducao_bc_icms", "")),
@@ -1601,15 +1614,15 @@ class MysqlCadastroRepository:
             self._only_digits(data.get("ncm", ""))[:20],
             self._only_digits(data.get("cest", ""))[:20],
             self._trim_text(data.get("origem_entrada", ""), 4),
-            self._only_digits(data.get("cfop_saida_fornecedor", ""))[:10],
-            self._only_digits(data.get("cfop_entrada", ""))[:10],
-            self._only_digits(data.get("cfop_saida", ""))[:10],
+            self._cfop_digits(data.get("cfop_saida_fornecedor", "")),
+            self._cfop_digits(data.get("cfop_entrada", "")),
+            self._cfop_digits(data.get("cfop_saida", "")),
             self._trim_text(data.get("natureza_receita_entrada", ""), 40),
             self._trim_text(data.get("c_classtrib", ""), 20),
             self._trim_text(data.get("c_benef", ""), 20),
             self._trim_text(data.get("origem_saida", ""), 4),
             self._trim_text(data.get("cst_icms_saida", ""), 4),
-            self._only_digits(data.get("cfop_saida_empresa", ""))[:10],
+            self._cfop_digits(data.get("cfop_saida_empresa", "")),
             self._decimal_text(data.get("aliquota_icms_saida", "")),
             self._trim_text(data.get("cst_icms", ""), 4),
             self._decimal_text(data.get("reducao_bc_icms", "")),

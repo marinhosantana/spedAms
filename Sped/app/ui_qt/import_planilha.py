@@ -126,8 +126,9 @@ _SINONIMOS: dict[str, list[str]] = {
     "ncm":                ["ncm produto", "ncm"],
     "cest":               ["cest"],
     "origem_entrada":     ["origem entrada", "origem"],
-    "cfop_entrada":       ["cfop entrada", "cfop ent"],
-    "cfop_saida":         ["cfop saida", "cfop sai"],
+    "cfop_entrada":       ["cfop entrada", "cfop ent", "cfop de entrada", "cfop de ent",
+                           "cfop entrada empresa", "cfop ent empresa"],
+    "cfop_saida":         ["cfop saida", "cfop sai", "cfop de saida"],
     "cst_icms":           ["cst icms entrada", "cst icms"],
     "aliquota_icms":      ["aliquota icms", "aliq icms", "perc icms"],
     "reducao_bc_icms":    ["reducao bc icms", "reducao bc", "red bc icms"],
@@ -662,6 +663,17 @@ def _execute_import(
                 "c_benef":             get("c_benef"),
                 "fornecedor_codigo":   get("fornecedor_codigo"),
             }
+
+            # ── Normaliza CFOPs (Excel lê "1102" como "1102.0" em células numéricas) ──
+            for _cf in ("cfop_entrada", "cfop_saida", "cfop_saida_fornecedor", "cfop_saida_empresa"):
+                _v = data.get(_cf, "")
+                if _v:
+                    try:
+                        _fv = float(_v)
+                        if _fv == int(_fv):
+                            data[_cf] = str(int(_fv))
+                    except (ValueError, TypeError):
+                        pass
 
             # ── Herança de CFOP por codigo_empresa ───────────────────────────
             # Se a planilha não trouxe cfop_entrada, mas o produto tem
