@@ -588,14 +588,15 @@ def _execute_import(
             forn_cnpj   = get("fornecedor_cnpj")
             forn_uf     = get("fornecedor_uf")
             forn_ie     = get("fornecedor_ie")
-            forn_regime = get("fornecedor_regime") or "LUCRO_REAL_PRESUMIDO"
+            forn_regime = get("fornecedor_regime")
+            forn_codigo = get("fornecedor_codigo")
 
             forn_key = (empresa_id, forn_nome.lower(), forn_cnpj)
             if forn_key not in seen_fornecedores:
                 if repo.find_supplier_id(empresa_id, forn_nome, forn_cnpj) is None:
                     stats["fornecedores_criados"] += 1
                 seen_fornecedores[forn_key] = repo.ensure_supplier(
-                    empresa_id, forn_nome, forn_cnpj, forn_ie, forn_uf, forn_regime
+                    empresa_id, forn_nome, forn_cnpj, forn_ie, forn_uf, forn_regime, forn_codigo
                 )
             fornecedor_id = seen_fornecedores[forn_key]
 
@@ -2095,15 +2096,15 @@ def _execute_supplier_import(
             emp_nome = get(row, "empresa_nome")
             emp_cnpj = get(row, "empresa_cnpj")
 
-            if emp_nome:
+            if default_company_id is not None:
+                empresa_id = default_company_id
+            elif emp_nome:
                 emp_key = (emp_nome.lower(), emp_cnpj)
                 if emp_key not in seen_empresas:
                     if repo.find_company_id(environment, emp_nome, emp_cnpj) is None:
                         stats["empresas_criadas"] += 1
                     seen_empresas[emp_key] = repo.ensure_company(environment, emp_nome, emp_cnpj)
                 empresa_id = seen_empresas[emp_key]
-            elif default_company_id is not None:
-                empresa_id = default_company_id
             else:
                 stats["ignorados"] += 1
                 continue
@@ -2111,7 +2112,7 @@ def _execute_supplier_import(
             forn_cnpj   = get(row, "fornecedor_cnpj")
             forn_uf     = get(row, "fornecedor_uf")
             forn_ie     = get(row, "fornecedor_ie")
-            forn_regime = get(row, "fornecedor_regime") or "LUCRO_REAL_PRESUMIDO"
+            forn_regime = get(row, "fornecedor_regime")
             forn_codigo = get(row, "fornecedor_codigo")
 
             existing_id = repo.find_supplier_id(empresa_id, forn_nome, forn_cnpj)

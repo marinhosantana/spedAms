@@ -1237,7 +1237,9 @@ class MysqlCadastroRepository:
         normalized_cnpj = self._only_digits(cnpj)
         normalized_ie = str(inscricao_estadual or "").strip()
         normalized_uf = self._trim_text(uf, 2).upper()
-        normalized_regime = self._trim_text(regime_tributario, 30) or "LUCRO_REAL_PRESUMIDO"
+        # Para UPDATE usa vazio (CASE WHEN mantém valor existente); para INSERT usa padrão
+        normalized_regime = self._trim_text(regime_tributario, 30)
+        insert_regime = normalized_regime or "LUCRO_REAL_PRESUMIDO"
         if not company_id:
             raise ValueError("Empresa obrigatoria para fornecedor.")
         if not normalized_name:
@@ -1347,9 +1349,9 @@ class MysqlCadastroRepository:
                 cursor.execute(
                     """
                     INSERT INTO cad_fornecedores (empresa_id, nome, cnpj, inscricao_estadual, uf, codigo, regime_tributario, observacao)
-                    VALUES (%s, %s, %s, %s, %s, '', %s, 'Importado de XML')
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, 'Importado de XML')
                     """,
-                    (company_id, normalized_name, normalized_cnpj, normalized_ie, normalized_uf, normalized_regime),
+                    (company_id, normalized_name, normalized_cnpj, normalized_ie, normalized_uf, normalized_codigo, insert_regime),
                 )
                 connection.commit()
                 return int(cursor.lastrowid)
