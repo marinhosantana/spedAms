@@ -1261,33 +1261,63 @@ class MysqlCadastroRepository:
                 row = cursor.fetchone()
                 if row:
                     supplier_id = int(row[0])
-                    # Check if another supplier already uses the new nome to avoid duplicate key
+                    # Verifica se outro fornecedor já usa o nome desejado
                     cursor.execute(
-                        "SELECT id FROM cad_fornecedores WHERE empresa_id = %s AND UPPER(nome) = UPPER(%s) AND id != %s LIMIT 1",
+                        "SELECT id, cnpj FROM cad_fornecedores WHERE empresa_id = %s AND UPPER(nome) = UPPER(%s) AND id != %s LIMIT 1",
                         (company_id, normalized_name, supplier_id),
                     )
-                    nome_taken = cursor.fetchone() is not None
-                    if nome_taken:
-                        cursor.execute(
-                            """
-                            UPDATE cad_fornecedores
-                            SET cnpj = CASE WHEN %s <> '' THEN %s ELSE cnpj END,
-                                inscricao_estadual = CASE WHEN %s <> '' THEN %s ELSE inscricao_estadual END,
-                                uf = CASE WHEN %s <> '' THEN %s ELSE uf END,
-                                regime_tributario = CASE WHEN %s <> '' THEN %s ELSE regime_tributario END,
-                                codigo = CASE WHEN %s <> '' THEN %s ELSE codigo END
-                            WHERE id = %s
-                            """,
-                            (
-                                normalized_cnpj, normalized_cnpj,
-                                normalized_ie, normalized_ie,
-                                normalized_uf, normalized_uf,
-                                normalized_regime, normalized_regime,
-                                normalized_codigo, normalized_codigo,
-                                supplier_id,
-                            ),
-                        )
+                    nome_conflict = cursor.fetchone()
+                    if nome_conflict:
+                        conflito_id = int(nome_conflict[0])
+                        conflito_cnpj = str(nome_conflict[1] or "").strip()
+                        if not conflito_cnpj:
+                            # O conflitante não tem CNPJ — é um duplicado criado sem CNPJ.
+                            # Preferir o que tem o nome correto; atualizar seu CNPJ e retornar ele.
+                            cursor.execute(
+                                """
+                                UPDATE cad_fornecedores
+                                SET cnpj = %s,
+                                    inscricao_estadual = CASE WHEN %s <> '' THEN %s ELSE inscricao_estadual END,
+                                    uf = CASE WHEN %s <> '' THEN %s ELSE uf END,
+                                    regime_tributario = CASE WHEN %s <> '' THEN %s ELSE regime_tributario END,
+                                    codigo = CASE WHEN %s <> '' THEN %s ELSE codigo END
+                                WHERE id = %s
+                                """,
+                                (
+                                    normalized_cnpj,
+                                    normalized_ie, normalized_ie,
+                                    normalized_uf, normalized_uf,
+                                    normalized_regime, normalized_regime,
+                                    normalized_codigo, normalized_codigo,
+                                    conflito_id,
+                                ),
+                            )
+                            connection.commit()
+                            return conflito_id
+                        else:
+                            # Conflita com fornecedor de CNPJ diferente (filial distinta).
+                            # Atualiza o encontrado por CNPJ sem alterar o nome.
+                            cursor.execute(
+                                """
+                                UPDATE cad_fornecedores
+                                SET cnpj = CASE WHEN %s <> '' THEN %s ELSE cnpj END,
+                                    inscricao_estadual = CASE WHEN %s <> '' THEN %s ELSE inscricao_estadual END,
+                                    uf = CASE WHEN %s <> '' THEN %s ELSE uf END,
+                                    regime_tributario = CASE WHEN %s <> '' THEN %s ELSE regime_tributario END,
+                                    codigo = CASE WHEN %s <> '' THEN %s ELSE codigo END
+                                WHERE id = %s
+                                """,
+                                (
+                                    normalized_cnpj, normalized_cnpj,
+                                    normalized_ie, normalized_ie,
+                                    normalized_uf, normalized_uf,
+                                    normalized_regime, normalized_regime,
+                                    normalized_codigo, normalized_codigo,
+                                    supplier_id,
+                                ),
+                            )
                     else:
+                        # Nome disponível — atualiza com o nome correto
                         cursor.execute(
                             """
                             UPDATE cad_fornecedores
