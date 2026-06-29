@@ -17,6 +17,7 @@ if (-not (Test-Path $pythonExe)) {
     --windowed `
     --name "RevisorSPED_PROD" `
     --paths ".\Sped" `
+    --add-data ".\Sped\assets;assets" `
     ".\Sped\build_entries\prod.py"
 
 Copy-Item -Path ".\Sped\mysql_schema.sql" -Destination ".\dist\RevisorSPED_PROD\mysql_schema.sql" -Force

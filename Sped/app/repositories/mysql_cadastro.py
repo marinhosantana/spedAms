@@ -1623,6 +1623,39 @@ class MysqlCadastroRepository:
         finally:
             connection.close()
 
+    def update_produto_codigo_fornecedor(self, product_id: int, new_codigo: str) -> None:
+        """Atualiza apenas codigo_fornecedor de um produto, sem alterar outros campos."""
+        connection = self.get_connection()
+        try:
+            cursor = connection.cursor()
+            cursor.execute(
+                "UPDATE cad_produtos_fornecedor SET codigo_fornecedor = %s WHERE id = %s",
+                (str(new_codigo).strip()[:80], product_id),
+            )
+            connection.commit()
+        finally:
+            connection.close()
+
+    def get_catalog_products_by_empresa_id(self, empresa_id: int) -> list[dict]:
+        """Retorna produtos do catálogo de uma empresa (por empresa_id, não CNPJ)."""
+        connection = self.get_connection()
+        try:
+            cursor = connection.cursor(dictionary=True)
+            cursor.execute(
+                """
+                SELECT p.id, p.fornecedor_id, p.codigo_fornecedor, p.codigo_empresa,
+                       p.descricao, p.ean, p.ncm,
+                       f.nome AS fornecedor_nome
+                FROM cad_produtos_fornecedor p
+                JOIN cad_fornecedores f ON f.id = p.fornecedor_id
+                WHERE f.empresa_id = %s
+                """,
+                (empresa_id,),
+            )
+            return cursor.fetchall() or []
+        finally:
+            connection.close()
+
     def _make_product_row(self, supplier_id: int, data: dict) -> tuple:
         """Monta a tupla de valores para INSERT/UPDATE em cad_produtos_fornecedor."""
         cst_pis    = self._trim_text(data.get("cst_pis",    data.get("cst_pis_cofins",    "")), 4)

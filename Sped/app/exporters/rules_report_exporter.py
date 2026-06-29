@@ -2,11 +2,24 @@ from __future__ import annotations
 
 import datetime as dt
 import html
+import sys
 from decimal import Decimal
 from pathlib import Path
 from zipfile import ZIP_DEFLATED, ZipFile
 
 from app.services.tax_rules import normalize_operation_type
+
+# ── Logo DZ Consultoria ───────────────────────────────────────────────────────
+def _resolve_logo_word() -> Path | None:
+    if getattr(sys, "frozen", False):
+        p = Path(sys.executable).parent / "assets" / "logo.png"
+    else:
+        p = Path(__file__).parent.parent.parent / "assets" / "logo.png"
+    return p if p.exists() else None
+
+_LOGO_PATH_WORD: Path | None = _resolve_logo_word()
+_LOGO_CX = 2160000   # 6 cm em EMU
+_LOGO_CY = 1572000   # 4.37 cm em EMU (proporção 527×383)
 
 
 
@@ -129,12 +142,55 @@ def make_word_paragraph(text: str, style: str | None = None) -> str:
     )
 
 
+def _make_logo_paragraph() -> str:
+    """Retorna XML de parágrafo Word com a logo DZ centralizada."""
+    return (
+        '<w:p>'
+        '<w:pPr><w:jc w:val="center"/></w:pPr>'
+        '<w:r>'
+        '<w:drawing>'
+        '<wp:inline distT="0" distB="114300" distL="0" distR="0"'
+        ' xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing">'
+        f'<wp:extent cx="{_LOGO_CX}" cy="{_LOGO_CY}"/>'
+        '<wp:effectExtent l="0" t="0" r="0" b="0"/>'
+        '<wp:docPr id="1" name="Logo DZ"/>'
+        '<a:graphic xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">'
+        '<a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/picture">'
+        '<pic:pic xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture">'
+        '<pic:nvPicPr>'
+        '<pic:cNvPr id="1" name="Logo DZ"/>'
+        '<pic:cNvPicPr/>'
+        '</pic:nvPicPr>'
+        '<pic:blipFill>'
+        '<a:blip r:embed="rIdLogo"/>'
+        '<a:stretch><a:fillRect/></a:stretch>'
+        '</pic:blipFill>'
+        '<pic:spPr>'
+        '<a:xfrm><a:off x="0" y="0"/>'
+        f'<a:ext cx="{_LOGO_CX}" cy="{_LOGO_CY}"/></a:xfrm>'
+        '<a:prstGeom prst="rect"><a:avLst/></a:prstGeom>'
+        '</pic:spPr>'
+        '</pic:pic>'
+        '</a:graphicData>'
+        '</a:graphic>'
+        '</wp:inline>'
+        '</w:drawing>'
+        '</w:r>'
+        '</w:p>'
+    )
+
+
 def write_rules_report_docx(
     output_path: Path,
     report_title: str,
     sections: list[dict[str, object]],
 ) -> None:
-    body_parts: list[str] = [
+    logo_parts: list[str] = []
+    if _LOGO_PATH_WORD:
+        logo_parts.append(_make_logo_paragraph())
+        logo_parts.append(make_word_paragraph(""))
+
+    body_parts: list[str] = logo_parts + [
         make_word_paragraph(report_title, "Heading1"),
         make_word_paragraph(f"Gerado em: {dt.datetime.now().strftime('%d/%m/%Y %H:%M:%S')}"),
         make_word_paragraph("Observacao geral: as regras documentadas neste relatorio nao alteram o valor do IPI."),
@@ -212,11 +268,12 @@ def write_rules_report_docx(
   </w:style>
 </w:styles>
 """
-    content_types = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+    png_ctype = '  <Default Extension="png" ContentType="image/png"/>\n' if _LOGO_PATH_WORD else ""
+    content_types = f"""<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
   <Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
   <Default Extension="xml" ContentType="application/xml"/>
-  <Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>
+{png_ctype}  <Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>
   <Override PartName="/word/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.styles+xml"/>
   <Override PartName="/docProps/core.xml" ContentType="application/vnd.openxmlformats-package.core-properties+xml"/>
   <Override PartName="/docProps/app.xml" ContentType="application/vnd.openxmlformats-officedocument.extended-properties+xml"/>
@@ -229,10 +286,16 @@ def write_rules_report_docx(
   <Relationship Id="rId3" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/extended-properties" Target="docProps/app.xml"/>
 </Relationships>
 """
-    document_rels = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+    logo_rel = (
+        '  <Relationship Id="rIdLogo"'
+        ' Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image"'
+        ' Target="media/logo.png"/>\n'
+        if _LOGO_PATH_WORD else ""
+    )
+    document_rels = f"""<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
   <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/>
-</Relationships>
+{logo_rel}</Relationships>
 """
     app_xml = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <Properties xmlns="http://schemas.openxmlformats.org/officeDocument/2006/extended-properties"
@@ -263,3 +326,5 @@ def write_rules_report_docx(
         docx.writestr("word/document.xml", document_xml)
         docx.writestr("word/styles.xml", styles_xml)
         docx.writestr("word/_rels/document.xml.rels", document_rels)
+        if _LOGO_PATH_WORD:
+            docx.writestr("word/media/logo.png", _LOGO_PATH_WORD.read_bytes())

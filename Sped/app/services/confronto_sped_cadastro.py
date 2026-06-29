@@ -86,10 +86,12 @@ def _append_unique_document_key(keys: list[str], value: object) -> None:
 
 # Campos disponíveis para seleção pelo usuário
 COMPARE_FIELD_LABELS: dict[str, str] = {
-    "cst":      "CST ICMS",
-    "cfop":     "CFOP",
-    "aliquota": "Alíquota ICMS %",
-    "ncm":      "NCM",
+    "cst":        "CST ICMS",
+    "cfop":       "CFOP",
+    "aliquota":   "Alíquota ICMS %",
+    "ncm":        "NCM",
+    "aliq_pis":   "Alíquota PIS %",
+    "aliq_cofins": "Alíquota COFINS %",
 }
 
 DEFAULT_COMPARE_FIELDS: frozenset[str] = frozenset({"cst", "cfop"})
@@ -113,22 +115,28 @@ def build_confronto_data(
     Retorna (grouped_rows, detail_rows).
     """
     if operation_type == "Entrada":
-        cst_f  = "cst_icms"
-        cfop_f = "cfop_entrada"
-        aliq_f = "aliquota_icms"
-        pis_f  = "cst_pis"
-        cof_f  = "cst_cofins"
+        cst_f       = "cst_icms"
+        cfop_f      = "cfop_entrada"
+        aliq_f      = "aliquota_icms"
+        pis_cst_f   = "cst_pis"
+        cof_cst_f   = "cst_cofins"
     else:
-        cst_f  = "cst_icms_saida"
-        cfop_f = "cfop_saida_empresa"
-        aliq_f = "aliquota_icms_saida"
-        pis_f  = "cst_pis_saida"
-        cof_f  = "cst_cofins_saida"
+        cst_f       = "cst_icms_saida"
+        cfop_f      = "cfop_saida_empresa"
+        aliq_f      = "aliquota_icms_saida"
+        pis_cst_f   = "cst_pis_saida"
+        cof_cst_f   = "cst_cofins_saida"
 
-    check_cst  = "cst"      in compare_fields
-    check_cfop = "cfop"     in compare_fields
-    check_aliq = "aliquota" in compare_fields
-    check_ncm  = "ncm"      in compare_fields
+    # PIS/COFINS aliquota: não há campo separado por entrada/saída no cadastro
+    aliq_pis_f   = "aliquota_pis"
+    aliq_cofins_f = "aliquota_cofins"
+
+    check_cst       = "cst"        in compare_fields
+    check_cfop      = "cfop"       in compare_fields
+    check_aliq      = "aliquota"   in compare_fields
+    check_ncm       = "ncm"        in compare_fields
+    check_aliq_pis  = "aliq_pis"   in compare_fields
+    check_aliq_cof  = "aliq_cofins" in compare_fields
 
     # Indexa catálogo por codigo_empresa e por ean (ambos com merge de campos).
     # O código do SPED pode ser o codigo_empresa (código interno) ou o EAN
@@ -179,12 +187,17 @@ def build_confronto_data(
             code_digits = "".join(c for c in code if c.isdigit())
             if code_digits:
                 cat = by_ean.get(code_digits)
-        cat_cst   = str(cat.get(cst_f) or "")              if cat else ""
-        cat_cfop  = str(cat.get(cfop_f) or "")             if cat else ""
-        cat_aliq  = _db_aliq_to_pct(cat.get(aliq_f))      if cat else ""
-        cat_pis   = str(cat.get(pis_f) or "")              if cat else ""
-        cat_cof   = str(cat.get(cof_f) or "")              if cat else ""
-        cat_ncm   = str(cat.get("ncm") or "")              if cat else ""
+        sped_aliq_pis  = str(row.get("aliquota_pis") or "").strip()
+        sped_aliq_cof  = str(row.get("aliquota_cofins") or "").strip()
+
+        cat_cst        = str(cat.get(cst_f) or "")              if cat else ""
+        cat_cfop       = str(cat.get(cfop_f) or "")             if cat else ""
+        cat_aliq       = _db_aliq_to_pct(cat.get(aliq_f))      if cat else ""
+        cat_pis_cst    = str(cat.get(pis_cst_f) or "")          if cat else ""
+        cat_cof_cst    = str(cat.get(cof_cst_f) or "")          if cat else ""
+        cat_aliq_pis   = _db_aliq_to_pct(cat.get(aliq_pis_f))  if cat else ""
+        cat_aliq_cof   = _db_aliq_to_pct(cat.get(aliq_cofins_f)) if cat else ""
+        cat_ncm        = str(cat.get("ncm") or "")              if cat else ""
 
         if cat:
             issues: list[str] = []
@@ -197,12 +210,18 @@ def build_confronto_data(
                 elif any(_cfop_diverges(p.strip(), cat_cfop) for p in cfop_parts):
                     issues.append("CFOP")
             if check_aliq and _aliq_diverges(sped_aliq, cat_aliq):
-                issues.append("Alíquota")
+                issues.append("Alíquota ICMS")
             if check_ncm and _ncm_diverges(sped_ncm, cat_ncm):
                 issues.append("NCM")
+            if check_aliq_pis and _aliq_diverges(sped_aliq_pis, cat_aliq_pis):
+                issues.append("Alíq. PIS")
+            if check_aliq_cof and _aliq_diverges(sped_aliq_cof, cat_aliq_cof):
+                issues.append("Alíq. COFINS")
             grp_status = _status(issues, True)
         else:
             grp_status = "Nao Cadastrado"
+            sped_aliq_pis = sped_aliq_cof = ""
+            cat_aliq_pis = cat_aliq_cof = ""
 
         group_document_keys: list[str] = []
         grouped_row = {
@@ -217,8 +236,12 @@ def build_confronto_data(
             "cfop_cad":      cat_cfop,
             "aliq_sped":     sped_aliq,
             "aliq_cad":      cat_aliq,
-            "cst_pis_cad":   cat_pis,
-            "cst_cofins_cad": cat_cof,
+            "aliq_pis_sped":  sped_aliq_pis,
+            "aliq_pis_cad":   cat_aliq_pis,
+            "aliq_cofins_sped": sped_aliq_cof,
+            "aliq_cofins_cad":  cat_aliq_cof,
+            "cst_pis_cad":   cat_pis_cst,
+            "cst_cofins_cad": cat_cof_cst,
             "descricao_cad": str(cat.get("descricao") or "")      if cat else "",
             "ncm_sped":      sped_ncm,
             "ncm_cad":       cat_ncm,
@@ -243,13 +266,18 @@ def build_confronto_data(
             d_aliq = str(detail.get("icms_rate") or "").strip()
             d_ncm  = str(detail.get("ncm") or "").strip() or sped_ncm
 
+            d_aliq_pis  = str(detail.get("aliquota_pis") or "").strip()
+            d_aliq_cof  = str(detail.get("aliquota_cofins") or "").strip()
+
             if d_cat:
-                dc_cst  = str(d_cat.get(cst_f) or "")
-                dc_cfop = str(d_cat.get(cfop_f) or "")
-                dc_aliq = _db_aliq_to_pct(d_cat.get(aliq_f))
-                dc_pis  = str(d_cat.get(pis_f) or "")
-                dc_cof  = str(d_cat.get(cof_f) or "")
-                dc_ncm  = str(d_cat.get("ncm") or "")
+                dc_cst      = str(d_cat.get(cst_f) or "")
+                dc_cfop     = str(d_cat.get(cfop_f) or "")
+                dc_aliq     = _db_aliq_to_pct(d_cat.get(aliq_f))
+                dc_pis_cst  = str(d_cat.get(pis_cst_f) or "")
+                dc_cof_cst  = str(d_cat.get(cof_cst_f) or "")
+                dc_aliq_pis = _db_aliq_to_pct(d_cat.get(aliq_pis_f))
+                dc_aliq_cof = _db_aliq_to_pct(d_cat.get(aliq_cofins_f))
+                dc_ncm      = str(d_cat.get("ncm") or "")
                 d_issues: list[str] = []
                 if check_cst and _cst_diverges(d_cst, dc_cst):
                     d_issues.append("CST")
@@ -259,12 +287,17 @@ def build_confronto_data(
                     elif _cfop_diverges(d_cfop, dc_cfop):
                         d_issues.append("CFOP")
                 if check_aliq and _aliq_diverges(d_aliq, dc_aliq):
-                    d_issues.append("Alíquota")
+                    d_issues.append("Alíquota ICMS")
                 if check_ncm and _ncm_diverges(d_ncm, dc_ncm):
                     d_issues.append("NCM")
+                if check_aliq_pis and _aliq_diverges(d_aliq_pis, dc_aliq_pis):
+                    d_issues.append("Alíq. PIS")
+                if check_aliq_cof and _aliq_diverges(d_aliq_cof, dc_aliq_cof):
+                    d_issues.append("Alíq. COFINS")
                 d_status = _status(d_issues, True)
             else:
-                dc_cst = dc_cfop = dc_aliq = dc_pis = dc_cof = dc_ncm = ""
+                dc_cst = dc_cfop = dc_aliq = dc_pis_cst = dc_cof_cst = ""
+                dc_aliq_pis = dc_aliq_cof = dc_ncm = ""
                 d_status = "Nao Cadastrado"
 
             detail_document_key = normalize_document_key(str(detail.get("document_key") or "")) or str(detail.get("document_key") or "").strip()
@@ -286,8 +319,12 @@ def build_confronto_data(
                 "cfop_cad":        dc_cfop,
                 "aliq_sped":       d_aliq,
                 "aliq_cad":        dc_aliq,
-                "cst_pis_cad":     dc_pis,
-                "cst_cofins_cad":  dc_cof,
+                "aliq_pis_sped":   d_aliq_pis,
+                "aliq_pis_cad":    dc_aliq_pis,
+                "aliq_cofins_sped": d_aliq_cof,
+                "aliq_cofins_cad":  dc_aliq_cof,
+                "cst_pis_cad":     dc_pis_cst,
+                "cst_cofins_cad":  dc_cof_cst,
                 "sale_value":      str(detail.get("sale_value") or ""),
                 "base_icms":       str(detail.get("base_icms") or ""),
                 "icms_value":      str(detail.get("icms_value") or ""),

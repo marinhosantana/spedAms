@@ -40,37 +40,59 @@ from app.services.confronto_rules_builder import (
 
 # ── Colunas ───────────────────────────────────────────────────────────────────
 
-GROUPED_HEADERS = [
-    "Status", "Periodo", "Cod. Produto", "Descricao SPED", "Fornecedor/Cliente",
-    "CST ICMS (SPED)", "CST ICMS (Cad.)",
-    "CFOP (SPED)", "CFOP (Cad.)",
-    "Aliq ICMS (SPED)", "Aliq ICMS (Cad.)",
-    "Descricao Cadastro", "NCM SPED", "NCM Cad.", "Fornecedor Cadastro",
-    "Total Operacao", "Base ICMS", "Valor ICMS",
-]
+def _build_grouped_headers(operation_type: str) -> list[str]:
+    ent = operation_type.lower() == "entrada"
+    participante = "Fornecedor (SPED)"  if ent else "Cliente (SPED)"
+    cst_cad      = "CST ICMS Ent. (Cad.)" if ent else "CST ICMS Sai. (Cad.)"
+    cfop_cad     = "CFOP Entrada (Cad.)"  if ent else "CFOP Saida (Cad.)"
+    aliq_cad     = "Aliq. ICMS % Ent. (Cad.)" if ent else "Aliq. ICMS % Sai. (Cad.)"
+    return [
+        "Status", "Periodo", "Cod. Produto", "Descricao SPED", participante,
+        "CST ICMS (SPED)", cst_cad,
+        "CFOP (SPED)", cfop_cad,
+        "Aliq. ICMS % (SPED)", aliq_cad,
+        "Aliq. PIS % (SPED)", "Aliq. PIS % (Cad.)",
+        "Aliq. COFINS % (SPED)", "Aliq. COFINS % (Cad.)",
+        "Descricao Cadastro", "NCM (SPED)", "NCM (Cad.)", "Fornecedor (Cad.)",
+        "Total Operacao", "Base ICMS", "Valor ICMS",
+    ]
+
 GROUPED_FIELDS = [
     "status", "periodo", "code", "descricao_sped", "fornecedor",
     "cst_sped", "cst_cad",
     "cfop_sped", "cfop_cad",
     "aliq_sped", "aliq_cad",
+    "aliq_pis_sped", "aliq_pis_cad",
+    "aliq_cofins_sped", "aliq_cofins_cad",
     "descricao_cad", "ncm_sped", "ncm_cad", "fornecedor_cad",
     "total_operacao", "base_icms", "icms_value",
 ]
 
-DETAIL_HEADERS = [
-    "Status", "Periodo", "Num. Doc.", "Chave NFe", "Data", "Fornecedor/Cliente",
-    "Cod. Produto", "Descricao",
-    "CST ICMS (SPED)", "CST ICMS (Cad.)",
-    "CFOP (SPED)", "CFOP (Cad.)",
-    "Aliq ICMS (SPED)", "Aliq ICMS (Cad.)",
-    "Valor Operacao", "Base ICMS", "Valor ICMS",
-]
+def _build_detail_headers(operation_type: str) -> list[str]:
+    ent = operation_type.lower() == "entrada"
+    participante = "Fornecedor (SPED)"  if ent else "Cliente (SPED)"
+    cst_cad      = "CST ICMS Ent. (Cad.)" if ent else "CST ICMS Sai. (Cad.)"
+    cfop_cad     = "CFOP Entrada (Cad.)"  if ent else "CFOP Saida (Cad.)"
+    aliq_cad     = "Aliq. ICMS % Ent. (Cad.)" if ent else "Aliq. ICMS % Sai. (Cad.)"
+    return [
+        "Status", "Periodo", "Num. Doc.", "Chave NFe", "Data", participante,
+        "Cod. Produto", "Descricao SPED",
+        "CST ICMS (SPED)", cst_cad,
+        "CFOP (SPED)", cfop_cad,
+        "Aliq. ICMS % (SPED)", aliq_cad,
+        "Aliq. PIS % (SPED)", "Aliq. PIS % (Cad.)",
+        "Aliq. COFINS % (SPED)", "Aliq. COFINS % (Cad.)",
+        "Valor Operacao", "Base ICMS", "Valor ICMS",
+    ]
+
 DETAIL_FIELDS = [
     "status", "periodo", "document_number", "document_key", "document_date", "participant",
     "code", "description",
     "cst_sped", "cst_cad",
     "cfop_sped", "cfop_cad",
     "aliq_sped", "aliq_cad",
+    "aliq_pis_sped", "aliq_pis_cad",
+    "aliq_cofins_sped", "aliq_cofins_cad",
     "sale_value", "base_icms", "icms_value",
 ]
 
@@ -206,9 +228,10 @@ class _CadastrarWorker(QObject):
                 if not supplier_id:
                     supplier_id = self._fallback_supplier_id
                 if not supplier_id:
-                    stats["ignorados"] += 1
-                    stats["erros"].append({"code": code, "erro": "Sem nome de fornecedor no SPED e sem fallback"})
-                    continue
+                    # Sem fornecedor no SPED e sem fallback → usa a própria empresa como fornecedor
+                    supplier_id = self._repo.ensure_supplier(empresa_id, self._company_name, self._company_cnpj)
+                    stats.setdefault("fornecedores_criados", 0)
+                    stats["fornecedores_criados"] += 1
 
                 data: dict = {
                     "codigo_fornecedor": code,
@@ -298,7 +321,8 @@ class _CadastrarNaoCadastradosDialog(QDialog):
             f"<b>{len(nao_cad)}</b> produto(s) sem cadastro encontrado(s) no confronto.<br>"
             "Serão cadastrados com <b>codigo_empresa = codigo_fornecedor = EAN = código do SPED</b>.<br>"
             "O fornecedor é resolvido pelo nome do SPED: se existir, usa; se não existir, <b>cria automaticamente</b>.<br>"
-            "O fornecedor de fallback abaixo é usado apenas quando o produto não tem nome de fornecedor no SPED."
+            "O fornecedor de fallback abaixo é usado quando o produto não tem nome de fornecedor no SPED.<br>"
+            "Se nenhum fallback for selecionado, a <b>própria empresa é usada como fornecedor</b> (ex.: energia, serviços próprios)."
         )
         info.setWordWrap(True)
         root.addWidget(info)
@@ -517,48 +541,58 @@ class ConfrontoDialog(QDialog):
         title.setObjectName("sectionTitle")
         root.addWidget(title)
 
-        # Barra de empresa + ações
-        bar = QHBoxLayout()
-        bar.addWidget(QLabel("Empresa:"))
+        # ── Linha 1: empresa + ações principais ──────────────────────────────
+        bar1 = QHBoxLayout()
+        bar1.addWidget(QLabel("Empresa:"))
         self._company_combo = QComboBox()
-        self._company_combo.setMinimumWidth(300)
+        self._company_combo.setMinimumWidth(220)
         self._load_companies()
-        bar.addWidget(self._company_combo, 1)
+        bar1.addWidget(self._company_combo, 1)
 
         self._btn_gerar = QPushButton("Gerar Confronto")
         self._btn_gerar.setObjectName("primaryButton")
         self._btn_gerar.clicked.connect(self._run)
-        bar.addWidget(self._btn_gerar)
-
-        self._btn_export = QPushButton("Exportar Excel")
-        self._btn_export.clicked.connect(self._export)
-        bar.addWidget(self._btn_export)
-
-        self._btn_export_modelo = QPushButton("Exportar Modelo Produto")
-        self._btn_export_modelo.clicked.connect(self._export_modelo_produto)
-        bar.addWidget(self._btn_export_modelo)
+        bar1.addWidget(self._btn_gerar)
 
         self._btn_cadastrar_nc = QPushButton("Cadastrar Nao Cadastrados")
         self._btn_cadastrar_nc.setObjectName("primaryButton")
         self._btn_cadastrar_nc.clicked.connect(self._cadastrar_nao_cadastrados)
-        bar.addWidget(self._btn_cadastrar_nc)
-
-        self._btn_report = QPushButton("Relatorio Cliente")
-        self._btn_report.clicked.connect(self._export_client_report)
-        bar.addWidget(self._btn_report)
+        bar1.addWidget(self._btn_cadastrar_nc)
 
         self._btn_rules = QPushButton("Gerar Regras Dinamicas")
         self._btn_rules.clicked.connect(self._gerar_regras)
-        bar.addWidget(self._btn_rules)
+        bar1.addWidget(self._btn_rules)
 
         self._btn_reprocess = QPushButton("Reprocessar SPED com Regras")
         self._btn_reprocess.setObjectName("primaryButton")
         self._btn_reprocess.setEnabled(False)
         self._btn_reprocess.clicked.connect(self._reprocessar_sped)
-        bar.addWidget(self._btn_reprocess)
+        bar1.addWidget(self._btn_reprocess)
 
-        bar.addStretch()
-        root.addLayout(bar)
+        bar1.addStretch()
+        root.addLayout(bar1)
+
+        # ── Linha 2: exportações e relatórios ─────────────────────────────────
+        bar2 = QHBoxLayout()
+
+        self._btn_export = QPushButton("Exportar Excel")
+        self._btn_export.clicked.connect(self._export)
+        bar2.addWidget(self._btn_export)
+
+        self._btn_export_modelo = QPushButton("Exportar Modelo Produto")
+        self._btn_export_modelo.clicked.connect(self._export_modelo_produto)
+        bar2.addWidget(self._btn_export_modelo)
+
+        self._btn_report = QPushButton("Relatorio Cliente")
+        self._btn_report.clicked.connect(self._export_client_report)
+        bar2.addWidget(self._btn_report)
+
+        self._btn_pdf = QPushButton("Diagnostico PDF")
+        self._btn_pdf.clicked.connect(self._export_diagnostico_pdf)
+        bar2.addWidget(self._btn_pdf)
+
+        bar2.addStretch()
+        root.addLayout(bar2)
 
         # Painel de seleção: o que comparar
         from app.services.confronto_sped_cadastro import COMPARE_FIELD_LABELS, DEFAULT_COMPARE_FIELDS
@@ -631,8 +665,8 @@ class ConfrontoDialog(QDialog):
 
         # Abas
         self._tabs = QTabWidget()
-        self._grouped_table = self._make_table(GROUPED_HEADERS)
-        self._detail_table  = self._make_table(DETAIL_HEADERS)
+        self._grouped_table = self._make_table(_build_grouped_headers(operation_type))
+        self._detail_table  = self._make_table(_build_detail_headers(operation_type))
         self._log_table     = self._make_table(LOG_HEADERS)
         self._tabs.addTab(self._grouped_table, "Agrupado (por Produto)")
         self._tabs.addTab(self._detail_table,  "Detalhado (por Item)")
@@ -1262,6 +1296,46 @@ class ConfrontoDialog(QDialog):
         except Exception as exc:
             QMessageBox.critical(self, "Relatorio Cliente", f"Erro ao gerar relatorio:\n{exc}")
 
+    # ── Diagnóstico PDF ───────────────────────────────────────────────────────
+
+    def _export_diagnostico_pdf(self) -> None:
+        if not self._grouped_rows:
+            QMessageBox.warning(self, "Diagnostico PDF", "Gere o confronto antes de exportar o diagnostico.")
+            return
+        import re
+        import os
+        cnpj = re.sub(r"\D", "", self._catalog_company_cnpj or "")
+        op   = self._operation_type.lower()
+        default_name = f"diagnostico_confronto_{op}_{cnpj}.pdf" if cnpj else f"diagnostico_confronto_{op}.pdf"
+        path, _ = QFileDialog.getSaveFileName(
+            self,
+            "Salvar Diagnostico PDF",
+            default_name,
+            "PDF (*.pdf)",
+        )
+        if not path:
+            return
+        try:
+            from app.exporters.confronto_pdf_exporter import generate_confronto_pdf
+            generate_confronto_pdf(
+                grouped_rows=self._grouped_rows,
+                company_name=self._catalog_company_name,
+                company_cnpj=self._catalog_company_cnpj,
+                operation_type=self._operation_type,
+                output_path=path,
+            )
+            msg = QMessageBox(self)
+            msg.setIcon(QMessageBox.Information)
+            msg.setWindowTitle("Diagnostico PDF")
+            msg.setText(f"PDF gerado com sucesso.\n\nDeseja abrir o arquivo?\n{path}")
+            btn_sim = msg.addButton("Sim", QMessageBox.YesRole)
+            msg.addButton("Nao", QMessageBox.NoRole)
+            msg.exec()
+            if msg.clickedButton() == btn_sim:
+                os.startfile(path)
+        except Exception as exc:
+            QMessageBox.critical(self, "Diagnostico PDF", f"Erro ao gerar PDF:\n{exc}")
+
     # ── Exportar Modelo Produto ───────────────────────────────────────────────
 
     def _export_modelo_produto(self) -> None:
@@ -1333,6 +1407,25 @@ class ConfrontoDialog(QDialog):
                 except (ValueError, TypeError):
                     return s
 
+            def _doc_keys(grp: dict) -> list[str]:
+                keys = grp.get("document_keys") or []
+                if isinstance(keys, (str, bytes)):
+                    keys = [keys]
+                result: list[str] = []
+                for k in keys:
+                    t = str(k or "").strip()
+                    if t and t not in result:
+                        result.append(t)
+                return result
+
+            # Calcula o máximo de chaves para definir quantas colunas extras criar
+            max_keys = max((_doc_keys(g) for g in self._grouped_rows), key=len, default=[])
+            max_keys_count = len(max_keys)
+            key_headers = [f"Chave NFe SPED {i}" for i in range(1, max_keys_count + 1)]
+            HEADERS.extend(key_headers)
+
+            n_fixed = len(HEADERS) - max_keys_count  # colunas fixas sem as chaves
+
             rows: list[list[object]] = []
             for grp in self._grouped_rows:
                 code = str(grp.get("code") or "").strip()
@@ -1342,12 +1435,15 @@ class ConfrontoDialog(QDialog):
                     cat = self._catalog_by_ean.get(code_digits) if code_digits else None
 
                 status = str(grp.get("status") or "")
+                sped_keys = _doc_keys(grp)
+                key_values = sped_keys + [""] * max(0, max_keys_count - len(sped_keys))
+
                 if cat:
                     row: list[object] = [
                         status,
                         str(cat.get("id") or ""),
                         self._catalog_company_name,
-                        str(cat.get("fornecedor_nome") or ""),
+                        str(grp.get("fornecedor") or ""),
                         str(cat.get("fornecedor_uf") or ""),
                         str(cat.get("tipo_produto") or ""),
                         str(cat.get("codigo_fornecedor") or "") or code,
@@ -1382,8 +1478,9 @@ class ConfrontoDialog(QDialog):
                         str(cat.get("cst_cofins_saida") or ""),
                         str(cat.get("natureza_receita_saida") or ""),
                         str(cat.get("chave_nfe_origem") or ""),
-                    ]
+                    ] + key_values
                 else:
+                    blanks = [""] * (n_fixed - 18)
                     row = [
                         status,
                         "",
@@ -1403,14 +1500,140 @@ class ConfrontoDialog(QDialog):
                         "",
                         str(grp.get("aliq_sped") or ""),
                         "",
-                        "", "", "", "", "", "", "", "", "", "", "", "",
-                        "", "", "", "", "", "", "", "",
-                    ]
+                    ] + blanks + key_values
                 rows.append(row)
+
+            # ── Aba 2: POR_DOCUMENTO (uma linha por NF/documento) ─────────────
+            DOC_HEADERS = [
+                "Status",
+                "Período",
+                "Num. Doc.",
+                "Chave NFe",
+                "Data",
+                "Fornecedor/Emitente",
+                "Cod. Produto",
+                "Descrição SPED",
+                "ID",
+                "Empresa",
+                "Fornecedor (Cad.)",
+                "UF",
+                "Classificação",
+                "Cod. Forn.",
+                "Cod. Empresa",
+                "Descrição (Cad.)",
+                "EAN",
+                "NCM",
+                "CEST",
+                "Origem (entrada)",
+                "CST ICMS (entrada)",
+                "% Red BC ICMS",
+                "CFOP saída fornecedor",
+                "% ICMS (entrada)",
+                "CFOP entrada empresa",
+                "CST IPI",
+                "% IPI",
+                "CST PIS (entrada)",
+                "CST PIS_COFINS (ENTRADA EMPRESA)",
+                "% PIS",
+                "CST COFINS (entrada)",
+                "% COFINS",
+                "Natureza da receita",
+                "MVA",
+                "Valor ICMS-ST",
+                "cClassTrib",
+                "cBenef",
+                "Origem (saída)",
+                "CST ICMS (saída)",
+                "CFOP saída empresa",
+                "% ICMS (saída)",
+                "CST PIS (saída)",
+                "CST COFINS (saída)",
+                "Natureza da receita (saída)",
+                "Chave NFe origem",
+                "Valor Operação",
+                "Base ICMS",
+                "Valor ICMS",
+            ]
+
+            _n_doc_prefix   = 8   # colunas de cabeçalho do documento
+            _n_doc_monetary = 3   # Valor Operação, Base ICMS, Valor ICMS
+            _n_doc_catalog  = len(DOC_HEADERS) - _n_doc_prefix - _n_doc_monetary
+
+            doc_rows: list[list[object]] = []
+            for det in self._detail_rows:
+                d_code = str(det.get("code") or "").strip()
+                d_cat = self._catalog_by_code.get(d_code)
+                if d_cat is None:
+                    d_digits = "".join(c for c in d_code if c.isdigit())
+                    d_cat = self._catalog_by_ean.get(d_digits) if d_digits else None
+
+                d_prefix: list[object] = [
+                    str(det.get("status") or ""),
+                    str(det.get("periodo") or ""),
+                    str(det.get("document_number") or ""),
+                    str(det.get("document_key") or ""),
+                    str(det.get("document_date") or ""),
+                    str(det.get("participant") or ""),
+                    d_code,
+                    str(det.get("description") or ""),
+                ]
+                d_monetary: list[object] = [
+                    str(det.get("sale_value") or ""),
+                    str(det.get("base_icms") or ""),
+                    str(det.get("icms_value") or ""),
+                ]
+
+                if d_cat:
+                    d_catalog: list[object] = [
+                        str(d_cat.get("id") or ""),
+                        self._catalog_company_name,
+                        str(d_cat.get("fornecedor_nome") or ""),
+                        str(d_cat.get("fornecedor_uf") or ""),
+                        str(d_cat.get("tipo_produto") or ""),
+                        str(d_cat.get("codigo_fornecedor") or "") or d_code,
+                        str(d_cat.get("codigo_empresa") or ""),
+                        str(d_cat.get("descricao") or ""),
+                        str(d_cat.get("ean") or ""),
+                        str(d_cat.get("ncm") or ""),
+                        str(d_cat.get("cest") or ""),
+                        str(d_cat.get("origem_entrada") or ""),
+                        str(d_cat.get("cst_icms") or ""),
+                        _pct(d_cat.get("reducao_bc_icms")),
+                        str(d_cat.get("cfop_saida_fornecedor") or ""),
+                        _pct(d_cat.get("aliquota_icms")),
+                        str(d_cat.get("cfop_entrada") or ""),
+                        str(d_cat.get("cst_ipi") or ""),
+                        _pct(d_cat.get("aliquota_ipi")),
+                        str(d_cat.get("cst_pis") or ""),
+                        str(d_cat.get("cst_pis_cofins") or ""),
+                        _pct(d_cat.get("aliquota_pis")),
+                        str(d_cat.get("cst_cofins") or ""),
+                        _pct(d_cat.get("aliquota_cofins")),
+                        str(d_cat.get("natureza_receita_entrada") or ""),
+                        _pct(d_cat.get("mva")),
+                        str(d_cat.get("valor_icms_st") or ""),
+                        str(d_cat.get("c_classtrib") or ""),
+                        str(d_cat.get("c_benef") or ""),
+                        str(d_cat.get("origem_saida") or ""),
+                        str(d_cat.get("cst_icms_saida") or ""),
+                        str(d_cat.get("cfop_saida_empresa") or ""),
+                        _pct(d_cat.get("aliquota_icms_saida")),
+                        str(d_cat.get("cst_pis_saida") or ""),
+                        str(d_cat.get("cst_cofins_saida") or ""),
+                        str(d_cat.get("natureza_receita_saida") or ""),
+                        str(d_cat.get("chave_nfe_origem") or ""),
+                    ]
+                else:
+                    d_catalog = [""] * _n_doc_catalog
+
+                doc_rows.append(d_prefix + d_catalog + d_monetary)
 
             write_simple_excel_workbook(
                 Path(path),
-                [("BASE_COMPLETA", HEADERS, rows, {"include_total": False})],
+                [
+                    ("BASE_COMPLETA", HEADERS, rows, {"include_total": False}),
+                    ("POR_DOCUMENTO", DOC_HEADERS, doc_rows, {"include_total": False}),
+                ],
             )
             msg = QMessageBox(self)
             msg.setIcon(QMessageBox.Information)
@@ -1514,6 +1737,8 @@ class ConfrontoDialog(QDialog):
 
             max_group_keys = max((len(_document_keys_for_row(r)) for r in self._grouped_rows), default=0)
             grouped_key_headers = [f"Chave NFe {index}" for index in range(1, max_group_keys + 1)]
+            GROUPED_HEADERS = _build_grouped_headers(self._operation_type)
+            DETAIL_HEADERS  = _build_detail_headers(self._operation_type)
             grouped_export_headers = GROUPED_HEADERS + grouped_key_headers
             grouped_export_fields = GROUPED_FIELDS + [f"_document_key_{index}" for index in range(1, max_group_keys + 1)]
 

@@ -11,6 +11,7 @@ from PySide6.QtCore import QObject, QThread, Qt, Signal
 from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (
     QAbstractItemView,
+    QButtonGroup,
     QCheckBox,
     QComboBox,
     QCompleter,
@@ -23,8 +24,10 @@ from PySide6.QtWidgets import (
     QHeaderView,
     QLabel,
     QLineEdit,
+    QMessageBox,
     QProgressBar,
     QPushButton,
+    QRadioButton,
     QScrollArea,
     QSpinBox,
     QStackedWidget,
@@ -98,6 +101,46 @@ CAMPOS_GRUPOS: list[tuple[str, list[tuple[str, str]]]] = [
 ]
 
 ALL_CAMPOS: dict[str, str] = {k: v for _, fields in CAMPOS_GRUPOS for k, v in fields}
+
+# Campos de produto que podem ser selecionados individualmente para atualização.
+# Identificadores de lookup (codigo_fornecedor, ean) e dados de empresa/fornecedor
+# são sempre processados — não aparecem aqui.
+UPDATABLE_PLANILHA_FIELDS: list[tuple[str, str]] = [
+    ("descricao",               "Descrição"),
+    ("codigo_empresa",          "Código Empresa"),
+    ("status_produto",          "Status"),
+    ("ncm",                     "NCM"),
+    ("cest",                    "CEST"),
+    ("origem_entrada",          "Origem Entrada"),
+    ("tipo_produto_id",         "Classificação do Produto"),
+    ("cfop_entrada",            "CFOP Entrada"),
+    ("cfop_saida",              "CFOP Saída"),
+    ("cst_icms",                "CST ICMS Entrada"),
+    ("aliquota_icms",           "Alíquota ICMS %"),
+    ("reducao_bc_icms",         "Redução BC ICMS %"),
+    ("cst_ipi",                 "CST IPI"),
+    ("aliquota_ipi",            "Alíquota IPI %"),
+    ("cst_pis_cofins",          "CST PIS/COFINS Entrada"),
+    ("cst_pis",                 "CST PIS"),
+    ("cst_cofins",              "CST COFINS"),
+    ("aliquota_pis",            "Alíquota PIS %"),
+    ("aliquota_cofins",         "Alíquota COFINS %"),
+    ("natureza_receita_entrada","Natureza da Receita Entrada"),
+    ("mva",                     "MVA %"),
+    ("aliquota_icms_st",        "Alíquota ICMS ST %"),
+    ("bc_st",                   "Base ICMS ST"),
+    ("valor_icms_st",           "Valor ICMS ST"),
+    ("cfop_saida_fornecedor",   "CFOP Saída Fornecedor"),
+    ("cst_icms_saida",          "CST ICMS Saída"),
+    ("cfop_saida_empresa",      "CFOP Saída Empresa"),
+    ("aliquota_icms_saida",     "Alíquota ICMS Saída %"),
+    ("cst_pis_saida",           "CST PIS Saída"),
+    ("cst_cofins_saida",        "CST COFINS Saída"),
+    ("natureza_receita_saida",  "Natureza da Receita Saída"),
+    ("c_classtrib",             "Class. Tributária"),
+    ("c_benef",                 "Cód. Benefício Fiscal"),
+    ("fornecedor_codigo",       "Fornecedor - Código"),
+]
 
 # ── Sinônimos para auto-mapeamento ────────────────────────────────────────────
 
@@ -354,6 +397,9 @@ class _ImportWorker(QObject):
         default_company_id: int | None,
         col_mapping: dict[str, str],
         df: Any,
+        allow_insert_new: bool = True,
+        allow_update_existing: bool = True,
+        selected_update_fields: set[str] | None = None,
     ) -> None:
         super().__init__()
         self.repository = repository
@@ -361,6 +407,9 @@ class _ImportWorker(QObject):
         self.default_company_id = default_company_id
         self.col_mapping = col_mapping
         self.df = df
+        self.allow_insert_new = allow_insert_new
+        self.allow_update_existing = allow_update_existing
+        self.selected_update_fields = selected_update_fields
 
     def run(self) -> None:
         try:
@@ -371,6 +420,9 @@ class _ImportWorker(QObject):
                 self.col_mapping,
                 self.df,
                 self.progress.emit,
+                self.allow_insert_new,
+                self.allow_update_existing,
+                self.selected_update_fields,
             )
             self.finished.emit(result)
         except Exception as exc:
@@ -426,15 +478,18 @@ def _needs_update(existing: dict, incoming: dict) -> bool:
     return False
 
 
-def _build_update_data(existing: dict, incoming: dict) -> dict:
+def _build_update_data(existing: dict, incoming: dict, selected_fields: set[str] | None = None) -> dict:
     """Mescla dados para atualização: preserva valores do banco para campos vazios na planilha.
 
     Apenas campos com valor não-vazio na planilha sobrescrevem o banco.
     Isso protege dados vindos de XML/SPED de serem apagados por colunas não mapeadas.
+    Se selected_fields for fornecido, somente os campos presentes no conjunto são atualizados.
     """
     result = dict(existing)
     for field, value in incoming.items():
         if field == "id":
+            continue
+        if selected_fields is not None and field not in selected_fields:
             continue
         if field == "tipo_produto_id":
             # None = campo não mapeado na planilha; não apaga o tipo existente
@@ -467,6 +522,9 @@ def _execute_import(
     col_mapping: dict[str, str],
     df: Any,
     progress_cb: Any,
+    allow_insert_new: bool = True,
+    allow_update_existing: bool = True,
+    selected_update_fields: set[str] | None = None,
 ) -> dict:
     stats: dict = {
         "linhas": len(df),
@@ -627,6 +685,16 @@ def _execute_import(
 
             existing_prod = (cache.get(f"ean:{ean}") if ean else None) or cache.get(f"cod:{codigo}")
 
+            # Verifica se o modo de importação permite inserção/atualização
+            if existing_prod and not allow_update_existing:
+                stats["ignorados"] += 1
+                _skip(idx, forn_nome, codigo, ean, descricao, "Ignorado (modo: somente cadastrar novos)")
+                continue
+            if not existing_prod and not allow_insert_new:
+                stats["ignorados"] += 1
+                _skip(idx, forn_nome, codigo, ean, descricao, "Ignorado (modo: somente atualizar existentes)")
+                continue
+
             # Monta os dados antes de comparar
             data: dict = {
                 "tipo_produto_id":     tipo_id,
@@ -699,7 +767,8 @@ def _execute_import(
 
             # Para produto existente: mescla apenas campos não-vazios da planilha,
             # preservando valores do banco (XML/SPED) nos campos não mapeados.
-            effective_data = _build_update_data(existing_prod, data) if existing_prod else data
+            # selected_update_fields limita quais campos podem ser sobrescritos.
+            effective_data = _build_update_data(existing_prod, data, selected_update_fields) if existing_prod else data
 
             # Reserva o slot no cache imediatamente para evitar duplicatas dentro do lote
             placeholder = {"id": None, "ean": ean, "codigo_fornecedor": codigo}
@@ -1787,9 +1856,123 @@ class ImportPlanilhaDialog(QDialog):
 
     # ── Importação ────────────────────────────────────────────────────────────
 
+    def _ask_import_mode(self) -> tuple[bool, bool] | None:
+        """Retorna (allow_insert_new, allow_update_existing) ou None se cancelado."""
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Modo de Importação")
+        layout = QVBoxLayout(dialog)
+        layout.setContentsMargins(20, 20, 20, 20)
+        layout.setSpacing(14)
+
+        title = QLabel("Como deseja importar os produtos encontrados na planilha?")
+        title.setWordWrap(True)
+        layout.addWidget(title)
+
+        group = QButtonGroup(dialog)
+        rb_novos    = QRadioButton("Somente cadastrar novos  (produtos existentes são ignorados)")
+        rb_atualizar = QRadioButton("Somente atualizar existentes  (novos produtos não são cadastrados)")
+        rb_ambos    = QRadioButton("Cadastrar novos e atualizar existentes")
+        rb_ambos.setChecked(True)
+        group.addButton(rb_novos,     0)
+        group.addButton(rb_atualizar, 1)
+        group.addButton(rb_ambos,     2)
+
+        for rb in (rb_novos, rb_atualizar, rb_ambos):
+            layout.addWidget(rb)
+
+        actions = QHBoxLayout()
+        ok_btn     = QPushButton("Continuar")
+        ok_btn.setDefault(True)
+        cancel_btn = QPushButton("Cancelar")
+        ok_btn.clicked.connect(dialog.accept)
+        cancel_btn.clicked.connect(dialog.reject)
+        actions.addStretch()
+        actions.addWidget(ok_btn)
+        actions.addWidget(cancel_btn)
+        layout.addLayout(actions)
+
+        dialog.resize(460, 200)
+        if dialog.exec() != QDialog.Accepted:
+            return None
+        selected = group.checkedId()
+        if selected == 0:
+            return (True, False)   # somente novos
+        if selected == 1:
+            return (False, True)   # somente atualizar
+        return (True, True)        # ambos
+
+    def _ask_import_update_fields(self) -> set[str]:
+        """Retorna o conjunto de campos permitidos para atualização, ou conjunto vazio se cancelado."""
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Selecionar Campos para Atualização")
+        layout = QVBoxLayout(dialog)
+        layout.setContentsMargins(16, 16, 16, 16)
+        layout.setSpacing(10)
+
+        title = QLabel("Escolha os campos que podem ser atualizados nos produtos já existentes:")
+        title.setWordWrap(True)
+        layout.addWidget(title)
+
+        checks: dict[str, QCheckBox] = {}
+        for field_key, label in UPDATABLE_PLANILHA_FIELDS:
+            cb = QCheckBox(label)
+            cb.setChecked(True)
+            checks[field_key] = cb
+
+        toggle_row = QHBoxLayout()
+        mark_btn   = QPushButton("Marcar Todos")
+        unmark_btn = QPushButton("Desmarcar Todos")
+        mark_btn.clicked.connect(lambda: [cb.setChecked(True)  for cb in checks.values()])
+        unmark_btn.clicked.connect(lambda: [cb.setChecked(False) for cb in checks.values()])
+        toggle_row.addWidget(mark_btn)
+        toggle_row.addWidget(unmark_btn)
+        toggle_row.addStretch()
+        layout.addLayout(toggle_row)
+
+        grid_widget = QWidget()
+        grid = QGridLayout(grid_widget)
+        grid.setContentsMargins(8, 8, 8, 8)
+        grid.setHorizontalSpacing(22)
+        grid.setVerticalSpacing(6)
+        keys = [k for k, _ in UPDATABLE_PLANILHA_FIELDS]
+        half = (len(keys) + 1) // 2
+        for i, key in enumerate(keys):
+            row = i if i < half else i - half
+            col = 0 if i < half else 1
+            grid.addWidget(checks[key], row, col)
+        layout.addWidget(grid_widget)
+
+        actions = QHBoxLayout()
+        ok_btn     = QPushButton("Confirmar")
+        ok_btn.setDefault(True)
+        cancel_btn = QPushButton("Cancelar")
+        ok_btn.clicked.connect(dialog.accept)
+        cancel_btn.clicked.connect(dialog.reject)
+        actions.addStretch()
+        actions.addWidget(ok_btn)
+        actions.addWidget(cancel_btn)
+        layout.addLayout(actions)
+
+        dialog.resize(680, 520)
+        if dialog.exec() != QDialog.Accepted:
+            return set()
+        return {key for key, cb in checks.items() if cb.isChecked()}
+
     def _start_import(self) -> None:
         if self._df is None:
             return
+
+        mode = self._ask_import_mode()
+        if mode is None:
+            return
+        allow_insert_new, allow_update_existing = mode
+
+        selected_update_fields: set[str] | None = None
+        if allow_update_existing:
+            selected_update_fields = self._ask_import_update_fields()
+            if not selected_update_fields:
+                QMessageBox.information(self, "Importar Planilha", "Nenhum campo selecionado para atualização.")
+                return
 
         self._btn_importar.setEnabled(False)
         self._btn_anterior.setEnabled(False)
@@ -1807,6 +1990,9 @@ class ImportPlanilhaDialog(QDialog):
             company_id,
             col_mapping,
             self._df,
+            allow_insert_new,
+            allow_update_existing,
+            selected_update_fields,
         )
         self._worker.moveToThread(self._thread)
         self._thread.started.connect(self._worker.run)

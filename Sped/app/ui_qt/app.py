@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Callable
 
 from PySide6.QtCore import QAbstractTableModel, QModelIndex, QObject, QThread, QTimer, Qt, Signal
-from PySide6.QtGui import QColor
+from PySide6.QtGui import QColor, QPainter, QPixmap
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QApplication,
@@ -146,64 +146,145 @@ USER_PERMISSION_GROUPS: tuple[tuple[str, tuple[tuple[str, str], ...]], ...] = (
 )
 
 
+def _get_login_logo() -> QPixmap | None:
+    import sys
+    if getattr(sys, "frozen", False):
+        p = Path(sys.executable).parent / "assets" / "logo.png"
+    else:
+        p = Path(__file__).parent.parent.parent / "assets" / "logo.png"
+    if p.exists():
+        px = QPixmap(str(p))
+        return px if not px.isNull() else None
+    return None
+
+
 class LoginDialog(QDialog):
     def __init__(self, app_title: str, environment: str, parent: QWidget | None = None) -> None:
         super().__init__(parent)
-        self.setWindowTitle("Acesso Ao Sistema")
+        self.setWindowTitle("DZ Consultoria - Revisor SPED")
         self.setModal(True)
-        self.resize(420, 240)
+        self.setFixedSize(480, 480)
 
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(18, 18, 18, 18)
-        layout.setSpacing(10)
+        self._logo_px: QPixmap | None = _get_login_logo()
 
-        title = QLabel(app_title)
-        title.setObjectName("sectionTitle")
-        layout.addWidget(title)
+        root = QVBoxLayout(self)
+        root.setContentsMargins(0, 0, 0, 0)
+        root.setSpacing(0)
+
+        # ── Área da logo (fundo branco, logo centralizada) ──────────────────
+        logo_area = QWidget()
+        logo_area.setFixedHeight(260)
+        logo_area.setStyleSheet("background-color: #ffffff;")
+        logo_layout = QVBoxLayout(logo_area)
+        logo_layout.setAlignment(Qt.AlignCenter)
+        logo_layout.setContentsMargins(20, 16, 20, 8)
+
+        logo_label = QLabel()
+        logo_label.setAlignment(Qt.AlignCenter)
+        if self._logo_px:
+            logo_label.setPixmap(
+                self._logo_px.scaled(380, 220, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+            )
+        logo_layout.addWidget(logo_label)
+        root.addWidget(logo_area)
+
+        # ── Separador ───────────────────────────────────────────────────────
+        sep = QFrame()
+        sep.setFrameShape(QFrame.HLine)
+        sep.setFixedHeight(3)
+        sep.setStyleSheet("background-color: #1e40af;")
+        root.addWidget(sep)
+
+        # ── Área do formulário (fundo azul escuro) ──────────────────────────
+        form_area = QWidget()
+        form_area.setStyleSheet(
+            "background-color: #1e3a7a;"
+            "color: #ffffff;"
+        )
+        form_layout = QVBoxLayout(form_area)
+        form_layout.setContentsMargins(48, 20, 48, 20)
+        form_layout.setSpacing(10)
 
         env_label = QLabel(f"Ambiente: {environment}")
-        env_label.setObjectName("muted")
-        layout.addWidget(env_label)
+        env_label.setStyleSheet("color: #93c5fd; font-size: 11px;")
+        form_layout.addWidget(env_label)
 
         self.login_input = QLineEdit()
         self.login_input.setPlaceholderText("Login")
+        self.login_input.setStyleSheet(
+            "QLineEdit { background: #ffffff; color: #1e293b; border-radius: 4px;"
+            " padding: 5px 8px; font-size: 13px; }"
+        )
+
         self.password_input = QLineEdit()
         self.password_input.setPlaceholderText("Senha")
         self.password_input.setEchoMode(QLineEdit.Password)
-        self.message_label = QLabel("")
-        self.message_label.setObjectName("muted")
+        self.password_input.setStyleSheet(self.login_input.styleSheet())
 
+        self.message_label = QLabel("")
+        self.message_label.setStyleSheet("color: #fca5a5; font-size: 11px;")
+
+        lbl_style = "color: #cbd5e1; font-size: 12px;"
         form = QGridLayout()
-        form.setHorizontalSpacing(8)
+        form.setHorizontalSpacing(10)
         form.setVerticalSpacing(8)
-        form.addWidget(QLabel("Usuario"), 0, 0)
+        lbl_u = QLabel("Usuário")
+        lbl_u.setStyleSheet(lbl_style)
+        form.addWidget(lbl_u, 0, 0)
         form.addWidget(self.login_input, 0, 1)
-        form.addWidget(QLabel("Senha"), 1, 0)
+        lbl_s = QLabel("Senha")
+        lbl_s.setStyleSheet(lbl_style)
+        form.addWidget(lbl_s, 1, 0)
         form.addWidget(self.password_input, 1, 1)
-        layout.addLayout(form)
-        layout.addWidget(self.message_label)
+        form_layout.addLayout(form)
+        form_layout.addWidget(self.message_label)
 
         actions = QHBoxLayout()
         actions.addStretch()
         cancel_button = QPushButton("Cancelar")
         cancel_button.setAutoDefault(False)
         cancel_button.setDefault(False)
+        cancel_button.setStyleSheet(
+            "QPushButton { background: transparent; color: #94a3b8; border: 1px solid #4b6a9e;"
+            " border-radius: 4px; padding: 6px 18px; font-size: 12px; }"
+            "QPushButton:hover { background: #2d4f8a; }"
+        )
         cancel_button.clicked.connect(self.reject)
+
         enter_button = QPushButton("Entrar")
         enter_button.setObjectName("primaryButton")
         enter_button.setAutoDefault(True)
         enter_button.setDefault(True)
+        enter_button.setStyleSheet(
+            "QPushButton { background: #eab308; color: #1e293b; border: none;"
+            " border-radius: 4px; padding: 6px 24px; font-size: 13px; font-weight: bold; }"
+            "QPushButton:hover { background: #facc15; }"
+        )
         enter_button.clicked.connect(self.accept)
         actions.addWidget(cancel_button)
         actions.addWidget(enter_button)
-        layout.addLayout(actions)
+        form_layout.addLayout(actions)
+
+        root.addWidget(form_area)
 
         self.login_input.setText("admin")
         self.password_input.setFocus()
         self.password_input.returnPressed.connect(self.accept)
 
+        # Centraliza na tela
+        screen = QApplication.primaryScreen()
+        if screen:
+            center = screen.availableGeometry().center()
+            geo = self.frameGeometry()
+            geo.moveCenter(center)
+            self.move(geo.topLeft())
+
     def credentials(self) -> tuple[str, str]:
         return self.login_input.text().strip(), self.password_input.text()
+
+    def set_message(self, msg: str) -> None:
+        if hasattr(self, "message_label"):
+            self.message_label.setText(msg)
 
 
 class CompareWorker(QObject):
@@ -2579,7 +2660,6 @@ class QtSpedApp(QMainWindow):
     def show_login_dialog(self) -> bool:
         while True:
             dialog = LoginDialog(self.app_home_title, self.environment, self)
-            dialog.setStyleSheet(self.styleSheet())
             if dialog.exec() != QDialog.Accepted:
                 return False
             login, password = dialog.credentials()
@@ -3073,6 +3153,7 @@ class QtSpedApp(QMainWindow):
         filter_actions.addWidget(self.create_button("Exportar filtro atual", self.export_entry_filter))
         filter_actions.addWidget(self.create_button("Entradas", self.open_entry_operation_summary_popup))
         filter_actions.addWidget(self.create_button("Confronto", self.open_confronto_entry, primary=True))
+        filter_actions.addWidget(self.create_button("Verif. Fornecedor", self.open_verificacao_fornecedor_entry))
         filter_actions.addWidget(self.create_button("Comp. Diag. Credito", self.open_entry_credit_comparison_popup))
         filter_actions.addWidget(self.create_button("Diag. Credito", self.open_entry_credit_diagnostic_popup))
         filter_actions.addWidget(self.create_button("Curva ABC", self.open_entry_abc_popup))
@@ -3207,6 +3288,7 @@ class QtSpedApp(QMainWindow):
         filter_actions.addWidget(self.create_button("Exportar filtro atual", self.export_sale_filter))
         filter_actions.addWidget(self.create_button("Saidas", self.open_sale_operation_summary_popup))
         filter_actions.addWidget(self.create_button("Confronto", self.open_confronto_sale, primary=True))
+        filter_actions.addWidget(self.create_button("Verif. Fornecedor", self.open_verificacao_fornecedor_sale))
         filter_actions.addWidget(self.create_button("Comp. Diag. Debito", self.open_sale_debit_comparison_popup))
         filter_actions.addWidget(self.create_button("Diag. Debito", self.open_sale_debit_diagnostic_popup))
         filter_actions.addWidget(self.create_button("Curva ABC", self.open_sale_abc_popup))
@@ -8706,6 +8788,34 @@ class QtSpedApp(QMainWindow):
         )
         if dlg.exec() == QDialog.Accepted and dlg.accepted_rules:
             self.generate_adjusted_sped_from_consultation("Saida", override_rules=dlg.accepted_rules)
+
+    def open_verificacao_fornecedor_entry(self) -> None:
+        if not self.filtered_entry_rows:
+            QMessageBox.warning(self, "Verificação", "Não há dados de entrada. Processe o SPED primeiro.")
+            return
+        from app.ui_qt.verificacao_fornecedor_dialog import VerificacaoFornecedorDialog
+        dlg = VerificacaoFornecedorDialog(
+            rows=self.filtered_entry_rows,
+            operation_type="Entrada",
+            repository=self.mysql_repo,
+            environment=self.environment,
+            parent=self,
+        )
+        dlg.exec()
+
+    def open_verificacao_fornecedor_sale(self) -> None:
+        if not self.filtered_sale_rows:
+            QMessageBox.warning(self, "Verificação", "Não há dados de saída. Processe o SPED primeiro.")
+            return
+        from app.ui_qt.verificacao_fornecedor_dialog import VerificacaoFornecedorDialog
+        dlg = VerificacaoFornecedorDialog(
+            rows=self.filtered_sale_rows,
+            operation_type="Saida",
+            repository=self.mysql_repo,
+            environment=self.environment,
+            parent=self,
+        )
+        dlg.exec()
 
     def open_sale_abc_popup(self) -> None:
         _periods, headers, _display_rows, export_rows = build_product_monthly_linear_dataset(self.filtered_sale_rows, "Saida")

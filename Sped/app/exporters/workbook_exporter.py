@@ -2,9 +2,135 @@ from __future__ import annotations
 
 import csv
 import datetime as dt
+import io
+import sys
+import zipfile as _zipmod
 from decimal import Decimal
 from pathlib import Path
 from zipfile import ZIP_DEFLATED, ZipFile
+
+# ── Logo DZ Consultoria ───────────────────────────────────────────────────────
+def _get_logo_path() -> Path | None:
+    if getattr(sys, "frozen", False):
+        p = Path(sys.executable).parent / "assets" / "logo.png"
+    else:
+        p = Path(__file__).parent.parent.parent / "assets" / "logo.png"
+    return p if p.exists() else None
+
+_LOGO_PATH_XLSX: Path | None = _get_logo_path()
+
+# Dimensões da logo na planilha: 5cm × 3.63cm → EMU (1 cm = 360000 EMU)
+_LOGO_EMU_CX = 1800000
+_LOGO_EMU_CY = 1308000
+
+
+def _inject_logo_xlsx(xlsx_path: Path) -> None:
+    """Insere a logo DZ na primeira planilha do XLSX gerado, sem alterar o conteúdo."""
+    if not _LOGO_PATH_XLSX:
+        return
+    try:
+        logo_bytes = _LOGO_PATH_XLSX.read_bytes()
+
+        with _zipmod.ZipFile(xlsx_path, "r") as zin:
+            entries: dict[str, bytes] = {n: zin.read(n) for n in zin.namelist()}
+
+        sheet_key = "xl/worksheets/sheet1.xml"
+        if sheet_key not in entries:
+            return
+
+        # Adiciona xmlns:r no <worksheet> se ainda não existir
+        sheet_xml = entries[sheet_key].decode("utf-8")
+        if "xmlns:r=" not in sheet_xml:
+            sheet_xml = sheet_xml.replace(
+                "<worksheet ",
+                '<worksheet xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" ',
+                1,
+            )
+        # Insere referência ao drawing antes de </worksheet>
+        if "<drawing" not in sheet_xml:
+            sheet_xml = sheet_xml.replace("</worksheet>", '<drawing r:id="rId1"/></worksheet>', 1)
+        entries[sheet_key] = sheet_xml.encode("utf-8")
+
+        # xl/worksheets/_rels/sheet1.xml.rels
+        sheet_rels_key = "xl/worksheets/_rels/sheet1.xml.rels"
+        if sheet_rels_key in entries:
+            rels_xml = entries[sheet_rels_key].decode("utf-8")
+            new_rel = (
+                '<Relationship Id="rId1"'
+                ' Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/drawing"'
+                ' Target="../drawings/drawing1.xml"/>'
+            )
+            rels_xml = rels_xml.replace("</Relationships>", new_rel + "</Relationships>", 1)
+            entries[sheet_rels_key] = rels_xml.encode("utf-8")
+        else:
+            entries[sheet_rels_key] = (
+                '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+                '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+                '<Relationship Id="rId1"'
+                ' Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/drawing"'
+                ' Target="../drawings/drawing1.xml"/>'
+                "</Relationships>"
+            ).encode("utf-8")
+
+        # [Content_Types].xml — adiciona PNG e drawing
+        ct_key = "[Content_Types].xml"
+        if ct_key in entries:
+            ct_xml = entries[ct_key].decode("utf-8")
+            if 'Extension="png"' not in ct_xml:
+                ct_xml = ct_xml.replace("</Types>", '<Default Extension="png" ContentType="image/png"/></Types>', 1)
+            if "xl/drawings/drawing1.xml" not in ct_xml:
+                ct_xml = ct_xml.replace(
+                    "</Types>",
+                    '<Override PartName="/xl/drawings/drawing1.xml"'
+                    ' ContentType="application/vnd.openxmlformats-officedocument.drawing+xml"/></Types>',
+                    1,
+                )
+            entries[ct_key] = ct_xml.encode("utf-8")
+
+        # xl/drawings/drawing1.xml
+        drawing_xml = (
+            '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+            '<xdr:wsDr xmlns:xdr="http://schemas.openxmlformats.org/drawingml/2006/spreadsheetDrawing"'
+            ' xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"'
+            ' xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">'
+            "<xdr:oneCellAnchor>"
+            "<xdr:from><xdr:col>0</xdr:col><xdr:colOff>0</xdr:colOff>"
+            "<xdr:row>0</xdr:row><xdr:rowOff>0</xdr:rowOff></xdr:from>"
+            f"<xdr:ext cx=\"{_LOGO_EMU_CX}\" cy=\"{_LOGO_EMU_CY}\"/>"
+            "<xdr:pic>"
+            '<xdr:nvPicPr><xdr:cNvPr id="2" name="Logo DZ"/><xdr:cNvPicPr/></xdr:nvPicPr>'
+            '<xdr:blipFill><a:blip r:embed="rId1"/>'
+            "<a:stretch><a:fillRect/></a:stretch></xdr:blipFill>"
+            "<xdr:spPr>"
+            f'<a:xfrm><a:off x="0" y="0"/><a:ext cx="{_LOGO_EMU_CX}" cy="{_LOGO_EMU_CY}"/></a:xfrm>'
+            '<a:prstGeom prst="rect"><a:avLst/></a:prstGeom>'
+            "</xdr:spPr>"
+            "</xdr:pic>"
+            "<xdr:clientData/>"
+            "</xdr:oneCellAnchor>"
+            "</xdr:wsDr>"
+        )
+        drawing_rels = (
+            '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+            '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+            '<Relationship Id="rId1"'
+            ' Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image"'
+            ' Target="../media/logo.png"/>'
+            "</Relationships>"
+        )
+        entries["xl/media/logo.png"] = logo_bytes
+        entries["xl/drawings/drawing1.xml"] = drawing_xml.encode("utf-8")
+        entries["xl/drawings/_rels/drawing1.xml.rels"] = drawing_rels.encode("utf-8")
+
+        buf = io.BytesIO()
+        with _zipmod.ZipFile(buf, "w", compression=ZIP_DEFLATED) as zout:
+            for name, data in entries.items():
+                zout.writestr(name, data)
+        xlsx_path.write_bytes(buf.getvalue())
+
+    except Exception:
+        pass  # logo é opcional; não deve quebrar a exportação
+
 
 from app.exporters.excel_base import (
     EXCEL_STYLE_HEADER,
@@ -137,6 +263,8 @@ def write_simple_excel_workbook(
                 f"xl/worksheets/sheet{index}.xml",
                 build_sheet_xml(headers, rows, row_style_ids=row_style_ids),
             )
+
+    _inject_logo_xlsx(output_path)
 
 
 def build_month_color_style_maps(
@@ -281,6 +409,8 @@ def write_monthly_colored_excel_workbook_with_sheets(
                 f"xl/worksheets/sheet{index}.xml",
                 build_sheet_xml(headers, rows, header_style_ids, row_style_ids),
             )
+
+    _inject_logo_xlsx(output_path)
 
 
 def write_simple_csv_file(
