@@ -1637,7 +1637,7 @@ class MysqlCadastroRepository:
             connection.close()
 
     def get_catalog_products_by_empresa_id(self, empresa_id: int) -> list[dict]:
-        """Retorna produtos do catálogo de uma empresa (por empresa_id, não CNPJ)."""
+        """Retorna produtos do catálogo de uma empresa incluindo campos fiscais."""
         connection = self.get_connection()
         try:
             cursor = connection.cursor(dictionary=True)
@@ -1645,7 +1645,13 @@ class MysqlCadastroRepository:
                 """
                 SELECT p.id, p.fornecedor_id, p.codigo_fornecedor, p.codigo_empresa,
                        p.descricao, p.ean, p.ncm,
-                       f.nome AS fornecedor_nome
+                       p.cfop_saida_fornecedor, p.origem_entrada,
+                       p.cst_icms, p.aliquota_icms, p.reducao_bc_icms,
+                       p.mva, p.valor_icms_st, p.aliquota_icms_st,
+                       p.cst_pis,  p.aliquota_pis,
+                       p.cst_cofins, p.aliquota_cofins,
+                       f.nome AS fornecedor_nome,
+                       f.cnpj AS fornecedor_cnpj
                 FROM cad_produtos_fornecedor p
                 JOIN cad_fornecedores f ON f.id = p.fornecedor_id
                 WHERE f.empresa_id = %s
@@ -1653,6 +1659,30 @@ class MysqlCadastroRepository:
                 (empresa_id,),
             )
             return cursor.fetchall() or []
+        finally:
+            connection.close()
+
+    def update_produto_campos_xml(self, product_id: int, fields: dict) -> None:
+        """Atualiza campos fiscais de um produto via dados do XML (lista branca de colunas)."""
+        _ALLOWED = frozenset({
+            "cfop_saida_fornecedor", "origem_entrada",
+            "cst_icms", "aliquota_icms", "reducao_bc_icms",
+            "mva", "valor_icms_st", "aliquota_icms_st",
+            "cst_pis",  "aliquota_pis",
+            "cst_cofins", "aliquota_cofins",
+        })
+        to_set = {k: v for k, v in fields.items() if k in _ALLOWED}
+        if not to_set:
+            return
+        set_clause = ", ".join(f"{k} = %s" for k in to_set)
+        connection = self.get_connection()
+        try:
+            cursor = connection.cursor()
+            cursor.execute(
+                f"UPDATE cad_produtos_fornecedor SET {set_clause} WHERE id = %s",
+                (*to_set.values(), product_id),
+            )
+            connection.commit()
         finally:
             connection.close()
 
